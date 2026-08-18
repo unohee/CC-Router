@@ -13,6 +13,14 @@ export function logRoute(accountId: string, requestCount: number, expiresInMin: 
   );
 }
 
+export function logFallback(accountId: string, model: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.magenta(` ⇄ FALLBACK → ${accountId}`) +
+    chalk.gray(` (Anthropic exhausted, model=${model})`)
+  );
+}
+
 export function logRefresh(accountId: string, ok: boolean, expiresInMin?: number): void {
   if (ok) {
     console.log(chalk.yellow(`[${ts()}] [REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));

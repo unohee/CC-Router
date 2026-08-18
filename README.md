@@ -455,6 +455,31 @@ This prompts for the OpenAI access token, refresh token, expiry timestamp, and s
 
 ---
 
+## Automatic fallback to OpenAI (opt-in)
+
+CC-Router can automatically reroute a Claude Code request to a healthy OpenAI subscription account when every configured Claude account is rate-limited, unhealthy, or over its cap — instead of degrading to a capped/busy Claude account as it does by default. This is **off by default**: most users of this tool won't have OpenAI accounts configured, and nobody should get a silent model swap without opting in.
+
+Requirements:
+
+- At least one OpenAI subscription account (`cc-router accounts login-openai`)
+- An OpenAI default model configured (`cc-router configure models --openai-model gpt-5-codex`)
+
+Enable it:
+
+```bash
+cc-router configure --enable-fallback
+```
+
+When it triggers, the console prints a distinct `FALLBACK` log line, and the event appears in `/cc-router/health`'s recent activity. If no OpenAI account is available either, the request proceeds through the normal (possibly degraded) Claude flow exactly as it did before this feature existed — a fallback attempt never turns into a hard failure.
+
+Disable it:
+
+```bash
+cc-router configure --disable-fallback
+```
+
+---
+
 ## Client mode — connecting to an existing CC-Router
 
 If someone on your team already hosts a CC-Router instance (on a VPS, home server, or another machine on the LAN), you don't need to install accounts locally. You just point your Claude Code at the remote proxy.

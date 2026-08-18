@@ -409,3 +409,71 @@ describe("TokenPool — user caps", () => {
     expect(bypassed!.id).toBe("a");
   });
 });
+
+describe("TokenPool — hasAvailableAccount", () => {
+  it("returns false for an empty pool without throwing", () => {
+    const pool = new TokenPool([]);
+    expect(() => pool.hasAvailableAccount()).not.toThrow();
+    expect(pool.hasAvailableAccount()).toBe(false);
+  });
+
+  it("returns true when at least one account is healthy and idle", () => {
+    const pool = new TokenPool([makeAccount("a"), makeAccount("b")]);
+    expect(pool.hasAvailableAccount()).toBe(true);
+  });
+
+  it("returns false when all accounts are busy", () => {
+    const pool = new TokenPool([makeAccount("a", true, true), makeAccount("b", true, true)]);
+    expect(pool.hasAvailableAccount()).toBe(false);
+  });
+
+  it("returns false when all accounts are rate_limited (reset still in the future)", () => {
+    const a = makeAccount("a");
+    const b = makeAccount("b");
+    const futureSec = Math.floor(Date.now() / 1000) + 3600;
+    const limited = { ...DEFAULT_RATE_LIMITS, status: "rate_limited" as const, claim: "five_hour" as const, fiveHourReset: futureSec };
+    a.rateLimits = { ...limited };
+    b.rateLimits = { ...limited };
+    const pool = new TokenPool([a, b]);
+    expect(pool.hasAvailableAccount()).toBe(false);
+  });
+
+  it("returns false when all accounts are over their user-configured cap", () => {
+    const a = makeAccount("a");
+    a.sessionLimitPercent = 50;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, fiveHourUtil: 0.9 };
+    const pool = new TokenPool([a]);
+    expect(pool.hasAvailableAccount()).toBe(false);
+  });
+
+  it("returns true when only some accounts are unavailable (mixed)", () => {
+    const busy = makeAccount("a", true, true);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const limited = makeAccount("b");
+    limited.rateLimits = { ...DEFAULT_RATE_LIMITS, status: "rate_limited", claim: "five_hour", fiveHourReset: nowSec + 3600 };
+    const idle = makeAccount("c");
+    const pool = new TokenPool([busy, limited, idle]);
+    expect(pool.hasAvailableAccount()).toBe(true);
+  });
+
+  it("sweeps expired cooldowns before checking, same as getNext()", () => {
+    const a = makeAccount("a");
+    const pastSec = Math.floor(Date.now() / 1000) - 1;
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS, status: "rate_limited", claim: "five_hour", fiveHourReset: pastSec };
+    const pool = new TokenPool([a]);
+    expect(pool.hasAvailableAccount()).toBe(true);
+    expect(a.rateLimits.status).toBe("allowed");
+  });
+
+  it("never mutates requestCount, lastUsed, or round-robin position", () => {
+    const accounts = [makeAccount("a"), makeAccount("b")];
+    const pool = new TokenPool(accounts);
+    pool.hasAvailableAccount();
+    pool.hasAvailableAccount();
+    pool.hasAvailableAccount();
+    expect(accounts[0].requestCount).toBe(0);
+    expect(accounts[0].lastUsed).toBe(0);
+    // Round-robin cursor must be untouched — first getNext() still returns "a".
+    expect(pool.getNext().id).toBe("a");
+  });
+});

@@ -22,6 +22,8 @@ export function registerConfigure(program: Command): void {
     .option("--remove-password", "Remove proxy password protection (open access)")
     .option("--enable-auto-update", "Enable automatic updates for the proxy")
     .option("--disable-auto-update", "Disable automatic updates for the proxy")
+    .option("--enable-fallback", "Enable automatic fallback to OpenAI when all Claude accounts are exhausted")
+    .option("--disable-fallback", "Disable automatic cross-provider fallback")
     .action((target: string | undefined, opts: {
       remove?: boolean;
       port: string;
@@ -34,6 +36,8 @@ export function registerConfigure(program: Command): void {
       removePassword?: boolean;
       enableAutoUpdate?: boolean;
       disableAutoUpdate?: boolean;
+      enableFallback?: boolean;
+      disableFallback?: boolean;
     }) => {
       if (target === "codex") {
         const port = parseInt(opts.port, 10);
@@ -88,8 +92,11 @@ export function registerConfigure(program: Command): void {
         const pwStatus = cfg.proxySecret ? chalk.green("yes") : chalk.gray("no");
         const autoUpdateEnabled = cfg.autoUpdate !== false;
         const auStatus = autoUpdateEnabled ? chalk.green("enabled") : chalk.gray("disabled");
+        const fallbackEnabled = cfg.crossProviderFallback === true;
+        const fbStatus = fallbackEnabled ? chalk.green("enabled") : chalk.gray("disabled");
         console.log(`    Password protected:  ${pwStatus}`);
         console.log(`    Auto-update:         ${auStatus}`);
+        console.log(`    Cross-provider fallback: ${fbStatus}`);
         return;
       }
 
@@ -105,6 +112,28 @@ export function registerConfigure(program: Command): void {
         writeConfig({ ...readConfig(), autoUpdate: false });
         console.log(chalk.green("✓ Auto-update disabled."));
         console.log(chalk.gray("  Use `cc-router update` to update manually."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableFallback) {
+        const cfg = readConfig();
+        if (!cfg.modelRouting?.openAIDefaultModel) {
+          console.log(chalk.yellow("⚠ No OpenAI default model configured yet."));
+          console.log(chalk.gray("  Run: cc-router configure models --openai-model <model>"));
+          console.log(chalk.gray("  Fallback will stay inactive until an OpenAI default model is set."));
+        }
+        writeConfig({ ...cfg, crossProviderFallback: true });
+        console.log(chalk.green("✓ Cross-provider fallback enabled."));
+        console.log(chalk.gray("  When every Claude account is rate-limited/unhealthy, a request will"));
+        console.log(chalk.gray("  be routed to a healthy OpenAI subscription account instead."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableFallback) {
+        writeConfig({ ...readConfig(), crossProviderFallback: false });
+        console.log(chalk.green("✓ Cross-provider fallback disabled."));
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

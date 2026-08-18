@@ -24,6 +24,83 @@ export interface MessagesCrossProviderRouteOptions {
   prepareOpenAIAccount?: (account: OpenAISubscriptionAccount) => Promise<boolean>;
   forwardOpenAI?: ForwardOpenAI;
   modelRouting?: ModelRoutingConfig;
+  /** Opt-in: when true, exhausted Anthropic capacity triggers automatic OpenAI fallback. Default false. */
+  crossProviderFallback?: boolean;
+  /** Point-in-time Anthropic-pool availability check (TokenPool.hasAvailableAccount). Required when crossProviderFallback is true. */
+  hasAvailableAnthropicAccount?: () => boolean;
+  /** Fired after a successful automatic fallback so the caller can log/record it. */
+  onFallback?: (info: { openAIAccountId: string; upstreamModel: string }) => void;
+}
+
+type OpenAIForwardOutcome =
+  | { ok: true; account: OpenAISubscriptionAccount }
+  | { ok: false; reason: "no_account" | "prepare_failed" | "request_failed" };
+
+/**
+ * Shared account-select -> prepare -> translate -> forward -> translate-back
+ * pipeline, used by both the explicit `openai/*` route and the automatic
+ * cross-provider fallback below. Never throws; failures are reported via the
+ * returned outcome so callers can decide how to react (hard error vs. silent
+ * fall-through).
+ *
+ * Everything from account preparation onward is wrapped in try/catch: token
+ * refresh (`prepareOpenAIAccount`) and the forward/translate step both do
+ * real network I/O with no internal try/catch of their own, so either can
+ * throw (DNS failure, connection reset, timeout) rather than resolving to
+ * `false`. That must not become an unhandled rejection — the fallback
+ * caller's whole "never worse than the degraded Anthropic path" guarantee
+ * depends on this function always resolving. If the error happens after
+ * `res` already started being written (mid-stream), there is nothing safe
+ * left to do — writing anything more, including a further response via
+ * `next()`, would corrupt the response — so that case is reported as
+ * handled (`ok: true`) rather than a failure the caller could act on.
+ *
+ * `passThroughUpstreamErrors` controls what happens when OpenAI itself
+ * responds with a non-2xx status (429, 500, ...) — a real HTTP response, not
+ * a thrown error. The explicit `openai/*` route passes `true`: the user
+ * asked for OpenAI specifically, so its error should be surfaced as-is, same
+ * as the main Anthropic proxy does for Anthropic errors. The automatic
+ * fallback route passes `false`: an OpenAI error there must count as "OpenAI
+ * unavailable too" and fall through to the degraded Anthropic path, not be
+ * written to the client as if the fallback had succeeded.
+ */
+async function forwardAnthropicRequestAsOpenAI(
+  reqBody: AnthropicMessagesRequest,
+  res: Response,
+  requestedStream: boolean,
+  getOpenAIAccount: () => OpenAISubscriptionAccount | null,
+  prepareOpenAIAccount: (account: OpenAISubscriptionAccount) => Promise<boolean>,
+  forwardOpenAI: ForwardOpenAI,
+  modelRouting: ModelRoutingConfig | undefined,
+  passThroughUpstreamErrors: boolean,
+): Promise<OpenAIForwardOutcome> {
+  const account = getOpenAIAccount();
+  if (!account) return { ok: false, reason: "no_account" };
+
+  try {
+    const ready = await prepareOpenAIAccount(account);
+    if (!ready) return { ok: false, reason: "prepare_failed" };
+
+    const body = anthropicToOpenAIResponses(reqBody, modelRouting);
+    const upstream = await forwardOpenAI({
+      account,
+      body,
+      stream: body.stream === true,
+    });
+
+    if (!upstream.ok && !passThroughUpstreamErrors) {
+      return { ok: false, reason: "request_failed" };
+    }
+
+    await sendOpenAIAsAnthropic(upstream, res, requestedStream);
+    return { ok: true, account };
+  } catch (err) {
+    if (res.headersSent) {
+      console.error(`[cross-route] OpenAI request to "${account.id}" failed after the response had already started: ${(err as Error).message}`);
+      return { ok: true, account };
+    }
+    return { ok: false, reason: "request_failed" };
+  }
 }
 
 function isAnthropicMessagesRequest(value: unknown): value is AnthropicMessagesRequest {
@@ -202,42 +279,70 @@ export function mountMessagesCrossProviderRoute(
       }
 
       const route = selectRoute(req.body.model, opts.modelRouting);
-      if (route.provider !== "openai_subscription") {
-        next();
+      const requestedStream = req.body.stream === true;
+
+      if (route.provider === "openai_subscription") {
+        const outcome = await forwardAnthropicRequestAsOpenAI(
+          req.body, res, requestedStream,
+          opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
+          /* passThroughUpstreamErrors */ true,
+        );
+        if (!outcome.ok) {
+          if (outcome.reason === "no_account") {
+            res.status(503).json({
+              type: "error",
+              error: {
+                type: "no_accounts",
+                message: "No OpenAI subscription accounts are configured",
+              },
+            });
+          } else if (outcome.reason === "prepare_failed") {
+            res.status(401).json({
+              type: "error",
+              error: {
+                type: "authentication_error",
+                message: "OpenAI subscription token refresh failed",
+              },
+            });
+          } else {
+            res.status(502).json({
+              type: "error",
+              error: {
+                type: "api_error",
+                message: "OpenAI subscription request failed",
+              },
+            });
+          }
+        }
         return;
       }
 
-      const account = opts.getOpenAIAccount();
-      if (!account) {
-        res.status(503).json({
-          type: "error",
-          error: {
-            type: "no_accounts",
-            message: "No OpenAI subscription accounts are configured",
-          },
-        });
-        return;
+      // route.provider === "anthropic_subscription" — bare/anthropic model name.
+      // Opt-in automatic fallback: only consider it when every Anthropic account
+      // is currently exhausted AND an OpenAI default model is actually configured
+      // (otherwise "openai/default" would resolve to the literal string "default"
+      // and go out as a bogus upstream model). Any failure here is silent — this
+      // must never turn into a harder failure than the degraded Anthropic path
+      // the request would have taken anyway.
+      const openAIDefaultModel = opts.modelRouting?.openAIDefaultModel?.trim();
+      const anthropicExhausted =
+        opts.crossProviderFallback === true &&
+        opts.hasAvailableAnthropicAccount?.() === false;
+
+      if (anthropicExhausted && openAIDefaultModel) {
+        const outcome = await forwardAnthropicRequestAsOpenAI(
+          { ...req.body, model: "openai/default" }, res, requestedStream,
+          opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
+          /* passThroughUpstreamErrors */ false,
+        );
+        if (outcome.ok) {
+          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: openAIDefaultModel });
+          return;
+        }
+        // OpenAI unavailable too — fall through to the normal (degraded) Anthropic path.
       }
 
-      const ready = await prepareOpenAIAccount(account);
-      if (!ready) {
-        res.status(401).json({
-          type: "error",
-          error: {
-            type: "authentication_error",
-            message: "OpenAI subscription token refresh failed",
-          },
-        });
-        return;
-      }
-
-      const body = anthropicToOpenAIResponses(req.body, opts.modelRouting);
-      const upstream = await forwardOpenAI({
-        account,
-        body,
-        stream: body.stream === true,
-      });
-      await sendOpenAIAsAnthropic(upstream, res, req.body.stream === true);
+      next();
     },
   );
 }

@@ -190,6 +190,10 @@ export interface ProxyConfig {
   autoUpdate?: boolean;
   /** Default and alias model routing for Claude and OpenAI subscription providers. */
   modelRouting?: ModelRoutingConfig;
+  /** Opt-in automatic fallback: when every Anthropic account is exhausted, reroute
+   *  a /v1/messages request to a healthy OpenAI subscription account instead of
+   *  degrading. Requires modelRouting.openAIDefaultModel to be set. Default: false (disabled). */
+  crossProviderFallback?: boolean;
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
   /** Run preferences — asked once on first start, reused on subsequent starts */

@@ -11,7 +11,7 @@ import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExist
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -594,6 +594,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     getOpenAIAccount: pickOpenAIAccount,
     prepareOpenAIAccount: (account) => prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts),
     modelRouting,
+    crossProviderFallback: initialConfig.crossProviderFallback === true,
+    hasAvailableAnthropicAccount: () => pool.hasAvailableAccount(),
+    onFallback: ({ openAIAccountId, upstreamModel }) => {
+      const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
+      logFallback(openAIAccountId, upstreamModel);
+      stats.addLog({ ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg });
+    },
   });
 
   // ─── Proxy middleware ──────────────────────────────────────────────────────
@@ -664,6 +671,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         pendingLog.statusCode = status;
         if (durationMs !== undefined) pendingLog.durationMs = durationMs;
 
+        // Extract rate-limit headers BEFORE branching on status — the 429
+        // branch below needs `rl.claim` (which window Anthropic says is
+        // actually limiting: "five_hour" vs "seven_day") to explain WHY the
+        // account got rate-limited, not just that it did.
+        const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
+        if (rl) account.rateLimits = rl;
+
         if (status === 401) {
           // Token invalid or expired mid-request.
           // Forward the 401 to the client (Claude Code will retry on 401).
@@ -682,9 +696,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           stats.totalErrors++;
           account.errorCount++;
           const retryAfter = Number(proxyRes.headers["retry-after"] ?? 60);
+          const windowLabel = rl?.claim === "five_hour" ? "5-hour limit"
+            : rl?.claim === "seven_day" ? "weekly limit"
+            : null;
+          const reason = windowLabel ? `rate limited (${windowLabel})` : "rate limited";
           pendingLog.type = "error";
-          pendingLog.details = `rate limited — cooldown ${retryAfter}s`;
-          logError(account.id, 429, `Rate limited — cooldown ${retryAfter}s`);
+          pendingLog.details = `${reason} — cooldown ${retryAfter}s`;
+          logError(account.id, 429, `${reason} — cooldown ${retryAfter}s`);
 
           account.busy = true;
           setTimeout(() => { account.busy = false; }, retryAfter * 1_000);
@@ -699,10 +717,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           account.busy = true;
           setTimeout(() => { account.busy = false; }, 30_000);
         }
-
-        // ── Capture rate limit utilization from response headers ────────────
-        const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
-        if (rl) account.rateLimits = rl;
 
         const entry = pendingLog as LogEntry;
         stats.addLog(entry);

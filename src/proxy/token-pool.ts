@@ -140,12 +140,7 @@ export class TokenPool {
     // whose reset window has passed would never re-enter rotation.
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
 
-    const available = this.accounts.filter(a =>
-      a.healthy &&
-      !a.busy &&
-      a.rateLimits.status !== "rate_limited" &&
-      isUsable(a)
-    );
+    const available = this.accounts.filter(a => this.isAvailable(a));
 
     if (available.length === 0) {
       const healthyUsable = this.accounts.filter(a => a.healthy && isUsable(a));
@@ -178,6 +173,11 @@ export class TokenPool {
     return account;
   }
 
+  /** Same predicate `getNext()` uses for its primary (non-degraded) tier. */
+  private isAvailable(a: Account): boolean {
+    return a.healthy && !a.busy && a.rateLimits.status !== "rate_limited" && isUsable(a);
+  }
+
   /** Optional listener fired when a request is routed to a capped account
    *  because every account in the pool was over its user-configured cap. */
   public onCapBypass?: (account: Account) => void;
@@ -193,6 +193,19 @@ export class TokenPool {
    */
   sweepExpiredCooldowns(): void {
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
+  }
+
+  /**
+   * Point-in-time check: true if at least one account is immediately usable
+   * (same predicate as getNext()'s primary tier — healthy, not busy, not
+   * rate-limited, enabled, under user caps). Unlike getNext(), this never
+   * mutates requestCount/lastUsed/currentIndex and never throws on an empty
+   * pool (returns false instead) — safe to call speculatively on every
+   * request to decide whether to consider cross-provider fallback.
+   */
+  hasAvailableAccount(): boolean {
+    for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
+    return this.accounts.some(a => this.isAvailable(a));
   }
 
   getAll(): Account[] {
