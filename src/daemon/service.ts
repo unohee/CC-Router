@@ -6,6 +6,7 @@ import { dirname, join } from "path";
 import os from "os";
 import chalk from "chalk";
 import { LOG_PATH } from "../config/paths.js";
+import { readConfig } from "../config/manager.js";
 import { detectPlatform } from "../utils/platform.js";
 
 const execFileAsync = promisify(execFile);
@@ -54,24 +55,43 @@ export function isServiceInstalled(): boolean {
 
 // ─── macOS LaunchAgent ───────────────────────────────────────────────────────
 
+/**
+ * Environment for the managed process, as plist <key>/<string> pairs.
+ *
+ * `CC_ROUTER_NO_AUTO_UPDATE` is written whenever auto-update is off in config.
+ * The config flag alone already silences both update paths, but the service
+ * outlives the config: anything that rewrites `config.json` (a re-run of the
+ * setup wizard, `cc-router configure`) silently re-arms an unattended
+ * `npm i -g`, which replaces a linked development checkout with the published
+ * build. Pinning the intent into the plist keeps the switch off across that.
+ */
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function managedEnvEntries(serverMode: boolean): Array<[string, string]> {
+  const entries: Array<[string, string]> = [
+    ["PATH", process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"],
+    ["CC_ROUTER_SERVICE", "1"],
+  ];
+  if (serverMode) entries.push(["HOST", "0.0.0.0"]);
+  if (readConfig().autoUpdate === false) entries.push(["CC_ROUTER_NO_AUTO_UPDATE", "1"]);
+  return entries;
+}
+
+export function buildEnvironment(serverMode: boolean): string {
+  const pairs = managedEnvEntries(serverMode)
+    .map(([key, value]) => `      <key>${escapeXml(key)}</key>\n      <string>${escapeXml(value)}</string>`)
+    .join("\n");
+
+  return `    <key>EnvironmentVariables</key>\n    <dict>\n${pairs}\n    </dict>`;
+}
+
 function buildPlist(serverMode: boolean): string {
-  const envVars = serverMode
-    ? `    <key>EnvironmentVariables</key>
-    <dict>
-      <key>PATH</key>
-      <string>${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}</string>
-      <key>HOST</key>
-      <string>0.0.0.0</string>
-      <key>CC_ROUTER_SERVICE</key>
-      <string>1</string>
-    </dict>`
-    : `    <key>EnvironmentVariables</key>
-    <dict>
-      <key>PATH</key>
-      <string>${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}</string>
-      <key>CC_ROUTER_SERVICE</key>
-      <string>1</string>
-    </dict>`;
+  const envVars = buildEnvironment(serverMode);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -157,10 +177,10 @@ async function launchctlUnload(): Promise<void> {
 
 // ─── Linux systemd user service ──────────────────────────────────────────────
 
-function buildSystemdUnit(serverMode: boolean): string {
-  const envLine = serverMode
-    ? `Environment=PATH=${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}\nEnvironment=HOST=0.0.0.0\nEnvironment=CC_ROUTER_SERVICE=1`
-    : `Environment=PATH=${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}\nEnvironment=CC_ROUTER_SERVICE=1`;
+export function buildSystemdUnit(serverMode: boolean): string {
+  const envLine = managedEnvEntries(serverMode)
+    .map(([key, value]) => `Environment=${key}=${value}`)
+    .join("\n");
 
   return `[Unit]
 Description=CC-Router — round-robin proxy for Claude Max
@@ -220,10 +240,19 @@ function buildWindowsCommand(): string {
   return `"${process.execPath}" "${CLI_ENTRY}" start --foreground`;
 }
 
+/** PATH is omitted: the Run key inherits the ambient one, and pinning a
+ *  snapshot of it would outlive any later toolchain change. */
+export function buildWindowsRunCommand(serverMode: boolean): string {
+  const sets = managedEnvEntries(serverMode)
+    .filter(([key]) => key !== "PATH")
+    .map(([key, value]) => `set ${key}=${value} && `)
+    .join("");
+
+  return `cmd /c "${sets}${buildWindowsCommand()}"`;
+}
+
 async function installWindows(serverMode: boolean): Promise<void> {
-  const cmd = serverMode
-    ? `cmd /c "set HOST=0.0.0.0 && set CC_ROUTER_SERVICE=1 && ${buildWindowsCommand()}"`
-    : `cmd /c "set CC_ROUTER_SERVICE=1 && ${buildWindowsCommand()}"`;
+  const cmd = buildWindowsRunCommand(serverMode);
 
   try {
     await execFileAsync("reg", [
