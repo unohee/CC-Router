@@ -21,12 +21,20 @@ export function getCurrentVersion(): string {
 }
 
 /** Simple semver diff: returns "major" | "minor" | "patch" | null */
-function semverDiff(current: string, latest: string): "major" | "minor" | "patch" | null {
+/**
+ * How far ahead `latest` is of `current` — null when it is equal or BEHIND.
+ *
+ * Each position must short-circuit on inequality. The previous per-digit
+ * fall-through compared positions independently, so a registry 0.6.2 read as
+ * a "patch" upgrade over a local 0.7.0 (2 > 0 in the last slot) — and the
+ * start-time updater then downgraded a dev build over its own npm link.
+ */
+export function semverDiff(current: string, latest: string): "major" | "minor" | "patch" | null {
   const c = current.split(".").map(Number);
   const l = latest.split(".").map(Number);
-  if (l[0] > c[0]) return "major";
-  if (l[1] > c[1]) return "minor";
-  if (l[2] > c[2]) return "patch";
+  if (l[0] !== c[0]) return l[0] > c[0] ? "major" : null;
+  if (l[1] !== c[1]) return l[1] > c[1] ? "minor" : null;
+  if (l[2] !== c[2]) return l[2] > c[2] ? "patch" : null;
   return null;
 }
 

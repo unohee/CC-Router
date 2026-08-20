@@ -223,6 +223,12 @@ async function ensureClaudeCodeConfigured(
 // ─── Update check ────────────────────────────────────────────────────────────
 
 async function maybeUpdate(): Promise<void> {
+  // `cc-router configure --disable-auto-update` must silence this path too.
+  // It previously governed only the server's 6-hour loop, so start kept
+  // offering (and with the confirm defaulting to yes, performing) installs
+  // the operator had explicitly turned off.
+  if (readConfig().autoUpdate === false || process.env["CC_ROUTER_NO_AUTO_UPDATE"] === "1") return;
+
   let check;
   try {
     check = await checkForUpdate(true);  // force fresh check, skip disk cache
