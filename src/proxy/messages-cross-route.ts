@@ -1,6 +1,7 @@
 import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { selectRoute } from "../providers/route-selector.js";
+import { openAIModelForClaudeModel } from "../protocol/model-ref.js";
 import { anthropicToOpenAIResponses } from "../protocol/anthropic-to-openai.js";
 import { openAIResponseToAnthropicMessage } from "../protocol/openai-response-to-anthropic.js";
 import { createOpenAIStreamToAnthropicNormalizer } from "../protocol/openai-stream-to-anthropic.js";
@@ -374,13 +375,17 @@ export function mountMessagesCrossProviderRoute(
       }
 
       // route.provider === "anthropic_subscription" — bare/anthropic model name.
-      // Opt-in automatic fallback: only consider it when every Anthropic account
-      // is currently exhausted AND an OpenAI default model is actually configured
-      // (otherwise "openai/default" would resolve to the literal string "default"
-      // and go out as a bogus upstream model). Any failure here is silent — this
-      // must never turn into a harder failure than the degraded Anthropic path
-      // the request would have taken anyway.
+      //
+      // `openAIDefaultModel` gates cross-provider routing: without it configured
+      // there is no sanctioned OpenAI target, and the request stays on Anthropic.
+      // The model actually sent preserves the request's tier, so an opus request
+      // is not answered by the model chosen for sonnet; unrecognised Claude names
+      // fall back to the configured default. Any failure below is silent — it
+      // must never be a harder failure than the degraded Anthropic path the
+      // request would have taken anyway.
       const openAIDefaultModel = opts.modelRouting?.openAIDefaultModel?.trim();
+      const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting)
+        ?? openAIDefaultModel;
 
       // Session affinity. Resolved once here and stashed on the request so the
       // Anthropic proxy downstream reuses the same decision rather than
@@ -395,9 +400,9 @@ export function mountMessagesCrossProviderRoute(
       // go there too — that is what keeps a conversation on one provider
       // instead of alternating models mid-thread. A failure here is silent and
       // falls through to Anthropic, same as the fallback path below.
-      if (sessionTarget?.provider === "openai" && openAIDefaultModel) {
+      if (sessionTarget?.provider === "openai" && openAIDefaultModel && tieredModel) {
         const outcome = await forwardAnthropicRequestAsOpenAI(
-          { ...req.body, model: "openai/default" }, res, requestedStream,
+          { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
           sessionTarget.accountId,
@@ -406,7 +411,7 @@ export function mountMessagesCrossProviderRoute(
           opts.onSessionRoute?.({
             sessionId,
             openAIAccountId: outcome.account.id,
-            upstreamModel: openAIDefaultModel,
+            upstreamModel: tieredModel,
           });
           return;
         }
@@ -416,14 +421,14 @@ export function mountMessagesCrossProviderRoute(
         opts.crossProviderFallback === true &&
         opts.hasAvailableAnthropicAccount?.() === false;
 
-      if (anthropicExhausted && openAIDefaultModel) {
+      if (anthropicExhausted && openAIDefaultModel && tieredModel) {
         const outcome = await forwardAnthropicRequestAsOpenAI(
-          { ...req.body, model: "openai/default" }, res, requestedStream,
+          { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
         );
         if (outcome.ok) {
-          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: openAIDefaultModel });
+          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: tieredModel });
           return;
         }
         // OpenAI unavailable too — fall through to the normal (degraded) Anthropic path.

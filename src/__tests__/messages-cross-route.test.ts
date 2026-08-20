@@ -856,7 +856,55 @@ describe("mountMessagesCrossProviderRoute", () => {
       });
     });
 
-    it("routes to OpenAI with the model overridden to the configured default when Anthropic is exhausted", async () => {
+    it("preserves the request's tier when routing to OpenAI", async () => {
+      const seen: Array<{ requested: string; sent: string }> = [];
+      const app = express();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => ({
+          id: "codex", provider: "openai_subscription", accessToken: "a",
+          refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+        }),
+        modelRouting: {
+          openAIDefaultModel: "gpt-5-codex",
+          openAITierMap: { opus: "gpt-5.6-sol", sonnet: "gpt-5.6-terra", haiku: "gpt-5.6-luna" },
+        },
+        crossProviderFallback: true,
+        hasAvailableAnthropicAccount: () => false,
+        forwardOpenAI: async ({ body }) => {
+          seen.push({ requested: "", sent: body.model });
+          return new Response(JSON.stringify({
+            id: "r", model: body.model,
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+            usage: {},
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+
+      const server = createServer(app);
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+      try {
+        for (const model of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]) {
+          await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model, max_tokens: 8, messages: [{ role: "user", content: "hi" }] }),
+          });
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close(err => err ? reject(err) : resolve());
+        });
+      }
+
+      // Each tier keeps its own counterpart instead of collapsing onto one model.
+      expect(seen.map(s => s.sent)).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+    });
+
+    it("falls back to the configured default model when the Claude model has no known tier", async () => {
       const app = express();
       const nextSpy = vi.fn();
       const forwardedBodies: OpenAIResponsesRequest[] = [];
@@ -886,7 +934,8 @@ describe("mountMessagesCrossProviderRoute", () => {
         const res = await fetch(`${baseUrl}/v1/messages`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 64, messages: [{ role: "user", content: "hi" }] }),
+          // Not a recognised family word, so no tier can be inferred.
+          body: JSON.stringify({ model: "claude-instant-1", max_tokens: 64, messages: [{ role: "user", content: "hi" }] }),
         });
         expect(res.status).toBe(200);
         expect(forwardedBodies[0]?.model).toBe("gpt-5-codex");

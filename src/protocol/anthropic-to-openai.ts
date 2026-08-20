@@ -73,8 +73,12 @@ export function anthropicToOpenAIResponses(
   modelRouting: ModelRoutingConfig = {},
 ): OpenAIResponsesRequest {
   const parsed = parseModelRef(req.model, modelRouting);
+  // Effort maps 1:1 — both sides use low/medium/high/xhigh/max. Omitted rather
+  // than defaulted when absent, so the target model's own default applies.
+  const effort = req.output_config?.effort?.trim();
   return {
     model: parsed.upstreamModel,
+    ...(effort ? { reasoning: { effort } } : {}),
     instructions: stringifySystem(req.system),
     input: req.messages.flatMap(message => messageToOpenAIItems(message.role, message.content)),
     tools: req.tools?.map(tool => ({

@@ -118,4 +118,20 @@ describe("anthropicToOpenAIResponses", () => {
       { type: "function_call", call_id: "t2", name: "read_file", arguments: "{\"path\":\"b\"}" },
     ]);
   });
+
+  it("passes reasoning effort through and omits it when the request has none", () => {
+    const withEffort = anthropicToOpenAIResponses({
+      model: "openai/gpt-5.6-sol",
+      output_config: { effort: "xhigh" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(withEffort.reasoning).toEqual({ effort: "xhigh" });
+
+    // Omitted, not defaulted — the target model's own default should apply.
+    const without = anthropicToOpenAIResponses({
+      model: "openai/gpt-5.6-sol",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(without.reasoning).toBeUndefined();
+  });
 });

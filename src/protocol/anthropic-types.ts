@@ -41,4 +41,16 @@ export interface AnthropicMessagesRequest {
   messages: AnthropicMessage[];
   tools?: AnthropicTool[];
   stream?: boolean;
+  /** Claude 4.6+ reasoning-depth control. Maps onto the Codex `reasoning.effort`
+   *  axis, which accepts the same low/medium/high/xhigh/max names. */
+  output_config?: {
+    effort?: string;
+  };
+  /** Passed through untouched: Codex always reasons, so there is no "disabled"
+   *  equivalent to translate to. Declared so the field is not silently dropped
+   *  by object rest when the request is rewritten. */
+  thinking?: {
+    type?: string;
+    display?: string;
+  };
 }

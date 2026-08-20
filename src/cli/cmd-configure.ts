@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
+import { SUGGESTED_TIER_MODELS } from "../protocol/model-ref.js";
 import { writeClaudeSettings, removeClaudeSettings, readClaudeProxySettings } from "../utils/claude-config.js";
 import { writeCodexRouterConfig } from "../utils/codex-config.js";
 import { readConfig, writeConfig, generateProxySecret } from "../config/manager.js";
@@ -28,6 +29,8 @@ export function registerConfigure(program: Command): void {
     .option("--disable-session-pool-openai", "Assign sessions to Claude accounts only (default)")
     .option("--disable-session-affinity", "Pick an account per request instead of per session")
     .option("--enable-session-affinity", "Pin each session to one account (default)")
+    .option("--enable-model-tiers", "Map Claude tiers (opus/sonnet/haiku) to comparable Codex models")
+    .option("--disable-model-tiers", "Send every cross-provider request to the single default model")
     .action((target: string | undefined, opts: {
       remove?: boolean;
       port: string;
@@ -46,6 +49,8 @@ export function registerConfigure(program: Command): void {
       disableSessionPoolOpenai?: boolean;
       enableSessionAffinity?: boolean;
       disableSessionAffinity?: boolean;
+      enableModelTiers?: boolean;
+      disableModelTiers?: boolean;
     }) => {
       if (target === "codex") {
         const port = parseInt(opts.port, 10);
@@ -109,6 +114,16 @@ export function registerConfigure(program: Command): void {
         console.log(`    Session affinity:    ${affinity ? chalk.green("enabled") : chalk.gray("disabled")}`);
         const poolOpenAI = cfg.sessionPoolIncludesOpenAI === true;
         console.log(`    OpenAI in session pool: ${poolOpenAI ? chalk.green("enabled") : chalk.gray("disabled")}`);
+        const tierMap = cfg.modelRouting?.openAITierMap;
+        if (tierMap && Object.keys(tierMap).length > 0) {
+          const gated = !cfg.modelRouting?.openAIDefaultModel;
+          console.log(`    Model tier routing:  ${gated ? chalk.yellow("enabled (inactive — no OpenAI default model)") : chalk.green("enabled")}`);
+          for (const [tier, model] of Object.entries(tierMap)) {
+            console.log(chalk.gray(`      claude ${tier.padEnd(7)} → ${model}`));
+          }
+        } else {
+          console.log(`    Model tier routing:  ${chalk.gray("disabled")}`);
+        }
         return;
       }
 
@@ -177,6 +192,37 @@ export function registerConfigure(program: Command): void {
       if (opts.enableSessionAffinity) {
         writeConfig({ ...readConfig(), sessionAffinity: true });
         console.log(chalk.green("✓ Session affinity enabled."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableModelTiers) {
+        const cfg = readConfig();
+        if (!cfg.modelRouting?.openAIDefaultModel) {
+          // The cross-provider routes still gate on the default model, so tier
+          // routing alone changes nothing until one is set.
+          console.log(chalk.yellow("⚠ No OpenAI default model configured yet."));
+          console.log(chalk.gray("  Run: cc-router configure models --openai-model <model>"));
+          console.log(chalk.gray("  Until then no request crosses to OpenAI, tier map or not."));
+        }
+        const modelRouting = { ...(cfg.modelRouting ?? {}), openAITierMap: { ...SUGGESTED_TIER_MODELS } };
+        writeConfig({ ...cfg, modelRouting });
+        console.log(chalk.green("✓ Model tier routing enabled."));
+        for (const [tier, model] of Object.entries(SUGGESTED_TIER_MODELS)) {
+          console.log(chalk.gray(`    claude ${tier.padEnd(7)} → ${model}`));
+        }
+        console.log(chalk.gray("  Unmapped or unrecognised models still use the OpenAI default."));
+        console.log(chalk.gray("  Edit modelRouting.openAITierMap in the config to change a tier."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableModelTiers) {
+        const cfg = readConfig();
+        const modelRouting = { ...(cfg.modelRouting ?? {}) };
+        delete modelRouting.openAITierMap;
+        writeConfig({ ...cfg, modelRouting });
+        console.log(chalk.green("✓ Model tier routing disabled — the OpenAI default answers every tier."));
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

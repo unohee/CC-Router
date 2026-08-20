@@ -61,6 +61,11 @@ export interface OpenAIResponsesRequest {
   max_output_tokens?: number;
   stream?: boolean;
   store?: boolean;
+  /** Reasoning depth. Verified 2026-08-20: omitting it yields "medium" on
+   *  gpt-5.6-sol, despite that model's metadata advertising "low". */
+  reasoning?: {
+    effort?: string;
+  };
 }
 
 export interface OpenAIResponseOutputMessage {
