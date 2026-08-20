@@ -35,4 +35,22 @@ describe("openAIResponseToAnthropicMessage", () => {
       },
     });
   });
+
+  it("maps function calls to ordered Anthropic tool blocks", () => {
+    const result = openAIResponseToAnthropicMessage({
+      id: "resp_2",
+      model: "gpt-5.5",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Checking." }] },
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "get_weather", arguments: "{\"city\":\"Seoul\"}" },
+      ],
+      usage: { input_tokens: 12, output_tokens: 3 },
+    });
+
+    expect(result.content).toEqual([
+      { type: "text", text: "Checking." },
+      { type: "tool_use", id: "call_1", name: "get_weather", input: { city: "Seoul" } },
+    ]);
+    expect(result.stop_reason).toBe("tool_use");
+  });
 });

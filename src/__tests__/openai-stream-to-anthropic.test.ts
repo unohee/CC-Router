@@ -91,4 +91,78 @@ describe("openAIStreamEventToAnthropicEvents", () => {
       },
     ]);
   });
+
+  it("streams function calls as Anthropic tool_use blocks", () => {
+    const normalizer = createOpenAIStreamToAnthropicNormalizer();
+    const events = [
+      ...normalizer.convert({ type: "response.created", response: { id: "resp_2", model: "gpt-5.5" } }),
+      ...normalizer.convert({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "function_call", call_id: "call_1", name: "get_weather" },
+      }),
+      ...normalizer.convert({
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        delta: "{\"city\":\"Seoul\"}",
+      }),
+      ...normalizer.convert({ type: "response.output_item.done", output_index: 0 }),
+      ...normalizer.convert({
+        type: "response.completed",
+        response: { id: "resp_2", usage: { input_tokens: 10, output_tokens: 4 } },
+      }),
+    ];
+
+    expect(events).toEqual([
+      {
+        type: "message_start",
+        message: {
+          id: "resp_2",
+          type: "message",
+          role: "assistant",
+          model: "gpt-5.5",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_1", name: "get_weather", input: {} },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"city\":\"Seoul\"}" },
+      },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 4 },
+      },
+      { type: "message_stop" },
+    ]);
+  });
+
+  it("keeps text and tool block indexes separate", () => {
+    const normalizer = createOpenAIStreamToAnthropicNormalizer();
+    normalizer.convert({ type: "response.created", response: { id: "resp_3" } });
+
+    expect(normalizer.convert({ type: "response.output_text.delta", output_index: 0, delta: "Checking." })[0])
+      .toEqual({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    normalizer.convert({ type: "response.output_item.done", output_index: 0 });
+
+    expect(normalizer.convert({
+      type: "response.output_item.added",
+      output_index: 2,
+      item: { type: "function_call", call_id: "call_2", name: "read_file" },
+    })[0]).toEqual({
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "tool_use", id: "call_2", name: "read_file", input: {} },
+    });
+  });
 });

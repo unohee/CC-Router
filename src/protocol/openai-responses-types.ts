@@ -24,16 +24,15 @@ export interface OpenAIFunctionCallOutput {
   output: string;
 }
 
-export type OpenAIInputContent =
-  | OpenAIInputText
-  | OpenAIOutputText
-  | OpenAIFunctionCall
-  | OpenAIFunctionCallOutput;
+export type OpenAIInputContent = OpenAIInputText | OpenAIOutputText;
 
 export interface OpenAIInputMessage {
   role: OpenAIInputRole;
   content: OpenAIInputContent[];
 }
+
+// Responses function calls and their outputs are top-level input items.
+export type OpenAIInputItem = OpenAIInputMessage | OpenAIFunctionCall | OpenAIFunctionCallOutput;
 
 export interface OpenAITool {
   type: "function";
@@ -45,7 +44,7 @@ export interface OpenAITool {
 export interface OpenAIResponsesRequest {
   model: string;
   instructions?: string;
-  input: OpenAIInputMessage[];
+  input: OpenAIInputItem[];
   tools?: OpenAITool[];
   max_output_tokens?: number;
   stream?: boolean;
@@ -58,10 +57,12 @@ export interface OpenAIResponseOutputMessage {
   content: OpenAIOutputText[];
 }
 
+export type OpenAIResponseOutputItem = OpenAIResponseOutputMessage | OpenAIFunctionCall;
+
 export interface OpenAIResponseCompleted {
   id: string;
   model?: string;
-  output?: OpenAIResponseOutputMessage[];
+  output?: OpenAIResponseOutputItem[];
   usage?: {
     input_tokens?: number;
     output_tokens?: number;

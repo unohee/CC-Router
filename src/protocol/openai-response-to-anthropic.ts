@@ -1,12 +1,16 @@
 import type { OpenAIResponseCompleted } from "./openai-responses-types.js";
 
+export type AnthropicResponseContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown };
+
 export interface AnthropicMessageResponse {
   id: string;
   type: "message";
   role: "assistant";
   model: string;
-  content: Array<{ type: "text"; text: string }>;
-  stop_reason: "end_turn";
+  content: AnthropicResponseContentBlock[];
+  stop_reason: "end_turn" | "tool_use";
   stop_sequence: null;
   usage: {
     input_tokens: number;
@@ -14,12 +18,32 @@ export interface AnthropicMessageResponse {
   };
 }
 
+function parseToolInput(argumentsJson: string): unknown {
+  try {
+    return JSON.parse(argumentsJson);
+  } catch {
+    return {};
+  }
+}
+
 export function openAIResponseToAnthropicMessage(response: OpenAIResponseCompleted): AnthropicMessageResponse {
-  const content = (response.output ?? [])
-    .filter(item => item.type === "message")
-    .flatMap(item => item.content)
-    .filter(item => item.type === "output_text")
-    .map(item => ({ type: "text" as const, text: item.text }));
+  const content: AnthropicResponseContentBlock[] = [];
+
+  for (const item of response.output ?? []) {
+    if (item.type === "message") {
+      for (const part of item.content) {
+        content.push({ type: "text", text: part.text });
+      }
+      continue;
+    }
+
+    content.push({
+      type: "tool_use",
+      id: item.call_id,
+      name: item.name,
+      input: parseToolInput(item.arguments),
+    });
+  }
 
   return {
     id: response.id,
@@ -27,7 +51,7 @@ export function openAIResponseToAnthropicMessage(response: OpenAIResponseComplet
     role: "assistant",
     model: response.model ?? "",
     content,
-    stop_reason: "end_turn",
+    stop_reason: content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
     stop_sequence: null,
     usage: {
       input_tokens: response.usage?.input_tokens ?? 0,
