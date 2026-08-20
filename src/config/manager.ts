@@ -194,6 +194,13 @@ export interface ProxyConfig {
    *  a /v1/messages request to a healthy OpenAI subscription account instead of
    *  degrading. Requires modelRouting.openAIDefaultModel to be set. Default: false (disabled). */
   crossProviderFallback?: boolean;
+  /** Pin each Claude Code session to one account so its prompt cache survives.
+   *  Default: true. Sessions without the header keep plain round-robin. */
+  sessionAffinity?: boolean;
+  /** Let session assignment also hand whole sessions to an OpenAI subscription
+   *  account, not just Anthropic ones. Off by default — it changes which model
+   *  answers, so it must be opted into. Requires modelRouting.openAIDefaultModel. */
+  sessionPoolIncludesOpenAI?: boolean;
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
   /** Run preferences — asked once on first start, reused on subsequent starts */

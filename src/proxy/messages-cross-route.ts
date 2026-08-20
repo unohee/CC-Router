@@ -10,17 +10,24 @@ import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
 import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputItem } from "../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
+import type { SessionTarget } from "./session-router.js";
 
 declare module "express-serve-static-core" {
   interface Request {
     _ccRawBody?: Buffer;
+    /** Set once per request so the downstream Anthropic proxy reuses this
+     *  session's pinned account instead of drawing a fresh one. */
+    _ccSessionTarget?: SessionTarget;
   }
 }
 
 type ForwardOpenAI = typeof forwardOpenAICodexResponse;
 
 export interface MessagesCrossProviderRouteOptions {
-  getOpenAIAccount: () => OpenAISubscriptionAccount | null;
+  /** Select an OpenAI account. `preferredAccountId` asks for one specific
+   *  account (session affinity); implementations fall back to their own
+   *  rotation when it is absent or cannot serve. */
+  getOpenAIAccount: (preferredAccountId?: string) => OpenAISubscriptionAccount | null;
   prepareOpenAIAccount?: (account: OpenAISubscriptionAccount) => Promise<boolean>;
   forwardOpenAI?: ForwardOpenAI;
   modelRouting?: ModelRoutingConfig;
@@ -30,6 +37,16 @@ export interface MessagesCrossProviderRouteOptions {
   hasAvailableAnthropicAccount?: () => boolean;
   /** Fired after a successful automatic fallback so the caller can log/record it. */
   onFallback?: (info: { openAIAccountId: string; upstreamModel: string }) => void;
+  /** Resolve the account this session is pinned to. Called at most once per
+   *  request — it advances the assignment cursor for sessions seen first time. */
+  resolveSessionTarget?: (sessionId: string) => SessionTarget | null;
+  /** Read an existing pin without creating one. Used on the explicit `openai/*`
+   *  route, which must honour an existing pin but must not itself decide that a
+   *  session belongs to OpenAI — that would silently divert the session's later
+   *  Claude-model requests too. */
+  peekSessionTarget?: (sessionId: string) => SessionTarget | null;
+  /** Fired when a session pinned to OpenAI serves a Claude-model request there. */
+  onSessionRoute?: (info: { sessionId: string; openAIAccountId: string; upstreamModel: string }) => void;
 }
 
 type OpenAIForwardOutcome =
@@ -68,13 +85,16 @@ async function forwardAnthropicRequestAsOpenAI(
   reqBody: AnthropicMessagesRequest,
   res: Response,
   requestedStream: boolean,
-  getOpenAIAccount: () => OpenAISubscriptionAccount | null,
+  getOpenAIAccount: (preferredAccountId?: string) => OpenAISubscriptionAccount | null,
   prepareOpenAIAccount: (account: OpenAISubscriptionAccount) => Promise<boolean>,
   forwardOpenAI: ForwardOpenAI,
   modelRouting: ModelRoutingConfig | undefined,
   passThroughUpstreamErrors: boolean,
+  /** Session-pinned account, when this request belongs to a session assigned
+   *  to a specific OpenAI account. Without it the caller's rotation decides. */
+  preferredAccountId?: string,
 ): Promise<OpenAIForwardOutcome> {
-  const account = getOpenAIAccount();
+  const account = getOpenAIAccount(preferredAccountId);
   if (!account) return { ok: false, reason: "no_account" };
 
   try {
@@ -308,10 +328,20 @@ export function mountMessagesCrossProviderRoute(
       const requestedStream = req.body.stream === true;
 
       if (route.provider === "openai_subscription") {
+        // An explicit openai/* request from a session already pinned to an
+        // OpenAI account stays on that account, so its prompt cache survives.
+        // Peek rather than resolve: asking for a new assignment here would pin
+        // the whole session to OpenAI on the strength of one explicit call.
+        const explicitSessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+        const pinned = explicitSessionId && opts.peekSessionTarget
+          ? opts.peekSessionTarget(explicitSessionId)
+          : null;
+
         const outcome = await forwardAnthropicRequestAsOpenAI(
           req.body, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ true,
+          pinned?.provider === "openai" ? pinned.accountId : undefined,
         );
         if (!outcome.ok) {
           if (outcome.reason === "no_account") {
@@ -351,6 +381,37 @@ export function mountMessagesCrossProviderRoute(
       // must never turn into a harder failure than the degraded Anthropic path
       // the request would have taken anyway.
       const openAIDefaultModel = opts.modelRouting?.openAIDefaultModel?.trim();
+
+      // Session affinity. Resolved once here and stashed on the request so the
+      // Anthropic proxy downstream reuses the same decision rather than
+      // resolving again (which would advance the assignment cursor twice).
+      const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+      const sessionTarget = sessionId && opts.resolveSessionTarget
+        ? opts.resolveSessionTarget(sessionId)
+        : null;
+      if (sessionTarget) req._ccSessionTarget = sessionTarget;
+
+      // This session belongs to an OpenAI account, so its Claude-model requests
+      // go there too — that is what keeps a conversation on one provider
+      // instead of alternating models mid-thread. A failure here is silent and
+      // falls through to Anthropic, same as the fallback path below.
+      if (sessionTarget?.provider === "openai" && openAIDefaultModel) {
+        const outcome = await forwardAnthropicRequestAsOpenAI(
+          { ...req.body, model: "openai/default" }, res, requestedStream,
+          opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
+          /* passThroughUpstreamErrors */ false,
+          sessionTarget.accountId,
+        );
+        if (outcome.ok) {
+          opts.onSessionRoute?.({
+            sessionId,
+            openAIAccountId: outcome.account.id,
+            upstreamModel: openAIDefaultModel,
+          });
+          return;
+        }
+      }
+
       const anthropicExhausted =
         opts.crossProviderFallback === true &&
         opts.hasAvailableAnthropicAccount?.() === false;

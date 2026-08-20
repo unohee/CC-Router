@@ -24,6 +24,10 @@ export function registerConfigure(program: Command): void {
     .option("--disable-auto-update", "Disable automatic updates for the proxy")
     .option("--enable-fallback", "Enable automatic fallback to OpenAI when all Claude accounts are exhausted")
     .option("--disable-fallback", "Disable automatic cross-provider fallback")
+    .option("--enable-session-pool-openai", "Let whole sessions be assigned to an OpenAI subscription account")
+    .option("--disable-session-pool-openai", "Assign sessions to Claude accounts only (default)")
+    .option("--disable-session-affinity", "Pick an account per request instead of per session")
+    .option("--enable-session-affinity", "Pin each session to one account (default)")
     .action((target: string | undefined, opts: {
       remove?: boolean;
       port: string;
@@ -38,6 +42,10 @@ export function registerConfigure(program: Command): void {
       disableAutoUpdate?: boolean;
       enableFallback?: boolean;
       disableFallback?: boolean;
+      enableSessionPoolOpenai?: boolean;
+      disableSessionPoolOpenai?: boolean;
+      enableSessionAffinity?: boolean;
+      disableSessionAffinity?: boolean;
     }) => {
       if (target === "codex") {
         const port = parseInt(opts.port, 10);
@@ -97,6 +105,10 @@ export function registerConfigure(program: Command): void {
         console.log(`    Password protected:  ${pwStatus}`);
         console.log(`    Auto-update:         ${auStatus}`);
         console.log(`    Cross-provider fallback: ${fbStatus}`);
+        const affinity = cfg.sessionAffinity !== false;
+        console.log(`    Session affinity:    ${affinity ? chalk.green("enabled") : chalk.gray("disabled")}`);
+        const poolOpenAI = cfg.sessionPoolIncludesOpenAI === true;
+        console.log(`    OpenAI in session pool: ${poolOpenAI ? chalk.green("enabled") : chalk.gray("disabled")}`);
         return;
       }
 
@@ -127,6 +139,44 @@ export function registerConfigure(program: Command): void {
         console.log(chalk.green("✓ Cross-provider fallback enabled."));
         console.log(chalk.gray("  When every Claude account is rate-limited/unhealthy, a request will"));
         console.log(chalk.gray("  be routed to a healthy OpenAI subscription account instead."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableSessionPoolOpenai) {
+        const cfg = readConfig();
+        if (!cfg.modelRouting?.openAIDefaultModel) {
+          console.log(chalk.yellow("⚠ No OpenAI default model configured yet."));
+          console.log(chalk.gray("  Run: cc-router configure models --openai-model <model>"));
+          console.log(chalk.gray("  Sessions will stay on Claude accounts until one is set."));
+        }
+        writeConfig({ ...cfg, sessionPoolIncludesOpenAI: true });
+        console.log(chalk.green("✓ OpenAI added to the session pool."));
+        console.log(chalk.gray("  New sessions are spread across Claude and OpenAI accounts; each"));
+        console.log(chalk.gray("  session then stays on its provider for its whole conversation."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableSessionPoolOpenai) {
+        writeConfig({ ...readConfig(), sessionPoolIncludesOpenAI: false });
+        console.log(chalk.green("✓ Sessions are assigned to Claude accounts only."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableSessionAffinity) {
+        writeConfig({ ...readConfig(), sessionAffinity: false });
+        console.log(chalk.green("✓ Session affinity disabled — an account is picked per request."));
+        console.log(chalk.gray("  Note: this re-splits a single conversation across accounts, so each"));
+        console.log(chalk.gray("  one re-writes the prompt cache instead of reading it."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableSessionAffinity) {
+        writeConfig({ ...readConfig(), sessionAffinity: true });
+        console.log(chalk.green("✓ Session affinity enabled."));
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

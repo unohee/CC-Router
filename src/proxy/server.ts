@@ -22,6 +22,8 @@ import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../provi
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
+import { SessionRouter } from "./session-router.js";
+import type { SessionTarget } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
@@ -267,6 +269,38 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts);
   const initialConfig = readConfig();
   const modelRouting = initialConfig.modelRouting ?? {};
+
+  // Session affinity — see session-router.ts for why request-level round-robin
+  // and prompt caching work against each other.
+  const sessionRouter = new SessionRouter({
+    onReassign: ({ sessionId, from, to }) => {
+      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId}`;
+      stats.addLog({ ts: Date.now(), accountId: to.accountId, model: "-", type: "route", details: msg });
+    },
+  });
+  const sessionAffinityEnabled = initialConfig.sessionAffinity !== false;
+  // OpenAI joins the session pool only when explicitly enabled AND a default
+  // model exists — without one, "openai/default" would go out as a literal.
+  const sessionPoolIncludesOpenAI =
+    initialConfig.sessionPoolIncludesOpenAI === true && !!modelRouting.openAIDefaultModel?.trim();
+
+  const sessionTargetUsable = (t: SessionTarget): boolean =>
+    t.provider === "anthropic"
+      ? pool.canServe(t.accountId)
+      // Same predicate the OpenAI picker applies (truthy `enabled`), so a
+      // session is never pinned to an account the picker would refuse.
+      : openAIAccounts.some(a => a.id === t.accountId && a.enabled);
+
+  const resolveSessionTarget = (sessionId: string): SessionTarget | null => {
+    if (!sessionAffinityEnabled) return null;
+    const candidates: SessionTarget[] = pool.getAll().map(a => ({
+      provider: "anthropic" as const, accountId: a.id,
+    }));
+    if (sessionPoolIncludesOpenAI) {
+      for (const a of openAIAccounts) candidates.push({ provider: "openai", accountId: a.id });
+    }
+    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable);
+  };
 
   // Log when the pool falls back to a capped account — makes the cap bypass
   // visible in the dashboard's "RECENT ACTIVITY" instead of being silent.
@@ -591,11 +625,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   });
 
   mountMessagesCrossProviderRoute(app, {
-    getOpenAIAccount: pickOpenAIAccount,
+    getOpenAIAccount: (preferredAccountId?: string) => {
+      // Honour the session pin while that account can still serve; otherwise
+      // fall back to plain rotation.
+      if (preferredAccountId) {
+        const pinned = openAIAccounts.find(a => a.id === preferredAccountId && a.enabled);
+        if (pinned) return pinned;
+      }
+      return pickOpenAIAccount();
+    },
     prepareOpenAIAccount: (account) => prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts),
     modelRouting,
     crossProviderFallback: initialConfig.crossProviderFallback === true,
     hasAvailableAnthropicAccount: () => pool.hasAvailableAccount(),
+    resolveSessionTarget,
+    peekSessionTarget: (sessionId: string) =>
+      sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
+    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel }) => {
+      const msg = `session ${sessionId.slice(0, 8)} pinned to ${openAIAccountId} (${upstreamModel})`;
+      stats.addLog({ ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg });
+    },
     onFallback: ({ openAIAccountId, upstreamModel }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
@@ -817,7 +866,18 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   app.use("/v1", async (req, res, next) => {
     let account: Account;
     try {
-      account = pool.getNext();
+      // Reuse the pin resolved by the cross-provider route (same request), so
+      // the cursor advances once. Falls back to round-robin when the request
+      // carried no session header or the pinned account went unusable.
+      const pinned = req._ccSessionTarget;
+      const pinnedAccount = pinned?.provider === "anthropic" && pool.canServe(pinned.accountId)
+        ? pool.getById(pinned.accountId)
+        : undefined;
+      if (pinnedAccount) {
+        pinnedAccount.requestCount++;
+        pinnedAccount.lastUsed = Date.now();
+      }
+      account = pinnedAccount ?? pool.getNext();
     } catch (err) {
       if (err instanceof EmptyPoolError) {
         stats.totalErrors++;
@@ -872,6 +932,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       account.id,
       account.requestCount,
       Math.round((account.tokens.expiresAt - Date.now()) / 60_000),
+      req._ccSessionTarget?.provider === "anthropic" && req._ccSessionTarget.accountId === account.id
+        ? String(req.headers["x-claude-code-session-id"] ?? "")
+        : undefined,
     );
 
     next();

@@ -595,6 +595,214 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  describe("session affinity", () => {
+    const openAIAccount = {
+      id: "openai-victor",
+      provider: "openai_subscription" as const,
+      accessToken: "access",
+      refreshToken: "refresh",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      enabled: true,
+    };
+
+    async function withServer(app: express.Express, fn: (url: string) => Promise<void>) {
+      const server = createServer(app);
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+      try {
+        await fn(`http://127.0.0.1:${address.port}`);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close(err => err ? reject(err) : resolve());
+        });
+      }
+    }
+
+    it("routes a Claude-model request to OpenAI when the session is pinned there", async () => {
+      const app = express();
+      const forwarded: OpenAIResponsesRequest[] = [];
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        forwardOpenAI: async ({ body }) => {
+          forwarded.push(body);
+          return new Response(JSON.stringify({
+            id: "resp_1", model: "gpt-5.6-terra",
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
+            usage: { input_tokens: 4, output_tokens: 1 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-1" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5",        // a Claude model, not openai/*
+            max_tokens: 128,
+            messages: [{ role: "user", content: "hi" }],
+            stream: false,
+          }),
+        });
+
+        expect(res.status).toBe(200);
+        // The pinned session resolved "openai/default" to the configured model.
+        expect(forwarded[0]?.model).toBe("gpt-5.6-terra");
+      });
+    });
+
+    it("sends a pinned session to its own OpenAI account instead of the next in rotation", async () => {
+      const app = express();
+      const second = { ...openAIAccount, id: "openai-second" };
+      const accounts = [openAIAccount, second];
+      const used: string[] = [];
+      let rotation = 0;
+
+      mountMessagesCrossProviderRoute(app, {
+        // Mirrors the real picker: a preferred id wins, otherwise rotate.
+        getOpenAIAccount: (preferredAccountId?: string) => {
+          if (preferredAccountId) return accounts.find(a => a.id === preferredAccountId) ?? null;
+          return accounts[rotation++ % accounts.length];
+        },
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-second" }),
+        forwardOpenAI: async ({ account }) => {
+          used.push(account.id);
+          return new Response(JSON.stringify({
+            id: "resp_1", model: "gpt-5.6-terra",
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+
+      await withServer(app, async (url) => {
+        for (let i = 0; i < 2; i++) {
+          await fetch(`${url}/v1/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-pinned" },
+            body: JSON.stringify({
+              model: "claude-sonnet-5", max_tokens: 8,
+              messages: [{ role: "user", content: "hi" }], stream: false,
+            }),
+          });
+        }
+      });
+
+      // Rotation would have produced [openai-victor, openai-second].
+      expect(used).toEqual(["openai-second", "openai-second"]);
+    });
+
+    it("keeps an explicit openai/* request on the account its session is already pinned to", async () => {
+      const app = express();
+      const second = { ...openAIAccount, id: "openai-second" };
+      const accounts = [openAIAccount, second];
+      const used: string[] = [];
+      const resolveSessionTarget = vi.fn();
+      let rotation = 0;
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: (preferredAccountId?: string) => {
+          if (preferredAccountId) return accounts.find(a => a.id === preferredAccountId) ?? null;
+          return accounts[rotation++ % accounts.length];
+        },
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        peekSessionTarget: () => ({ provider: "openai", accountId: "openai-second" }),
+        resolveSessionTarget,
+        forwardOpenAI: async ({ account }) => {
+          used.push(account.id);
+          return new Response(JSON.stringify({
+            id: "r", model: "gpt-5.6-terra",
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+
+      await withServer(app, async (url) => {
+        for (let i = 0; i < 2; i++) {
+          await fetch(`${url}/v1/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-x" },
+            body: JSON.stringify({
+              model: "openai/gpt-5.6-terra", max_tokens: 8,
+              messages: [{ role: "user", content: "hi" }], stream: false,
+            }),
+          });
+        }
+      });
+
+      expect(used).toEqual(["openai-second", "openai-second"]);
+      // Peeking must not create an assignment. This is a deliberate trade-off:
+      // an unassigned session calling openai/* keeps plain picker rotation
+      // (so with 2+ OpenAI accounts those calls are not account-affine), but in
+      // exchange one explicit call never silently commits the session — and
+      // therefore its later Claude-model requests — to OpenAI. Diverting a
+      // whole conversation on the strength of a single explicit call is the
+      // worse surprise of the two.
+      expect(resolveSessionTarget).not.toHaveBeenCalled();
+    });
+
+    it("passes through to the Anthropic proxy when the session is pinned to Anthropic", async () => {
+      const app = express();
+      const forwardOpenAI = vi.fn();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "anthropic", accountId: "intrect" }),
+        forwardOpenAI,
+      });
+      app.use((req, res) => {
+        // Stand-in for the downstream Anthropic proxy — assert the pin was stashed.
+        res.status(200).json({ pinned: req._ccSessionTarget });
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-2" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 128,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+
+        expect(await res.json()).toEqual({ pinned: { provider: "anthropic", accountId: "intrect" } });
+        expect(forwardOpenAI).not.toHaveBeenCalled();
+      });
+    });
+
+    it("does not resolve a session target when the request carries no session header", async () => {
+      const app = express();
+      const resolveSessionTarget = vi.fn();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget,
+      });
+      app.use((_req, res) => res.status(200).json({ ok: true }));
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 128,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+
+        expect(resolveSessionTarget).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   describe("cross-provider fallback", () => {
     async function withServer(
       app: express.Express,

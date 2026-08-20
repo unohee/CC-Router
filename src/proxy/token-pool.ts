@@ -174,6 +174,26 @@ export class TokenPool {
   }
 
   /** Same predicate `getNext()` uses for its primary (non-degraded) tier. */
+  /** Look up one account by id, regardless of its current health. */
+  getById(id: string): Account | undefined {
+    return this.accounts.find(a => a.id === id);
+  }
+
+  /**
+   * Whether one specific account can take traffic right now — the same
+   * predicate `getNext()` applies to its primary tier. Used by session
+   * affinity to decide whether a pinned account is still serviceable before
+   * reassigning the session elsewhere.
+   */
+  canServe(id: string): boolean {
+    const a = this.getById(id);
+    if (!a) return false;
+    // Sweep first, or an account whose cooldown has already elapsed would look
+    // unusable and the session would be reassigned for no reason.
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    return this.isAvailable(a);
+  }
+
   private isAvailable(a: Account): boolean {
     return a.healthy && !a.busy && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
