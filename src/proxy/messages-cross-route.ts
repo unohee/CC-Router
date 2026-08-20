@@ -24,6 +24,21 @@ declare module "express-serve-static-core" {
 
 type ForwardOpenAI = typeof forwardOpenAICodexResponse;
 
+export interface OpenAIActivity {
+  method: string;
+  path: string;
+  statusCode: number;
+  durationMs: number;
+  source: "cli" | "desktop" | "api";
+  sessionId?: string;
+}
+
+type OpenAIRouteInfo = OpenAIActivity & {
+  openAIAccountId: string;
+  upstreamModel: string;
+  usage?: OpenAIUsage;
+};
+
 export interface MessagesCrossProviderRouteOptions {
   /** Select an OpenAI account. `preferredAccountId` asks for one specific
    *  account (session affinity); implementations fall back to their own
@@ -37,7 +52,7 @@ export interface MessagesCrossProviderRouteOptions {
   /** Point-in-time Anthropic-pool availability check (TokenPool.hasAvailableAccount). Required when crossProviderFallback is true. */
   hasAvailableAnthropicAccount?: () => boolean;
   /** Fired after a successful automatic fallback so the caller can log/record it. */
-  onFallback?: (info: { openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
+  onFallback?: (info: OpenAIRouteInfo) => void;
   /** Resolve the account this session is pinned to. Called at most once per
    *  request — it advances the assignment cursor for sessions seen first time. */
   resolveSessionTarget?: (sessionId: string) => SessionTarget | null;
@@ -47,10 +62,10 @@ export interface MessagesCrossProviderRouteOptions {
    *  Claude-model requests too. */
   peekSessionTarget?: (sessionId: string) => SessionTarget | null;
   /** Fired when a session pinned to OpenAI serves a Claude-model request there. */
-  onSessionRoute?: (info: { sessionId: string; openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
+  onSessionRoute?: (info: OpenAIRouteInfo & { sessionId: string }) => void;
   /** Fired when an explicit `openai/*` request is served. Without it this path
    *  leaves no trace, so OpenAI traffic is invisible in logs and the dashboard. */
-  onExplicitRoute?: (info: { openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
+  onExplicitRoute?: (info: OpenAIRouteInfo) => void;
 }
 
 export interface OpenAIUsage {
@@ -155,6 +170,23 @@ function isAnthropicMessagesRequest(value: unknown): value is AnthropicMessagesR
     value !== null &&
     Array.isArray((value as { messages?: unknown }).messages)
   );
+}
+
+function openAIActivity(req: Request, res: Response, startedAt: number, sessionId: string): OpenAIActivity {
+  const source = sessionId
+    ? "cli" as const
+    : req.headers["x-api-key"]
+    ? "desktop" as const
+    : "api" as const;
+
+  return {
+    method: req.method,
+    path: req.path,
+    statusCode: res.statusCode,
+    durationMs: Date.now() - startedAt,
+    source,
+    ...(sessionId ? { sessionId } : {}),
+  };
 }
 
 async function sendOpenAIAsAnthropic(
@@ -418,15 +450,16 @@ export function mountMessagesCrossProviderRoute(
 
       const route = selectRoute(req.body.model, opts.modelRouting);
       const requestedStream = req.body.stream === true;
+      const startedAt = Date.now();
+      const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
 
       if (route.provider === "openai_subscription") {
         // An explicit openai/* request from a session already pinned to an
         // OpenAI account stays on that account, so its prompt cache survives.
         // Peek rather than resolve: asking for a new assignment here would pin
         // the whole session to OpenAI on the strength of one explicit call.
-        const explicitSessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
-        const pinned = explicitSessionId && opts.peekSessionTarget
-          ? opts.peekSessionTarget(explicitSessionId)
+        const pinned = sessionId && opts.peekSessionTarget
+          ? opts.peekSessionTarget(sessionId)
           : null;
 
         const outcome = await forwardAnthropicRequestAsOpenAI(
@@ -440,6 +473,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: route.upstreamModel,
             usage: outcome.usage,
+            ...openAIActivity(req, res, startedAt, sessionId),
           });
         }
         if (!outcome.ok) {
@@ -488,7 +522,6 @@ export function mountMessagesCrossProviderRoute(
       // Session affinity. Resolved once here and stashed on the request so the
       // Anthropic proxy downstream reuses the same decision rather than
       // resolving again (which would advance the assignment cursor twice).
-      const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
       const sessionTarget = sessionId && opts.resolveSessionTarget
         ? opts.resolveSessionTarget(sessionId)
         : null;
@@ -512,6 +545,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,
             usage: outcome.usage,
+            ...openAIActivity(req, res, startedAt, sessionId),
           });
           return;
         }
@@ -530,7 +564,12 @@ export function mountMessagesCrossProviderRoute(
           /* publicModel */ req.body.model,
         );
         if (outcome.ok) {
-          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: tieredModel, usage: outcome.usage });
+          opts.onFallback?.({
+            openAIAccountId: outcome.account.id,
+            upstreamModel: tieredModel,
+            usage: outcome.usage,
+            ...openAIActivity(req, res, startedAt, sessionId),
+          });
           return;
         }
         // OpenAI unavailable too — fall through to the normal (degraded) Anthropic path.

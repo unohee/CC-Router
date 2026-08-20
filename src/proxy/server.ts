@@ -697,31 +697,34 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     resolveSessionTarget,
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
-    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage }) => {
+    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
       recordOpenAIUsage(usage);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
+        ...activity,
       });
     },
-    onExplicitRoute: ({ openAIAccountId, upstreamModel, usage }) => {
+    onExplicitRoute: ({ openAIAccountId, upstreamModel, usage, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel);
       recordOpenAIUsage(usage);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `explicit openai/* → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        ...activity,
       });
     },
-    onFallback: ({ openAIAccountId, upstreamModel, usage }) => {
+    onFallback: ({ openAIAccountId, upstreamModel, usage, ...activity }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
       recordOpenAIUsage(usage);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        ...activity,
       });
     },
   });

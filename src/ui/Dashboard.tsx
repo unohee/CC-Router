@@ -65,6 +65,18 @@ interface HealthData {
   recentLogs: LogEntry[];
 }
 
+export type UsageDetailMode = "cache" | "basic" | "none";
+
+export function usageDetailMode(log: LogEntry): UsageDetailMode {
+  if (log.cacheReadTokens !== undefined || log.cacheCreationTokens !== undefined) return "cache";
+  if (log.inputTokens !== undefined || log.outputTokens !== undefined) return "basic";
+  return "none";
+}
+
+export function terminalSafeText(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "�");
+}
+
 interface OperationalStatus {
   auth: { required: boolean };
   providers: {
@@ -970,10 +982,10 @@ function LogRow({ log, selected }: { log: LogEntry; selected: boolean }) {
       </Text>
       <Text backgroundColor={bg} color={fg(typeColor)}>{typeIcon} </Text>
       <Text backgroundColor={bg} color={fg(sourceColor)}>{sourceLabel} </Text>
-      <Text backgroundColor={bg} color={fg("cyan")}>{log.accountId.slice(0, 22).padEnd(22)}</Text>
+      <Text backgroundColor={bg} color={fg("cyan")}>{terminalSafeText(log.accountId).slice(0, 22).padEnd(22)}</Text>
       {log.method && log.path
-        ? <Text backgroundColor={bg} color={fg("white")}> {log.method} {log.path.padEnd(14)}</Text>
-        : <Text backgroundColor={bg} color={fg(typeColor)}> {log.type.padEnd(9)}</Text>
+        ? <Text backgroundColor={bg} color={fg("white")}> {terminalSafeText(log.method)} {terminalSafeText(log.path).padEnd(14)}</Text>
+        : <Text backgroundColor={bg} color={fg(typeColor)}> {terminalSafeText(log.type).padEnd(9)}</Text>
       }
       {log.statusCode !== undefined && (
         <Text backgroundColor={bg} color={fg(statusColor)}> {log.statusCode}</Text>
@@ -988,7 +1000,7 @@ function LogRow({ log, selected }: { log: LogEntry; selected: boolean }) {
         <Text backgroundColor={bg} color={fg("gray")}> {fmtTok(inputTok)}↑ {fmtTok(outputTok)}↓</Text>
       )}
       {log.details && (
-        <Text backgroundColor={bg} color={fg("gray")}>  {log.details}</Text>
+        <Text backgroundColor={bg} color={fg("gray")}>  {terminalSafeText(log.details)}</Text>
       )}
     </Box>
   );
@@ -1003,6 +1015,7 @@ function DetailPanel({ log }: { log: LogEntry }) {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
   });
   const isError = log.type === "error";
+  const usageMode = usageDetailMode(log);
   const statusLabel = log.statusCode === undefined ? "—"
     : log.statusCode === 0 ? "connection error"
     : `${log.statusCode} ${httpStatusText(log.statusCode)}`;
@@ -1023,6 +1036,10 @@ function DetailPanel({ log }: { log: LogEntry }) {
         <Box gap={2}>
           <Field label="Method"  value={log.method ?? "—"} />
           <Field label="Path"    value={log.path ?? "—"} />
+          <Field label="Model"   value={log.model || "—"} />
+        </Box>
+        <Box>
+          <Field label="Session" value={log.sessionId ?? "—"} />
         </Box>
         <Box gap={2}>
           <FieldColored label="Status"   value={statusLabel} color={statusColor} />
@@ -1035,11 +1052,19 @@ function DetailPanel({ log }: { log: LogEntry }) {
             <Field label="Details" value={log.details} />
           </Box>
         )}
-        {log.cacheReadTokens !== undefined && (
+        {usageMode === "cache" && (
           <Box gap={2}>
             <CacheBreakdown
-              read={log.cacheReadTokens}
+              read={log.cacheReadTokens ?? 0}
               created={log.cacheCreationTokens ?? 0}
+              input={log.inputTokens ?? 0}
+              output={log.outputTokens ?? 0}
+            />
+          </Box>
+        )}
+        {usageMode === "basic" && (
+          <Box gap={2}>
+            <BasicUsage
               input={log.inputTokens ?? 0}
               output={log.outputTokens ?? 0}
             />
@@ -1054,7 +1079,7 @@ function Field({ label, value }: { label: string; value: string }) {
   return (
     <Box>
       <Text color="gray">{label}: </Text>
-      <Text color="white">{value}</Text>
+      <Text color="white">{terminalSafeText(value)}</Text>
     </Box>
   );
 }
@@ -1107,6 +1132,16 @@ function CacheBreakdown({ read, created, input, output }: { read: number; create
       <Field label="Total input"   value={fmtTok(totalInput) + " tok"} />
       <Field label="Output"        value={fmtTok(output) + " tok"} />
       <Field label="Total"         value={fmtTok(totalInput + output) + " tok"} />
+    </>
+  );
+}
+
+function BasicUsage({ input, output }: { input: number; output: number }) {
+  return (
+    <>
+      <Field label="Input"  value={fmtTok(input) + " tok"} />
+      <Field label="Output" value={fmtTok(output) + " tok"} />
+      <Field label="Total"  value={fmtTok(input + output) + " tok"} />
     </>
   );
 }

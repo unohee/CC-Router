@@ -634,11 +634,16 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
 
     // The alias is reported resolved, matching what actually went upstream.
-    expect(onExplicitRoute).toHaveBeenCalledWith({
+    expect(onExplicitRoute).toHaveBeenCalledWith(expect.objectContaining({
       openAIAccountId: "codex",
       upstreamModel: "gpt-5.6-luna",
       usage: { input_tokens: 0, output_tokens: 0 },
-    });
+      method: "POST",
+      path: "/v1/messages",
+      statusCode: 200,
+      source: "api",
+    }));
+    expect(onExplicitRoute.mock.calls[0]?.[0].durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("degrades to Anthropic when a 200 stream carries an upstream rejection", async () => {
@@ -725,11 +730,13 @@ describe("mountMessagesCrossProviderRoute", () => {
     it("routes a Claude-model request to OpenAI when the session is pinned there", async () => {
       const app = express();
       const forwarded: OpenAIResponsesRequest[] = [];
+      const onSessionRoute = vi.fn();
 
       mountMessagesCrossProviderRoute(app, {
         getOpenAIAccount: () => openAIAccount,
         modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
         resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onSessionRoute,
         forwardOpenAI: async ({ body }) => {
           forwarded.push(body);
           return new Response(JSON.stringify({
@@ -756,6 +763,18 @@ describe("mountMessagesCrossProviderRoute", () => {
         // The pinned session resolved "openai/default" to the configured model.
         expect(forwarded[0]?.model).toBe("gpt-5.6-terra");
       });
+
+      expect(onSessionRoute).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: "sess-1",
+        openAIAccountId: "openai-victor",
+        upstreamModel: "gpt-5.6-terra",
+        usage: { input_tokens: 4, output_tokens: 1 },
+        method: "POST",
+        path: "/v1/messages",
+        statusCode: 200,
+        source: "cli",
+      }));
+      expect(onSessionRoute.mock.calls[0]?.[0].durationMs).toBeGreaterThanOrEqual(0);
     });
 
     it("sends a pinned session to its own OpenAI account instead of the next in rotation", async () => {
@@ -1144,7 +1163,16 @@ describe("mountMessagesCrossProviderRoute", () => {
         expect(res.status).toBe(200);
         expect(forwardedBodies[0]?.model).toBe("gpt-5-codex");
         expect(nextSpy).not.toHaveBeenCalled();
-        expect(onFallback).toHaveBeenCalledWith({ openAIAccountId: "codex", upstreamModel: "gpt-5-codex", usage: { input_tokens: 1, output_tokens: 1 } });
+        expect(onFallback).toHaveBeenCalledWith(expect.objectContaining({
+          openAIAccountId: "codex",
+          upstreamModel: "gpt-5-codex",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          method: "POST",
+          path: "/v1/messages",
+          statusCode: 200,
+          source: "api",
+        }));
+        expect(onFallback.mock.calls[0]?.[0].durationMs).toBeGreaterThanOrEqual(0);
       });
     });
 
