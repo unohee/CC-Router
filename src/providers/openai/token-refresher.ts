@@ -1,3 +1,4 @@
+import type { AccountRateLimits } from "../../proxy/types.js";
 import type { ProviderAccount } from "../types.js";
 
 const TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
@@ -18,6 +19,20 @@ export type OpenAISubscriptionAccount = ProviderAccount & {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  /** Live usage counters. Optional so accounts.json files written before these
+   *  existed still load; treat absent as zero. */
+  requestCount?: number;
+  errorCount?: number;
+  lastUsed?: number;
+  /**
+   * Quota parsed from Codex response headers. Absent until the first request.
+   *
+   * Runtime-only, and deliberately so: `serialize()` omits rate limits for
+   * Anthropic accounts too, so neither provider carries quota across a restart.
+   * The cost of forgetting is one request — the response that follows refreshes
+   * the reading — and persisting stale quota would be worse than re-measuring.
+   */
+  rateLimits?: AccountRateLimits;
 };
 
 export function needsOpenAIRefresh(account: Pick<OpenAISubscriptionAccount, "expiresAt">): boolean {

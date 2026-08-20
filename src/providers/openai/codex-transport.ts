@@ -1,5 +1,6 @@
 import type { OpenAIResponsesRequest } from "../../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "./token-refresher.js";
+import { extractCodexRateLimits } from "./rate-limits.js";
 
 const CODEX_RESPONSES_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_CODEX_INSTRUCTIONS = "You are a concise coding assistant.";
@@ -23,6 +24,7 @@ export async function forwardOpenAICodexResponse(
     },
     body: JSON.stringify(body),
   });
+  recordCodexUsage(opts.account, upstream);
   return ensureEventStreamContentType(upstream);
 }
 
@@ -51,4 +53,19 @@ function ensureEventStreamContentType(upstream: Response): Response {
     statusText: upstream.statusText,
     headers,
   });
+}
+
+/**
+ * Fold one response's accounting into the account: request/error counts and the
+ * quota Codex reports in headers. Called for every forward — the headers are
+ * the only place this quota is published, so skipping a response loses that
+ * window's reading entirely.
+ */
+function recordCodexUsage(account: OpenAISubscriptionAccount, upstream: Response): void {
+  account.requestCount = (account.requestCount ?? 0) + 1;
+  account.lastUsed = Date.now();
+  if (!upstream.ok) account.errorCount = (account.errorCount ?? 0) + 1;
+
+  const limits = extractCodexRateLimits(name => upstream.headers.get(name) ?? "");
+  if (limits) account.rateLimits = limits;
 }

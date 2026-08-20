@@ -17,7 +17,7 @@ import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
-import { createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
+import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
@@ -173,13 +173,16 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
     id: a.id,
     provider: "openai_subscription",
     enabled: a.enabled !== false,
-    healthy: a.enabled !== false && expiresInMs > 0,
+    // A quota-exhausted account is not healthy, mirroring how a rate-limited
+    // Anthropic account is reported.
+    healthy: a.enabled !== false && expiresInMs > 0 && a.rateLimits?.status !== "rate_limited",
     busy: false,
-    requestCount: 0,
-    errorCount: 0,
+    requestCount: a.requestCount ?? 0,
+    errorCount: a.errorCount ?? 0,
     expiresInMs,
-    lastUsedMs: 0,
+    lastUsedMs: a.lastUsed ?? 0,
     lastRefreshMs: 0,
+    ...(a.rateLimits ? { rateLimits: a.rateLimits } : {}),
   };
 }
 
@@ -287,9 +290,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const sessionTargetUsable = (t: SessionTarget): boolean =>
     t.provider === "anthropic"
       ? pool.canServe(t.accountId)
-      // Same predicate the OpenAI picker applies (truthy `enabled`), so a
-      // session is never pinned to an account the picker would refuse.
-      : openAIAccounts.some(a => a.id === t.accountId && a.enabled);
+      // Same predicate the OpenAI picker applies, so a session is never pinned
+      // to an account the picker would refuse.
+      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
 
   const resolveSessionTarget = (sessionId: string): SessionTarget | null => {
     if (!sessionAffinityEnabled) return null;
@@ -629,7 +632,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Honour the session pin while that account can still serve; otherwise
       // fall back to plain rotation.
       if (preferredAccountId) {
-        const pinned = openAIAccounts.find(a => a.id === preferredAccountId && a.enabled);
+        const pinned = openAIAccounts.find(a => a.id === preferredAccountId && canServeOpenAI(a));
         if (pinned) return pinned;
       }
       return pickOpenAIAccount();
