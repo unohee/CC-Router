@@ -7,7 +7,7 @@ import type { Socket } from "net";
 import type { Request } from "express";
 import { TokenPool, EmptyPoolError } from "./token-pool.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
@@ -275,11 +275,34 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Session affinity — see session-router.ts for why request-level round-robin
   // and prompt caching work against each other.
+  // Assignments are flushed on a timer rather than on every change: a busy
+  // router reassigns often, and the snapshot only has to be recent enough that
+  // a restart lands sessions back on their own accounts.
+  let sessionFlush: NodeJS.Timeout | null = null;
   const sessionRouter = new SessionRouter({
     onReassign: ({ sessionId, from, to }) => {
       const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId}`;
       stats.addLog({ ts: Date.now(), accountId: to.accountId, model: "-", type: "route", details: msg });
     },
+    onAssignmentsChanged: () => {
+      if (sessionFlush) return;
+      sessionFlush = setTimeout(() => {
+        sessionFlush = null;
+        writeSessionAssignments(sessionRouter.snapshot());
+      }, 2_000);
+      sessionFlush.unref?.();
+    },
+  });
+  // Restore before serving: a session that arrives first thing after a restart
+  // must find its old account, not be handed a new one.
+  sessionRouter.restore(readSessionAssignments() as Parameters<typeof sessionRouter.restore>[0]);
+
+  // Snapshot on the way out, whichever way that is. The graceful path below
+  // covers signals, but auto-update restarts call process.exit directly and
+  // would otherwise discard the pending debounce — losing exactly the
+  // assignments a restart is about to need.
+  process.on("exit", () => {
+    writeSessionAssignments(sessionRouter.snapshot());
   });
   const sessionAffinityEnabled = initialConfig.sessionAffinity !== false;
   // OpenAI joins the session pool only when explicitly enabled AND a default
@@ -674,7 +697,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
-        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
       });
     },
     onExplicitRoute: ({ openAIAccountId, upstreamModel, usage }) => {
@@ -964,7 +987,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     req._ccAccount = account;
     req._startTime = Date.now();
-    const source = req.headers["x-claude-code-session-id"]
+    const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+    const source = sessionId
       ? "cli" as const
       : req.headers["x-api-key"]
       ? "desktop" as const
@@ -978,6 +1002,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       method: req.method,
       path: req.path,
       source,
+      ...(sessionId ? { sessionId } : {}),
     };
     stats.totalRequests++;
 
@@ -1003,6 +1028,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = () => {
     console.log(chalk.yellow("\nShutting down — saving tokens..."));
     saveAccounts(pool.getAll());
+    // Flush now: the debounce timer will not fire after exit, and losing the
+    // final assignments is what makes a restart rewrite every prompt cache.
+    writeSessionAssignments(sessionRouter.snapshot());
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();
     }

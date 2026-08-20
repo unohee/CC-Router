@@ -8,6 +8,15 @@ export const ACCOUNTS_PATH =
   process.env["ACCOUNTS_PATH"] ??
   path.join(CONFIG_DIR, "accounts.json");
 
+/**
+ * Session -> account assignments, so they survive a restart. Overridable for
+ * the same reason as ACCOUNTS_PATH: a container has no ~/.cc-router, so a bind
+ * mount alone would be written past.
+ */
+export const SESSIONS_PATH =
+  process.env["SESSIONS_PATH"] ??
+  path.join(CONFIG_DIR, "sessions.json");
+
 export const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), ".claude", "settings.json");
 
 export const PROXY_PORT = parseInt(process.env["PORT"] ?? "3456", 10);

@@ -17,6 +17,7 @@ ENV NODE_ENV=production
 # Port defaults — overridden by docker-compose environment section
 ENV PORT=3456
 ENV ACCOUNTS_PATH=/app/accounts.json
+ENV SESSIONS_PATH=/app/sessions.json
 
 # Install only production deps
 COPY package*.json ./

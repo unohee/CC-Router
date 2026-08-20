@@ -8,6 +8,12 @@ services:
     volumes:
       # Mount accounts.json read-write: cc-router must update it when tokens rotate
       - ${HOME}/.cc-router/accounts.json:/app/accounts.json
+      # Session assignments, so replacing the container does not reassign live
+      # sessions to other accounts — each move re-writes that conversation's
+      # entire prompt cache into the new account. Create the file first
+      # (`touch ~/.cc-router/sessions.json`): Docker turns a missing bind-mount
+      # source into a directory, which the router then silently cannot use.
+      - ${HOME}/.cc-router/sessions.json:/app/sessions.json
     environment:
       - PORT=3456
       - LITELLM_URL=http://litellm:4000

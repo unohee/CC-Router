@@ -4,6 +4,14 @@ export interface SessionTarget {
   accountId: string;
 }
 
+/** One persisted assignment. Flat by design — it is written to disk as JSON. */
+export interface SessionSnapshotEntry {
+  sessionId: string;
+  provider: SessionTarget["provider"];
+  accountId: string;
+  lastSeen: number;
+}
+
 export interface SessionRouterOptions {
   /** How long an unused assignment survives. Default 1 hour. */
   ttlMs?: number;
@@ -11,6 +19,8 @@ export interface SessionRouterOptions {
   now?: () => number;
   /** Fired when an existing session is moved to a different target. */
   onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget }) => void;
+  /** Fired whenever the assignment set changes, so it can be persisted. */
+  onAssignmentsChanged?: () => void;
 }
 
 interface Assignment {
@@ -50,11 +60,13 @@ export class SessionRouter {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly onReassign?: SessionRouterOptions["onReassign"];
+  private readonly onAssignmentsChanged?: SessionRouterOptions["onAssignmentsChanged"];
 
   constructor(opts: SessionRouterOptions = {}) {
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
     this.now = opts.now ?? (() => Date.now());
     this.onReassign = opts.onReassign;
+    this.onAssignmentsChanged = opts.onAssignmentsChanged;
   }
 
   /**
@@ -80,6 +92,10 @@ export class SessionRouter {
     const existing = this.assignments.get(sessionId);
     if (existing && isUsable(existing.target)) {
       existing.lastSeen = this.now();
+      // Refreshing the timestamp is itself a change worth persisting: a busy
+      // long-lived session never re-assigns, so without this its snapshot keeps
+      // the timestamp of its first request and restores as expired.
+      this.onAssignmentsChanged?.();
       return existing.target;
     }
 
@@ -93,7 +109,49 @@ export class SessionRouter {
     }
 
     this.assignments.set(sessionId, { target, lastSeen: this.now() });
+    this.onAssignmentsChanged?.();
     return target;
+  }
+
+  /**
+   * Serialisable view of the live assignments, for surviving a restart.
+   *
+   * Losing these on restart is not merely a cosmetic reset: a live Claude Code
+   * session gets reassigned, and its entire conversation is then re-written
+   * into the new account's prompt cache — measured at 917K tokens for one
+   * session, billed at 1.25x. Sessions must outlive the process that routes
+   * them.
+   */
+  snapshot(): SessionSnapshotEntry[] {
+    this.sweep();
+    return [...this.assignments].map(([sessionId, a]) => ({
+      sessionId,
+      provider: a.target.provider,
+      accountId: a.target.accountId,
+      lastSeen: a.lastSeen,
+    }));
+  }
+
+  /**
+   * Reload assignments saved earlier. Entries already past the TTL are dropped
+   * rather than revived — a session idle that long has no warm cache left to
+   * protect, so pinning it would only constrain placement for nothing.
+   *
+   * Targets that no longer exist are kept as-is; `resolve` filters them through
+   * `isUsable` and reassigns on the next request, so no validation is needed
+   * against the current account list.
+   */
+  restore(entries: readonly SessionSnapshotEntry[]): void {
+    const cutoff = this.now() - this.ttlMs;
+    for (const entry of entries) {
+      if (!entry?.sessionId || typeof entry.lastSeen !== "number") continue;
+      if (entry.lastSeen < cutoff) continue;
+      if (entry.provider !== "anthropic" && entry.provider !== "openai") continue;
+      this.assignments.set(entry.sessionId, {
+        target: { provider: entry.provider, accountId: entry.accountId },
+        lastSeen: entry.lastSeen,
+      });
+    }
   }
 
   /** Assignment for a session, without creating or refreshing one. */

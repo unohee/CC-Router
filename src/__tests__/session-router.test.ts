@@ -151,4 +151,86 @@ describe("SessionRouter", () => {
 
     expect(router.resolve("s1", [A, B], always, util)!.accountId).toBe("b");
   });
+
+  it("carries assignments across a restart", () => {
+    const before = new SessionRouter();
+    const pinned = before.resolve("s1", ALL, always)!;
+
+    const after = new SessionRouter();
+    after.restore(before.snapshot());
+
+    // The restored session finds its old account instead of being handed a new
+    // one — otherwise its whole prompt cache is rewritten elsewhere.
+    expect(after.resolve("s1", ALL, always)).toEqual(pinned);
+  });
+
+  it("drops entries already past the TTL rather than reviving them", () => {
+    let now = 1_000_000;
+    const source = new SessionRouter({ ttlMs: 60_000, now: () => now });
+    source.resolve("stale", [A], always);
+    const snap = source.snapshot();
+
+    now += 120_000;
+    const restored = new SessionRouter({ ttlMs: 60_000, now: () => now });
+    restored.restore(snap);
+
+    // Idle that long means no warm cache is left to protect.
+    expect(restored.peek("stale")).toBeNull();
+  });
+
+  it("reassigns a restored session whose account is gone", () => {
+    const source = new SessionRouter();
+    source.resolve("s1", [{ provider: "anthropic", accountId: "removed" }], always);
+
+    const restored = new SessionRouter();
+    restored.restore(source.snapshot());
+    const target = restored.resolve("s1", ALL, t => t.accountId !== "removed")!;
+
+    expect(target.accountId).not.toBe("removed");
+  });
+
+  it("ignores malformed snapshot entries instead of failing to start", () => {
+    const router = new SessionRouter();
+    router.restore([
+      { sessionId: "", provider: "anthropic", accountId: "a", lastSeen: Date.now() },
+      { sessionId: "bad-provider", provider: "gemini", accountId: "a", lastSeen: Date.now() },
+      { sessionId: "no-time", provider: "anthropic", accountId: "a" },
+      { sessionId: "good", provider: "anthropic", accountId: "a", lastSeen: Date.now() },
+    ] as Parameters<typeof router.restore>[0]);
+
+    expect(router.peek("good")).toEqual(A);
+    expect(router.peek("bad-provider")).toBeNull();
+    expect(router.peek("no-time")).toBeNull();
+  });
+
+  it("notifies on assignment changes so the snapshot can be persisted", () => {
+    const onAssignmentsChanged = vi.fn();
+    const router = new SessionRouter({ onAssignmentsChanged });
+
+    router.resolve("s1", ALL, always);
+    expect(onAssignmentsChanged).toHaveBeenCalledTimes(1);
+
+    // A repeat request refreshes lastSeen, which must also be persisted —
+    // otherwise a busy session's snapshot keeps its first timestamp and
+    // restores as expired.
+    router.resolve("s1", ALL, always);
+    expect(onAssignmentsChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an active session alive across a restart past the original TTL", () => {
+    let now = 1_000_000;
+    const source = new SessionRouter({ ttlMs: 60_000, now: () => now });
+    source.resolve("busy", [A, B], always);
+
+    // Active the whole time, always reusing the same pin.
+    for (let i = 0; i < 5; i++) {
+      now += 30_000;
+      source.resolve("busy", [A, B], always);
+    }
+
+    const restored = new SessionRouter({ ttlMs: 60_000, now: () => now });
+    restored.restore(source.snapshot());
+
+    expect(restored.peek("busy")).toEqual(A);
+  });
 });

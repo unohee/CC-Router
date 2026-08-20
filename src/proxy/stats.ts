@@ -9,6 +9,11 @@ export interface LogEntry {
   method?: string;
   path?: string;
   source?: "cli" | "desktop" | "api";
+  /** Claude Code session this request belongs to, when it sent one. Without it
+   *  the activity list cannot separate concurrent conversations, and per-session
+   *  context growth is unmeasurable — every reading is a mix of whichever
+   *  sessions happened to be active. */
+  sessionId?: string;
   // Token usage from Anthropic response (message_start + message_delta events)
   cacheReadTokens?: number;
   cacheCreationTokens?: number;

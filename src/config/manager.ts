@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "fs";
 import { randomBytes } from "crypto";
-import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
+import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH, SESSIONS_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -37,6 +37,34 @@ export function readAccountsFromPath(path: string): Account[] {
 }
 
 // Escritura atómica: escribe a .tmp y renombra — evita JSON corrupto si el proceso muere mid-write
+/**
+ * Session assignments survive a restart here. Without this the router forgets
+ * which account each live conversation belongs to, reassigns it, and the whole
+ * prompt cache is re-written into the new account — measured at 917K tokens
+ * for a single session.
+ */
+export function readSessionAssignments(): unknown[] {
+  try {
+    const raw = readFileSync(SESSIONS_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as { sessions?: unknown[] };
+    return Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+  } catch {
+    // Missing, unreadable or corrupt: start empty rather than fail to boot.
+    return [];
+  }
+}
+
+export function writeSessionAssignments(sessions: unknown[]): void {
+  try {
+    ensureConfigDir();
+    const tmp = SESSIONS_PATH + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ version: 1, sessions }), "utf-8");
+    renameSync(tmp, SESSIONS_PATH);
+  } catch {
+    // Losing the snapshot costs one round of reassignment, not correctness.
+  }
+}
+
 export function writeAccountsAtomic(data: unknown[]): void {
   ensureConfigDir();
   writeAccountsAtomicToPath(ACCOUNTS_PATH, data);
