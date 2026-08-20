@@ -193,8 +193,20 @@ export function createOpenAIStreamToAnthropicNormalizer(
         }];
       }
 
+      // The other way a stream can carry arguments atomically: no
+      // `function_call_arguments.*` event at all, just the finished item. The
+      // `sentArgumentDelta` guard is what keeps this from double-emitting when
+      // the branch above already supplied them.
       if (event.type === "response.output_item.done") {
-        return closeBlock(outputIndex);
+        const block = blocks.get(outputIndex);
+        const argumentEvent = block?.kind === "tool_use" && !block.sentArgumentDelta && event.item?.arguments
+          ? [{
+              type: "content_block_delta",
+              index: block.index,
+              delta: { type: "input_json_delta", partial_json: event.item.arguments },
+            }]
+          : [];
+        return [...argumentEvent, ...closeBlock(outputIndex)];
       }
 
       if (event.type === "response.completed") {
