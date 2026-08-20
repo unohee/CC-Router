@@ -642,6 +642,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     modelRouting,
   });
 
+  // OpenAI responses never pass the Anthropic proxy middleware, so their
+  // usage has to be folded into the aggregates here or the totals only ever
+  // count one provider.
+  const recordOpenAIUsage = (usage?: { input_tokens: number; output_tokens: number }): void => {
+    if (!usage) return;
+    stats.totalInputTokens += usage.input_tokens;
+    stats.totalOutputTokens += usage.output_tokens;
+  };
+
   mountMessagesCrossProviderRoute(app, {
     getOpenAIAccount: (preferredAccountId?: string) => {
       // Honour the session pin while that account can still serve; otherwise
@@ -659,24 +668,32 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     resolveSessionTarget,
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
-    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel }) => {
+    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
+      recordOpenAIUsage(usage);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
+        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
       });
     },
-    onExplicitRoute: ({ openAIAccountId, upstreamModel }) => {
+    onExplicitRoute: ({ openAIAccountId, upstreamModel, usage }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel);
+      recordOpenAIUsage(usage);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `explicit openai/* → ${openAIAccountId}`,
+        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
       });
     },
-    onFallback: ({ openAIAccountId, upstreamModel }) => {
+    onFallback: ({ openAIAccountId, upstreamModel, usage }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
-      stats.addLog({ ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg });
+      recordOpenAIUsage(usage);
+      stats.addLog({
+        ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg,
+        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+      });
     },
   });
 
@@ -705,6 +722,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         // Remove x-api-key if present — OAuth authentication uses Authorization Bearer,
         // not x-api-key. Having both set can cause conflicts at Anthropic's side.
         proxyReq.removeHeader("x-api-key");
+
+        // Ask upstream for an uncompressed body. Claude Code sends
+        // accept-encoding: gzip and Anthropic honours it — which silently
+        // disabled ALL token metering below, since the usage parser skips
+        // compressed bodies (verified against live traffic, 2026-08-20).
+        // This is a localhost proxy; the bandwidth saved by compression is
+        // worth less than being able to read what passes through.
+        proxyReq.setHeader("accept-encoding", "identity");
 
         // CRITICAL: api.anthropic.com requires the "oauth-2025-04-20" beta flag to
         // accept OAuth tokens (sk-ant-oat01-*). Without it the request is rejected

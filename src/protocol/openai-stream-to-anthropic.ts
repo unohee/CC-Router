@@ -31,6 +31,18 @@ export interface OpenAIStreamToAnthropicNormalizer {
   reset(): void;
 }
 
+export interface OpenAIStreamNormalizerOptions {
+  /**
+   * Model name reported in message_start instead of the upstream's. A Claude
+   * Code session routed to Codex otherwise sees "gpt-5.6-*", treats it as an
+   * unrecognised model, and clamps its assumed context window to 200k — which
+   * sends long conversations into autocompact thrashing.
+   */
+  modelOverride?: string;
+  /** Called once per response with the usage carried by response.completed. */
+  onUsage?: (usage: { input_tokens: number; output_tokens: number }) => void;
+}
+
 interface OpenBlock {
   /** Anthropic content-block index, assigned in the order blocks open. */
   index: number;
@@ -39,7 +51,9 @@ interface OpenBlock {
   sentArgumentDelta: boolean;
 }
 
-export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthropicNormalizer {
+export function createOpenAIStreamToAnthropicNormalizer(
+  opts: OpenAIStreamNormalizerOptions = {},
+): OpenAIStreamToAnthropicNormalizer {
   /**
    * OpenAI `output_index` -> the Anthropic block opened for it. OpenAI's index
    * can skip values (reasoning items occupy slots we do not forward), while
@@ -88,7 +102,7 @@ export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthrop
               id: event.response?.id ?? "",
               type: "message",
               role: "assistant",
-              model: event.response?.model ?? "",
+              model: opts.modelOverride ?? event.response?.model ?? "",
               content: [],
               stop_reason: null,
               stop_sequence: null,
@@ -170,13 +184,19 @@ export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthrop
         // events) is closed here, in the order the blocks were opened.
         const prefix = [...blocks.keys()].flatMap(closeBlock);
         const stopReason = sawToolUse ? "tool_use" : "end_turn";
+        const inputTokens = usage.input_tokens ?? 0;
+        const outputTokens = usage.output_tokens ?? 0;
+        opts.onUsage?.({ input_tokens: inputTokens, output_tokens: outputTokens });
         reset();
         return [
           ...prefix,
           {
             type: "message_delta",
             delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: usage.output_tokens ?? 0 },
+            // Codex only reveals input_tokens at completion, so message_start
+            // necessarily reported 0. Carrying the real figure here gives the
+            // client its only accurate reading of context size this turn.
+            usage: { input_tokens: inputTokens, output_tokens: outputTokens },
           },
           { type: "message_stop" },
         ];

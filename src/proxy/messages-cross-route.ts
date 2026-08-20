@@ -37,7 +37,7 @@ export interface MessagesCrossProviderRouteOptions {
   /** Point-in-time Anthropic-pool availability check (TokenPool.hasAvailableAccount). Required when crossProviderFallback is true. */
   hasAvailableAnthropicAccount?: () => boolean;
   /** Fired after a successful automatic fallback so the caller can log/record it. */
-  onFallback?: (info: { openAIAccountId: string; upstreamModel: string }) => void;
+  onFallback?: (info: { openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
   /** Resolve the account this session is pinned to. Called at most once per
    *  request — it advances the assignment cursor for sessions seen first time. */
   resolveSessionTarget?: (sessionId: string) => SessionTarget | null;
@@ -47,14 +47,19 @@ export interface MessagesCrossProviderRouteOptions {
    *  Claude-model requests too. */
   peekSessionTarget?: (sessionId: string) => SessionTarget | null;
   /** Fired when a session pinned to OpenAI serves a Claude-model request there. */
-  onSessionRoute?: (info: { sessionId: string; openAIAccountId: string; upstreamModel: string }) => void;
+  onSessionRoute?: (info: { sessionId: string; openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
   /** Fired when an explicit `openai/*` request is served. Without it this path
    *  leaves no trace, so OpenAI traffic is invisible in logs and the dashboard. */
-  onExplicitRoute?: (info: { openAIAccountId: string; upstreamModel: string }) => void;
+  onExplicitRoute?: (info: { openAIAccountId: string; upstreamModel: string; usage?: OpenAIUsage }) => void;
+}
+
+export interface OpenAIUsage {
+  input_tokens: number;
+  output_tokens: number;
 }
 
 type OpenAIForwardOutcome =
-  | { ok: true; account: OpenAISubscriptionAccount }
+  | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage }
   | { ok: false; reason: "no_account" | "prepare_failed" | "request_failed" };
 
 /**
@@ -97,10 +102,16 @@ async function forwardAnthropicRequestAsOpenAI(
   /** Session-pinned account, when this request belongs to a session assigned
    *  to a specific OpenAI account. Without it the caller's rotation decides. */
   preferredAccountId?: string,
+  /** Model name to report back in place of the upstream's. Set on routes where
+   *  the caller asked for a Claude model: reporting "gpt-5.6-*" makes Claude
+   *  Code treat the model as unrecognised and clamp its assumed context window
+   *  to 200k, which drives long conversations into autocompact thrashing. */
+  publicModel?: string,
 ): Promise<OpenAIForwardOutcome> {
   const account = getOpenAIAccount(preferredAccountId);
   if (!account) return { ok: false, reason: "no_account" };
 
+  let observedUsage: OpenAIUsage | undefined;
   try {
     const ready = await prepareOpenAIAccount(account);
     if (!ready) return { ok: false, reason: "prepare_failed" };
@@ -116,12 +127,14 @@ async function forwardAnthropicRequestAsOpenAI(
       return { ok: false, reason: "request_failed" };
     }
 
-    await sendOpenAIAsAnthropic(upstream, res, requestedStream);
-    return { ok: true, account };
+    await sendOpenAIAsAnthropic(upstream, res, requestedStream, publicModel, usage => {
+      observedUsage = usage;
+    });
+    return { ok: true, account, usage: observedUsage };
   } catch (err) {
     if (res.headersSent) {
       console.error(`[cross-route] OpenAI request to "${account.id}" failed after the response had already started: ${(err as Error).message}`);
-      return { ok: true, account };
+      return { ok: true, account, usage: observedUsage };
     }
     return { ok: false, reason: "request_failed" };
   }
@@ -139,15 +152,20 @@ async function sendOpenAIAsAnthropic(
   upstream: globalThis.Response,
   res: Response,
   requestedStream: boolean,
+  publicModel?: string,
+  onUsage?: (usage: OpenAIUsage) => void,
 ): Promise<void> {
   const contentType = upstream.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
     if (requestedStream) {
-      await sendOpenAIStreamAsAnthropic(upstream, res);
+      await sendOpenAIStreamAsAnthropic(upstream, res, publicModel, onUsage);
       return;
     }
 
-    res.status(upstream.status).json(await collectOpenAIStreamAsAnthropicMessage(upstream));
+    const collected = await collectOpenAIStreamAsAnthropicMessage(upstream);
+    if (publicModel) collected.model = publicModel;
+    onUsage?.({ input_tokens: collected.usage.input_tokens, output_tokens: collected.usage.output_tokens });
+    res.status(upstream.status).json(collected);
     return;
   }
 
@@ -159,7 +177,10 @@ async function sendOpenAIAsAnthropic(
   }
 
   const json = await upstream.json() as OpenAIResponseCompleted;
-  res.status(upstream.status).json(openAIResponseToAnthropicMessage(json));
+  const message = openAIResponseToAnthropicMessage(json);
+  if (publicModel) message.model = publicModel;
+  onUsage?.({ input_tokens: message.usage.input_tokens, output_tokens: message.usage.output_tokens });
+  res.status(upstream.status).json(message);
 }
 
 async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Response): Promise<ReturnType<typeof openAIResponseToAnthropicMessage>> {
@@ -257,13 +278,18 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
   return openAIResponseToAnthropicMessage({ id, model, output, usage });
 }
 
-async function sendOpenAIStreamAsAnthropic(upstream: globalThis.Response, res: Response): Promise<void> {
+async function sendOpenAIStreamAsAnthropic(
+  upstream: globalThis.Response,
+  res: Response,
+  publicModel?: string,
+  onUsage?: (usage: OpenAIUsage) => void,
+): Promise<void> {
   res.status(upstream.status);
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
   res.flushHeaders?.();
 
-  const normalizer = createOpenAIStreamToAnthropicNormalizer();
+  const normalizer = createOpenAIStreamToAnthropicNormalizer({ modelOverride: publicModel, onUsage });
   const reader = upstream.body?.getReader();
   if (!reader) {
     res.end();
@@ -351,6 +377,7 @@ export function mountMessagesCrossProviderRoute(
           opts.onExplicitRoute?.({
             openAIAccountId: outcome.account.id,
             upstreamModel: route.upstreamModel,
+            usage: outcome.usage,
           });
         }
         if (!outcome.ok) {
@@ -415,12 +442,14 @@ export function mountMessagesCrossProviderRoute(
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
           sessionTarget.accountId,
+          /* publicModel */ req.body.model,
         );
         if (outcome.ok) {
           opts.onSessionRoute?.({
             sessionId,
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,
+            usage: outcome.usage,
           });
           return;
         }
@@ -435,9 +464,11 @@ export function mountMessagesCrossProviderRoute(
           { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
+          /* preferredAccountId */ undefined,
+          /* publicModel */ req.body.model,
         );
         if (outcome.ok) {
-          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: tieredModel });
+          opts.onFallback?.({ openAIAccountId: outcome.account.id, upstreamModel: tieredModel, usage: outcome.usage });
           return;
         }
         // OpenAI unavailable too — fall through to the normal (degraded) Anthropic path.

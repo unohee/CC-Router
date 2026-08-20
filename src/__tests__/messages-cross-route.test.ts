@@ -637,6 +637,7 @@ describe("mountMessagesCrossProviderRoute", () => {
     expect(onExplicitRoute).toHaveBeenCalledWith({
       openAIAccountId: "codex",
       upstreamModel: "gpt-5.6-luna",
+      usage: { input_tokens: 0, output_tokens: 0 },
     });
   });
 
@@ -790,6 +791,107 @@ describe("mountMessagesCrossProviderRoute", () => {
       // whole conversation on the strength of a single explicit call is the
       // worse surprise of the two.
       expect(resolveSessionTarget).not.toHaveBeenCalled();
+    });
+
+    it("echoes the requested Claude model in responses served by OpenAI", async () => {
+      // Claude Code treats "gpt-5.6-*" as an unrecognised model and clamps its
+      // assumed context window to 200k, which sends long sessions into
+      // autocompact thrashing. The proxy therefore reports the model the
+      // client asked for; the upstream model stays visible in logs/dashboard.
+      const app = express();
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        forwardOpenAI: async () => new Response(JSON.stringify({
+          id: "resp_1", model: "gpt-5.6-terra",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
+          usage: { input_tokens: 40, output_tokens: 2 },
+        }), { status: 200, headers: { "content-type": "application/json" } }),
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-echo" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+        const body = await res.json() as { model: string; usage: { input_tokens: number } };
+
+        expect(body.model).toBe("claude-sonnet-5");
+        expect(body.usage.input_tokens).toBe(40);
+      });
+    });
+
+    it("streams the requested Claude model and honest usage back for a pinned session", async () => {
+      const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+      const app = express();
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              const push = (event: unknown) => controller.enqueue(encoder.encode(sse(event)));
+              push({ type: "response.created", response: { id: "r", model: "gpt-5.6-terra" } });
+              push({ type: "response.output_text.delta", output_index: 0, delta: "hi" });
+              push({ type: "response.completed", response: { id: "r", usage: { input_tokens: 55, output_tokens: 3 } } });
+              controller.close();
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-echo-s" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+        const text = await res.text();
+        const events = text.split("\n").filter(l => l.startsWith("data: "))
+          .map(l => JSON.parse(l.slice(6)) as Record<string, any>);
+
+        expect(events.find(e => e.type === "message_start")?.message.model).toBe("claude-sonnet-5");
+        expect(events.find(e => e.type === "message_delta")?.usage).toEqual({ input_tokens: 55, output_tokens: 3 });
+      });
+    });
+
+    it("does not rename the model on an explicit openai/* request", async () => {
+      const app = express();
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: {},
+        forwardOpenAI: async () => new Response(JSON.stringify({
+          id: "r", model: "gpt-5.6-luna",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+          usage: {},
+        }), { status: 200, headers: { "content-type": "application/json" } }),
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "openai/gpt-5.6-luna", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+
+        // The caller named the OpenAI model on purpose — reporting it back is
+        // accurate, not a compatibility hazard.
+        expect(((await res.json()) as { model: string }).model).toBe("gpt-5.6-luna");
+      });
     });
 
     it("passes through to the Anthropic proxy when the session is pinned to Anthropic", async () => {
@@ -985,7 +1087,7 @@ describe("mountMessagesCrossProviderRoute", () => {
         expect(res.status).toBe(200);
         expect(forwardedBodies[0]?.model).toBe("gpt-5-codex");
         expect(nextSpy).not.toHaveBeenCalled();
-        expect(onFallback).toHaveBeenCalledWith({ openAIAccountId: "codex", upstreamModel: "gpt-5-codex" });
+        expect(onFallback).toHaveBeenCalledWith({ openAIAccountId: "codex", upstreamModel: "gpt-5-codex", usage: { input_tokens: 1, output_tokens: 1 } });
       });
     });
 
