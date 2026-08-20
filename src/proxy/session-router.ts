@@ -86,11 +86,15 @@ export class SessionRouter {
      *  ties between equally-loaded targets so a nearly-exhausted account does
      *  not keep taking new work. Absent means "unknown", treated as 0. */
     utilOf?: (target: SessionTarget) => number,
+    /** Whether an EXISTING pin may be kept. Defaults to `isUsable`. Separated
+     *  because holding a pin tolerates transient states that would rightly
+     *  disqualify a target for a new session. */
+    isRetainable?: (target: SessionTarget) => boolean,
   ): SessionTarget | null {
     this.sweep();
 
     const existing = this.assignments.get(sessionId);
-    if (existing && isUsable(existing.target)) {
+    if (existing && (isRetainable ?? isUsable)(existing.target)) {
       existing.lastSeen = this.now();
       // Refreshing the timestamp is itself a change worth persisting: a busy
       // long-lived session never re-assigns, so without this its snapshot keeps

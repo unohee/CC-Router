@@ -233,4 +233,25 @@ describe("SessionRouter", () => {
 
     expect(restored.peek("busy")).toEqual(A);
   });
+
+  it("holds a pin through a state that would block a new placement", () => {
+    const router = new SessionRouter();
+    const pinned = router.resolve("s1", ALL, always)!;
+
+    // Placement rejects it (busy), retention accepts it.
+    const kept = router.resolve("s1", ALL, t => t.accountId !== pinned.accountId, undefined,
+      () => true)!;
+
+    expect(kept).toEqual(pinned);
+  });
+
+  it("still moves a session when retention itself says no", () => {
+    const router = new SessionRouter();
+    const pinned = router.resolve("s1", ALL, always)!;
+
+    const moved = router.resolve("s1", ALL, t => t.accountId !== pinned.accountId, undefined,
+      () => false)!;
+
+    expect(moved.accountId).not.toBe(pinned.accountId);
+  });
 });

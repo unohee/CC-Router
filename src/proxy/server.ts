@@ -310,6 +310,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const sessionPoolIncludesOpenAI =
     initialConfig.sessionPoolIncludesOpenAI === true && !!modelRouting.openAIDefaultModel?.trim();
 
+  // Retention is judged more leniently than placement — see TokenPool.canRetain.
+  const sessionTargetRetainable = (t: SessionTarget): boolean =>
+    t.provider === "anthropic"
+      ? pool.canRetain(t.accountId)
+      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
+
   const sessionTargetUsable = (t: SessionTarget): boolean =>
     t.provider === "anthropic"
       ? pool.canServe(t.accountId)
@@ -340,7 +346,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     if (sessionPoolIncludesOpenAI) {
       for (const a of openAIAccounts) candidates.push({ provider: "openai", accountId: a.id });
     }
-    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable, sessionTargetUtil);
+    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable, sessionTargetUtil, sessionTargetRetainable);
   };
 
   // Log when the pool falls back to a capped account — makes the cap bypass
@@ -830,6 +836,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           logError(account.id, 429, `${reason} — cooldown ${retryAfter}s`);
 
           account.busy = true;
+          // Extend, never shorten: a later failure must not be cleared by an
+          // earlier timer that happens to fire first.
+          account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + retryAfter * 1_000);
           setTimeout(() => { account.busy = false; }, retryAfter * 1_000);
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.
@@ -840,6 +849,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           logError(account.id, 529, "Service overloaded — cooldown 30s");
 
           account.busy = true;
+          account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + 30_000);
           setTimeout(() => { account.busy = false; }, 30_000);
         }
 

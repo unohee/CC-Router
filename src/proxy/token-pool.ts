@@ -194,6 +194,27 @@ export class TokenPool {
     return this.isAvailable(a);
   }
 
+  /**
+   * Whether a session already pinned to this account should stay on it.
+   *
+   * Looser than `canServe` by exactly one condition: `busy` is ignored. Busy
+   * means "a request is in flight", not "cannot serve", and a pinned session
+   * that abandons its account over a moment of concurrency re-writes its whole
+   * prompt cache into the next one — measured at 954K tokens for a single
+   * conversation. Concurrency is a fair reason to place a NEW session
+   * elsewhere; it is never a reason to move an existing one.
+   */
+  canRetain(id: string): boolean {
+    const a = this.getById(id);
+    if (!a) return false;
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    // `cooling` is still honoured: a 429/529 cooldown is upstream telling us to
+    // stop, which a pin must respect. Only plain in-flight concurrency is
+    // forgiven here.
+    const cooling = (a.coolingUntil ?? 0) > Date.now();
+    return a.healthy && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
+  }
+
   private isAvailable(a: Account): boolean {
     return a.healthy && !a.busy && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }

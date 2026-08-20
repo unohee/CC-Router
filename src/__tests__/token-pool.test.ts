@@ -477,3 +477,58 @@ describe("TokenPool — hasAvailableAccount", () => {
     expect(pool.getNext().id).toBe("a");
   });
 });
+
+describe("canServe / canRetain", () => {
+  function poolWith(overrides: Partial<Account> = {}) {
+    const account = {
+      ...makeAccount("a"),
+      ...overrides,
+    } as Account;
+    return { pool: new TokenPool([account]), account };
+  }
+
+  it("keeps a pinned account while a request is in flight, but will not place there", () => {
+    // busy means "in flight", not "unusable". Dropping the pin over it rewrites
+    // the whole conversation into another account's cache — while sending a NEW
+    // session to a busy account is still the wrong choice.
+    const { pool } = poolWith({ busy: true });
+
+    expect(pool.canRetain("a")).toBe(true);
+    expect(pool.canServe("a")).toBe(false);
+  });
+
+  it("drops a pinned account that is rate limited or unhealthy", () => {
+    const limited = poolWith({
+      // Reset in the future, or the cooldown sweep clears it before we look.
+      rateLimits: {
+        ...DEFAULT_RATE_LIMITS,
+        status: "rate_limited",
+        fiveHourReset: Math.floor(Date.now() / 1000) + 3600,
+      },
+    });
+    expect(limited.pool.canRetain("a")).toBe(false);
+
+    const unhealthy = poolWith({ healthy: false });
+    expect(unhealthy.pool.canRetain("a")).toBe(false);
+  });
+
+  it("respects a 429/529 cooldown even for a pinned session", () => {
+    // The cooldown is expressed as busy + a timer, so retention has to
+    // distinguish "upstream told us to stop" from "a request is in flight".
+    const { pool } = poolWith({ busy: true, coolingUntil: Date.now() + 60_000 });
+
+    expect(pool.canRetain("a")).toBe(false);
+  });
+
+  it("releases the pin once the cooldown deadline passes", () => {
+    const { pool } = poolWith({ busy: true, coolingUntil: Date.now() - 1_000 });
+
+    expect(pool.canRetain("a")).toBe(true);
+  });
+
+  it("knows nothing about an account it does not have", () => {
+    const { pool } = poolWith();
+    expect(pool.canServe("missing")).toBe(false);
+    expect(pool.canRetain("missing")).toBe(false);
+  });
+});
