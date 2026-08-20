@@ -186,6 +186,26 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
   };
 }
 
+/**
+ * The Anthropic account a request should stay on, given the pin the session
+ * router already decided to keep.
+ *
+ * Judged with `canRetain`, not `canServe`: the router has just held this pin
+ * through `canRetain`, so re-testing it with the stricter placement predicate
+ * would discard the pin the moment the account is merely mid-request, and the
+ * conversation would round-robin onto another account and re-write its whole
+ * prompt cache. Measured at 670K tokens for one session that bounced
+ * intrect -> kyte -> intrect inside 51 seconds. The two predicates must agree
+ * about retention or the pin is decided twice, by different rules.
+ */
+export function pinnedAnthropicAccount(
+  pool: Pick<TokenPool, "canRetain" | "getById">,
+  target: SessionTarget | undefined,
+): Account | undefined {
+  if (target?.provider !== "anthropic") return undefined;
+  return pool.canRetain(target.accountId) ? pool.getById(target.accountId) : undefined;
+}
+
 function providerStatus(accounts: HealthAccountView[]): ProviderOperationalStatus {
   return {
     configured: accounts.length > 0,
@@ -958,10 +978,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Reuse the pin resolved by the cross-provider route (same request), so
       // the cursor advances once. Falls back to round-robin when the request
       // carried no session header or the pinned account went unusable.
-      const pinned = req._ccSessionTarget;
-      const pinnedAccount = pinned?.provider === "anthropic" && pool.canServe(pinned.accountId)
-        ? pool.getById(pinned.accountId)
-        : undefined;
+      const pinnedAccount = pinnedAnthropicAccount(pool, req._ccSessionTarget);
       if (pinnedAccount) {
         pinnedAccount.requestCount++;
         pinnedAccount.lastUsed = Date.now();
