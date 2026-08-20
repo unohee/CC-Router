@@ -10,12 +10,15 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 
 ### Features
 
-- **Round-robin token rotation** — distribute requests across 2-20 Claude Max accounts automatically
+- **Session-affinity load balancing** — each Claude Code session is pinned to one account so its prompt cache stays warm; new sessions go to the least-loaded account with the most quota left
+- **OpenAI accounts in the pool (opt-in)** — whole sessions can be assigned to an OpenAI ChatGPT/Codex subscription account, tools included; each conversation stays on one provider
+- **Model tier routing (opt-in)** — Claude opus/sonnet/haiku requests map to comparable Codex models (sol/terra/luna) instead of collapsing onto one default; reasoning effort passes through
 - **Multi-provider routing** — route `openai/*` models to OpenAI ChatGPT/Codex subscription accounts and Claude models to Claude subscriptions
 - **Transparent Claude proxy** — Claude Code works normally; streaming, thinking, tool use, prompt caching all pass through
 - **Codex CLI support** — configure Codex to use CC-Router as a Responses-compatible provider
 - **Automatic token refresh** — OAuth tokens are refreshed before they expire, saved atomically to disk
-- **Rate limit awareness** — detects 429/529 responses and coolsdown accounts; picks the least-loaded one
+- **Rate limit awareness** — detects 429/529 responses and cools accounts down; quota utilization is parsed for both Claude (`anthropic-ratelimit-*`) and Codex (`x-codex-*`) accounts and steers session assignment
+- **Token accounting** — input/output/cache tokens per request and in aggregate, for both providers, on the live dashboard
 - **Client mode** — connect to a remote CC-Router from any machine with one command (`cc-router client connect <url>`)
 - **Claude Desktop support** — route Cowork / Agent-mode traffic through CC-Router via mitmproxy interception (macOS, Windows, Linux)
 - **Guided setup wizard** — interactive `cc-router setup` extracts tokens from Keychain or credentials file, configures everything
@@ -309,6 +312,12 @@ cc-router configure models --claude-model claude-sonnet-4-6 --openai-model gpt-5
 cc-router configure --show   Show current Claude Code proxy settings
 cc-router configure --remove Remove cc-router settings (same as revert without stopping)
 
+cc-router configure --enable-fallback           Route to OpenAI when every Claude account is exhausted
+cc-router configure --enable-session-pool-openai  Let whole sessions be assigned to OpenAI accounts
+cc-router configure --enable-model-tiers        Map Claude tiers to comparable Codex models
+cc-router configure --disable-session-affinity  Pick an account per request instead of per session
+cc-router configure --disable-auto-update       Never self-install newer npm releases
+
 cc-router client connect <url>       Connect Claude Code to a remote CC-Router
 cc-router client connect --desktop   Also configure Claude Desktop interception
 cc-router client disconnect          Revert all client configuration
@@ -354,6 +363,38 @@ cc-router docker up
 ```
 
 See [docs/litellm-setup.md](docs/litellm-setup.md) for details.
+
+---
+
+## Session affinity and the multi-provider pool
+
+Account selection is per **session**, not per request. Claude Code resends the whole
+conversation every turn and leans on Anthropic's prompt cache, but that cache lives with
+the account that wrote it — spreading one conversation across accounts makes every account
+re-write the prefix (cache writes cost 1.25x base input; reads cost 0.1x). So each session
+is pinned to one account, and *different* sessions spread across the pool: new sessions go
+to the usable account holding the fewest live sessions, ties broken by remaining quota,
+then rotation. If the pinned account becomes unavailable the session is reassigned —
+availability beats cache locality.
+
+With `--enable-session-pool-openai` (requires an OpenAI default model), whole sessions can
+be assigned to an OpenAI subscription account. That session's Claude-model requests are
+translated to the Responses API — tools, streaming and multi-turn included — and answered
+by the mapped Codex model. Responses echo the requested Claude model name so Claude Code
+keeps its context-window assumptions; the real upstream model is shown in logs (`⇢ codex`)
+and on the dashboard. Subagents carry their own session ids, so a single Claude Code task
+using subagents naturally spreads across providers without breaking any cache.
+
+With `--enable-model-tiers`, tier is preserved across the bridge:
+
+| Requested | Answered by |
+|---|---|
+| `claude-opus-*`, `claude-fable-*` | `gpt-5.6-sol` |
+| `claude-sonnet-*` | `gpt-5.6-terra` |
+| `claude-haiku-*` | `gpt-5.6-luna` |
+
+Unmapped or unrecognised models fall back to the configured OpenAI default. Edit
+`modelRouting.openAITierMap` in `~/.cc-router/config.json` to change a tier.
 
 ---
 
