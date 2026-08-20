@@ -11,7 +11,7 @@ import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExist
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback, logSessionRoute } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -645,10 +645,17 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
     onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel }) => {
-      logSessionRoute(openAIAccountId, upstreamModel, sessionId);
+      logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
         type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
+      });
+    },
+    onExplicitRoute: ({ openAIAccountId, upstreamModel }) => {
+      logOpenAIRoute(openAIAccountId, upstreamModel);
+      stats.addLog({
+        ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
+        type: "route", details: `explicit openai/* → ${openAIAccountId}`,
       });
     },
     onFallback: ({ openAIAccountId, upstreamModel }) => {

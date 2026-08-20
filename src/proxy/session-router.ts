@@ -26,6 +26,10 @@ function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
   return a.provider === b.provider && a.accountId === b.accountId;
 }
 
+function targetKey(t: SessionTarget): string {
+  return `${t.provider}:${t.accountId}`;
+}
+
 /**
  * Pins each Claude Code session to one account for as long as that account can
  * serve it.
@@ -78,8 +82,7 @@ export class SessionRouter {
     const usable = candidates.filter(isUsable);
     if (usable.length === 0) return null;
 
-    const target = usable[this.cursor % usable.length];
-    this.cursor = (this.cursor + 1) % usable.length;
+    const target = this.leastLoaded(usable);
 
     if (existing && !sameTarget(existing.target, target)) {
       this.onReassign?.({ sessionId, from: existing.target, to: target });
@@ -102,6 +105,35 @@ export class SessionRouter {
 
   forget(sessionId: string): void {
     this.assignments.delete(sessionId);
+  }
+
+  /**
+   * Pick the target carrying the fewest live sessions, breaking ties by
+   * round-robin so equal candidates still rotate.
+   *
+   * Plain rotation counts assignments, not work: one session can send hundreds
+   * of requests while another sends two, so rotating alone lets an account that
+   * is already saturated take the next session anyway. Counting live sessions
+   * per target is the closest proxy for load that assignment can see — it
+   * cannot know how busy a session will turn out to be, but it can avoid
+   * stacking new ones onto an account that already holds several.
+   */
+  private leastLoaded(usable: SessionTarget[]): SessionTarget {
+    const load = new Map<string, number>();
+    for (const target of usable) load.set(targetKey(target), 0);
+    for (const assignment of this.assignments.values()) {
+      const key = targetKey(assignment.target);
+      const current = load.get(key);
+      if (current !== undefined) load.set(key, current + 1);
+    }
+
+    let lightest = Infinity;
+    for (const target of usable) lightest = Math.min(lightest, load.get(targetKey(target)) ?? 0);
+
+    const tied = usable.filter(target => (load.get(targetKey(target)) ?? 0) === lightest);
+    const chosen = tied[this.cursor % tied.length];
+    this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
+    return chosen;
   }
 
   private sweep(): void {

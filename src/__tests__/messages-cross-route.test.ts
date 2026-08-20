@@ -595,6 +595,51 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  it("reports an explicit openai/* request so it is not invisible in logs", async () => {
+    const onExplicitRoute = vi.fn();
+    const app = express();
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "codex", provider: "openai_subscription", accessToken: "a",
+        refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+      }),
+      modelRouting: { openAIAliases: { fast: "gpt-5.6-luna" } },
+      onExplicitRoute,
+      forwardOpenAI: async () => new Response(JSON.stringify({
+        id: "r", model: "gpt-5.6-luna",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+        usage: {},
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/fast", max_tokens: 8,
+          messages: [{ role: "user", content: "hi" }], stream: false,
+        }),
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+
+    // The alias is reported resolved, matching what actually went upstream.
+    expect(onExplicitRoute).toHaveBeenCalledWith({
+      openAIAccountId: "codex",
+      upstreamModel: "gpt-5.6-luna",
+    });
+  });
+
   describe("session affinity", () => {
     const openAIAccount = {
       id: "openai-victor",

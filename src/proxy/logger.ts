@@ -21,18 +21,19 @@ export function logRoute(
 }
 
 /**
- * A request served by the OpenAI account its session is pinned to.
+ * A request served by an OpenAI account, whatever routed it there.
  *
- * Without this the routing log only ever names Anthropic accounts — a session
- * assigned to OpenAI produces no line at all, which reads as "OpenAI is never
- * used" even while it is handling traffic.
+ * Without this the routing log only ever names Anthropic accounts — the
+ * cross-provider route returns before the Anthropic proxy that does the
+ * logging, so OpenAI traffic produced no line at all. That reads as "OpenAI is
+ * never used" even while it is handling requests.
  */
-export function logSessionRoute(accountId: string, model: string, sessionId: string): void {
+export function logOpenAIRoute(accountId: string, model: string, note?: string): void {
   console.log(
     chalk.gray(`[${ts()}]`) +
     chalk.cyan(` ⇢ ${accountId}`) +
     chalk.gray(` ${model}`) +
-    chalk.cyan(` pin=${sessionId.slice(0, 8)}`)
+    (note ? chalk.cyan(` ${note}`) : "")
   );
 }
 

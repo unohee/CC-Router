@@ -48,6 +48,9 @@ export interface MessagesCrossProviderRouteOptions {
   peekSessionTarget?: (sessionId: string) => SessionTarget | null;
   /** Fired when a session pinned to OpenAI serves a Claude-model request there. */
   onSessionRoute?: (info: { sessionId: string; openAIAccountId: string; upstreamModel: string }) => void;
+  /** Fired when an explicit `openai/*` request is served. Without it this path
+   *  leaves no trace, so OpenAI traffic is invisible in logs and the dashboard. */
+  onExplicitRoute?: (info: { openAIAccountId: string; upstreamModel: string }) => void;
 }
 
 type OpenAIForwardOutcome =
@@ -344,6 +347,12 @@ export function mountMessagesCrossProviderRoute(
           /* passThroughUpstreamErrors */ true,
           pinned?.provider === "openai" ? pinned.accountId : undefined,
         );
+        if (outcome.ok) {
+          opts.onExplicitRoute?.({
+            openAIAccountId: outcome.account.id,
+            upstreamModel: route.upstreamModel,
+          });
+        }
         if (!outcome.ok) {
           if (outcome.reason === "no_account") {
             res.status(503).json({
