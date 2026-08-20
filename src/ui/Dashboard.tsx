@@ -12,6 +12,8 @@ const MODEL_VISIBLE_ROWS = 16;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+import { accountProviderTag, paddedProviderTag, PROVIDER_TAG_WIDTH } from "./account-view.js";
+
 interface AccountRateLimitsView {
   status: string;
   fiveHourUtil: number;
@@ -846,9 +848,9 @@ function AccountRow({ account: a, selected }: { account: AccountStat; selected: 
     : a.expiresInMs < 30 * 60 * 1000 ? "yellow"
     : "white";
 
-  const providerTag = a.provider === "openai_subscription"
-    ? " [OpenAI]"
-    : rl.plan ? ` [${rl.plan}]` : "";
+  // Codex reports its plan in response headers, so an OpenAI account shows
+  // "[OpenAI pro]" once it has served a request and "[OpenAI]" before that.
+  const providerTag = accountProviderTag({ provider: a.provider, rateLimits: rl });
 
   // User-defined caps hint
   const s5 = a.sessionLimitPercent ?? 100;
@@ -868,8 +870,8 @@ function AccountRow({ account: a, selected }: { account: AccountStat; selected: 
         <Text color={dotColor}> {dot} </Text>
         <Text color={nameColor} dimColor={isDisabled}>{a.id.slice(0, 20).padEnd(20)}</Text>
         <Text color={statusColor}>{statusLabel}</Text>
-        {providerTag && <Text color={a.provider === "openai_subscription" ? "cyan" : "magenta"}>{providerTag.padEnd(10)}</Text>}
-        {!providerTag && <Text>{"".padEnd(10)}</Text>}
+        {providerTag && <Text color={a.provider === "openai_subscription" ? "cyan" : "magenta"}>{paddedProviderTag({ provider: a.provider, rateLimits: rl })}</Text>}
+        {!providerTag && <Text>{"".padEnd(PROVIDER_TAG_WIDTH)}</Text>}
         <Text color="gray"> req </Text>
         <Text color="white">{String(a.requestCount).padStart(5)}</Text>
         <Text color="gray">  err </Text>
