@@ -294,6 +294,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // to an account the picker would refuse.
       : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
 
+  /**
+   * How full a target's quota is, as the worst of its two windows. The tighter
+   * window is what actually stops the account, so the maximum — not the
+   * currently-claimed one — is the honest measure of remaining headroom.
+   * Unknown quota reads as empty, which lets an unmeasured account take work
+   * and thereby produce the reading.
+   */
+  const sessionTargetUtil = (t: SessionTarget): number => {
+    const limits = t.provider === "anthropic"
+      ? pool.getById(t.accountId)?.rateLimits
+      : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits;
+    if (!limits) return 0;
+    return Math.max(limits.fiveHourUtil, limits.sevenDayUtil);
+  };
+
   const resolveSessionTarget = (sessionId: string): SessionTarget | null => {
     if (!sessionAffinityEnabled) return null;
     const candidates: SessionTarget[] = pool.getAll().map(a => ({
@@ -302,7 +317,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     if (sessionPoolIncludesOpenAI) {
       for (const a of openAIAccounts) candidates.push({ provider: "openai", accountId: a.id });
     }
-    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable);
+    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable, sessionTargetUtil);
   };
 
   // Log when the pool falls back to a capped account — makes the cap bypass

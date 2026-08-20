@@ -70,6 +70,10 @@ export class SessionRouter {
     sessionId: string,
     candidates: SessionTarget[],
     isUsable: (target: SessionTarget) => boolean,
+    /** Fraction of the binding quota window already spent (0–1). Used to break
+     *  ties between equally-loaded targets so a nearly-exhausted account does
+     *  not keep taking new work. Absent means "unknown", treated as 0. */
+    utilOf?: (target: SessionTarget) => number,
   ): SessionTarget | null {
     this.sweep();
 
@@ -82,7 +86,7 @@ export class SessionRouter {
     const usable = candidates.filter(isUsable);
     if (usable.length === 0) return null;
 
-    const target = this.leastLoaded(usable);
+    const target = this.leastLoaded(usable, utilOf);
 
     if (existing && !sameTarget(existing.target, target)) {
       this.onReassign?.({ sessionId, from: existing.target, to: target });
@@ -118,7 +122,10 @@ export class SessionRouter {
    * cannot know how busy a session will turn out to be, but it can avoid
    * stacking new ones onto an account that already holds several.
    */
-  private leastLoaded(usable: SessionTarget[]): SessionTarget {
+  private leastLoaded(
+    usable: SessionTarget[],
+    utilOf?: (target: SessionTarget) => number,
+  ): SessionTarget {
     const load = new Map<string, number>();
     for (const target of usable) load.set(targetKey(target), 0);
     for (const assignment of this.assignments.values()) {
@@ -131,6 +138,23 @@ export class SessionRouter {
     for (const target of usable) lightest = Math.min(lightest, load.get(targetKey(target)) ?? 0);
 
     const tied = usable.filter(target => (load.get(targetKey(target)) ?? 0) === lightest);
+    if (tied.length === 1) return tied[0];
+
+    // Among equally-loaded targets, prefer the one with the most quota left.
+    // Session count alone would keep feeding an account sitting at 80% of its
+    // weekly window while another at 50% waits its turn.
+    if (utilOf) {
+      let best = tied[0];
+      let bestUtil = utilOf(best);
+      for (const target of tied.slice(1)) {
+        const util = utilOf(target);
+        if (util < bestUtil) { best = target; bestUtil = util; }
+      }
+      // Only commit to the quota ordering when it actually distinguishes them;
+      // otherwise fall through to rotation so identical targets still alternate.
+      if (tied.some(target => utilOf(target) !== bestUtil)) return best;
+    }
+
     const chosen = tied[this.cursor % tied.length];
     this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
     return chosen;

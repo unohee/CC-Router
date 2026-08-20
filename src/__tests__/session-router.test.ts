@@ -124,4 +124,31 @@ describe("SessionRouter", () => {
 
     expect(new Set(seen).size).toBe(3);
   });
+
+  it("prefers the target with more quota left when load is equal", () => {
+    const router = new SessionRouter();
+    // A is nearly exhausted, B has headroom, OpenAI is untouched.
+    const util = (t: SessionTarget) => ({ a: 0.85, b: 0.4, codex: 0.02 }[t.accountId] ?? 0);
+
+    expect(router.resolve("s1", ALL, always, util)!.accountId).toBe("codex");
+    expect(router.resolve("s2", ALL, always, util)!.accountId).toBe("b");
+    // Only now, with the roomier two each holding a session, does A get one.
+    expect(router.resolve("s3", ALL, always, util)!.accountId).toBe("a");
+  });
+
+  it("keeps rotating when tied targets have identical quota", () => {
+    const router = new SessionRouter();
+    const seen = ["s1", "s2", "s3"].map(id => router.resolve(id, ALL, always, () => 0.5)!.accountId);
+
+    expect(new Set(seen).size).toBe(3);
+  });
+
+  it("treats an unmeasured target as empty so it can produce a reading", () => {
+    const router = new SessionRouter();
+    // B has never served a request, so its quota is unknown (0) and it wins
+    // over an account known to be half spent.
+    const util = (t: SessionTarget) => (t.accountId === "a" ? 0.5 : 0);
+
+    expect(router.resolve("s1", [A, B], always, util)!.accountId).toBe("b");
+  });
 });
