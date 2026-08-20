@@ -11,7 +11,7 @@ import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExist
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logSessionRoute } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -645,8 +645,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
     onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel }) => {
-      const msg = `session ${sessionId.slice(0, 8)} pinned to ${openAIAccountId} (${upstreamModel})`;
-      stats.addLog({ ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg });
+      logSessionRoute(openAIAccountId, upstreamModel, sessionId);
+      stats.addLog({
+        ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
+        type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
+      });
     },
     onFallback: ({ openAIAccountId, upstreamModel }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;

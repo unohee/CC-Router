@@ -20,6 +20,22 @@ export function logRoute(
   );
 }
 
+/**
+ * A request served by the OpenAI account its session is pinned to.
+ *
+ * Without this the routing log only ever names Anthropic accounts — a session
+ * assigned to OpenAI produces no line at all, which reads as "OpenAI is never
+ * used" even while it is handling traffic.
+ */
+export function logSessionRoute(accountId: string, model: string, sessionId: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.cyan(` ⇢ ${accountId}`) +
+    chalk.gray(` ${model}`) +
+    chalk.cyan(` pin=${sessionId.slice(0, 8)}`)
+  );
+}
+
 export function logFallback(accountId: string, model: string): void {
   console.log(
     chalk.gray(`[${ts()}]`) +
