@@ -8,6 +8,9 @@ interface OpenAIStreamEventItem {
 
 interface OpenAIStreamEvent {
   type?: string;
+  /** Present on `error` events and inside `response.failed`. */
+  message?: string;
+  code?: string;
   delta?: string;
   /** Index of the output item this event belongs to; absent on text-only streams. */
   output_index?: number;
@@ -17,11 +20,27 @@ interface OpenAIStreamEvent {
   response?: {
     id?: string;
     model?: string;
+    error?: { message?: string; code?: string } | null;
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
     };
   };
+}
+
+/**
+ * Failure carried inside an HTTP 200 stream. Codex reports a rejected request
+ * — an over-long context, for instance — as `response.failed` / `error` events
+ * rather than a non-2xx status, so a caller that only checks `upstream.ok`
+ * sees success and forwards an empty message.
+ */
+export function openAIStreamFailure(event: OpenAIStreamEvent): string | null {
+  if (event.type === "error") return event.message ?? event.code ?? "upstream error";
+  if (event.type === "response.failed") {
+    const err = event.response?.error;
+    return err?.message ?? err?.code ?? "upstream reported the response failed";
+  }
+  return null;
 }
 
 type AnthropicStreamEvent = Record<string, unknown>;

@@ -4,7 +4,7 @@ import { selectRoute } from "../providers/route-selector.js";
 import { openAIModelForClaudeModel } from "../protocol/model-ref.js";
 import { anthropicToOpenAIResponses } from "../protocol/anthropic-to-openai.js";
 import { openAIResponseToAnthropicMessage } from "../protocol/openai-response-to-anthropic.js";
-import { createOpenAIStreamToAnthropicNormalizer } from "../protocol/openai-stream-to-anthropic.js";
+import { createOpenAIStreamToAnthropicNormalizer, openAIStreamFailure } from "../protocol/openai-stream-to-anthropic.js";
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
 import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
@@ -57,6 +57,9 @@ export interface OpenAIUsage {
   input_tokens: number;
   output_tokens: number;
 }
+
+/** Raised when an HTTP 200 stream carries a failure before any byte reached the client. */
+class UpstreamStreamFailure extends Error {}
 
 type OpenAIForwardOutcome =
   | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage }
@@ -132,6 +135,12 @@ async function forwardAnthropicRequestAsOpenAI(
     });
     return { ok: true, account, usage: observedUsage };
   } catch (err) {
+    if (err instanceof UpstreamStreamFailure) {
+      // Reported inside a 200 stream, before anything was written — treat it
+      // like any other failed attempt so the caller can degrade to Anthropic.
+      console.error(`[cross-route] OpenAI account "${account.id}" rejected the request: ${err.message}`);
+      return { ok: false, reason: "request_failed" };
+    }
     if (res.headersSent) {
       console.error(`[cross-route] OpenAI request to "${account.id}" failed after the response had already started: ${(err as Error).message}`);
       return { ok: true, account, usage: observedUsage };
@@ -184,6 +193,8 @@ async function sendOpenAIAsAnthropic(
 }
 
 async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Response): Promise<ReturnType<typeof openAIResponseToAnthropicMessage>> {
+  // Throws UpstreamStreamFailure when the 200 stream carried a rejection, so
+  // the caller degrades instead of returning an empty message.
   const reader = upstream.body?.getReader();
   if (!reader) {
     return openAIResponseToAnthropicMessage({ id: "", model: "", output: [], usage: {} });
@@ -198,6 +209,7 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
   // the order the model produced them, rather than text-then-tools.
   const textByIndex = new Map<number, string>();
   const callsByIndex = new Map<number, OpenAIFunctionCall>();
+  let collectedFailure: string | null = null;
 
   const applyEvent = (event: unknown) => {
     if (typeof event !== "object" || event === null) return;
@@ -245,7 +257,11 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
       id = openAIEvent.response?.id ?? id;
       model = openAIEvent.response?.model ?? model;
       usage = openAIEvent.response?.usage ?? usage;
+      return;
     }
+
+    const failure = openAIStreamFailure(openAIEvent as Parameters<typeof openAIStreamFailure>[0]);
+    if (failure) collectedFailure ??= failure;
   };
 
   while (true) {
@@ -275,6 +291,7 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
       }] : [];
     });
 
+  if (collectedFailure) throw new UpstreamStreamFailure(collectedFailure);
   return openAIResponseToAnthropicMessage({ id, model, output, usage });
 }
 
@@ -287,7 +304,8 @@ async function sendOpenAIStreamAsAnthropic(
   res.status(upstream.status);
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
-  res.flushHeaders?.();
+  // Headers are NOT flushed yet: an upstream failure can still arrive as the
+  // first event, and flushing would commit this response to OpenAI.
 
   const normalizer = createOpenAIStreamToAnthropicNormalizer({ modelOverride: publicModel, onUsage });
   const reader = upstream.body?.getReader();
@@ -298,6 +316,31 @@ async function sendOpenAIStreamAsAnthropic(
 
   const decoder = new TextDecoder();
   let remainder = "";
+  let wroteAnything = false;
+
+  // message_start is emitted from response.created, which always precedes the
+  // response.failed that reports a rejection. Writing it immediately would
+  // commit the response to OpenAI before knowing the request was even
+  // accepted, so the opening events are held until real content appears.
+  let pending: Record<string, unknown>[] = [];
+  const commit = (event: Record<string, unknown>) => {
+    pending.push(event);
+    const type = event["type"];
+    const isContent = type === "content_block_start" || type === "content_block_delta"
+      || type === "content_block_stop" || type === "message_delta";
+    if (!isContent) return;
+    if (!wroteAnything) res.flushHeaders?.();
+    for (const held of pending) res.write(encodeSseEvent(held));
+    pending = [];
+    wroteAnything = true;
+  };
+  const flushPending = () => {
+    if (pending.length === 0) return;
+    if (!wroteAnything) res.flushHeaders?.();
+    for (const held of pending) res.write(encodeSseEvent(held));
+    pending = [];
+    wroteAnything = true;
+  };
 
   try {
     while (true) {
@@ -307,8 +350,16 @@ async function sendOpenAIStreamAsAnthropic(
       const parsed = parseSseLines(remainder + decoder.decode(value, { stream: true }));
       remainder = parsed.remainder;
       for (const event of parsed.events) {
+        // Codex reports a rejected request (an over-long context, say) inside
+        // an HTTP 200 stream. Nothing downstream would notice: the normalizer
+        // ignores these events and the client receives an empty message. While
+        // no bytes have gone out yet the request is still salvageable, so this
+        // is raised for the caller to retry on Anthropic.
+        const failure = openAIStreamFailure(event as Parameters<typeof normalizer.convert>[0]);
+        if (failure && !wroteAnything) throw new UpstreamStreamFailure(failure);
+
         for (const mapped of normalizer.convert(event as Parameters<typeof normalizer.convert>[0])) {
-          res.write(encodeSseEvent(mapped));
+          commit(mapped);
         }
       }
     }
@@ -317,14 +368,25 @@ async function sendOpenAIStreamAsAnthropic(
     if (tail || remainder) {
       const parsed = parseSseLines(remainder + tail + "\n");
       for (const event of parsed.events) {
+        const failure = openAIStreamFailure(event as Parameters<typeof normalizer.convert>[0]);
+        if (failure && !wroteAnything) throw new UpstreamStreamFailure(failure);
+
         for (const mapped of normalizer.convert(event as Parameters<typeof normalizer.convert>[0])) {
-          res.write(encodeSseEvent(mapped));
+          commit(mapped);
         }
       }
     }
-  } finally {
+
+    // A stream that produced nothing but an opening still has to be delivered.
+    flushPending();
+  } catch (err) {
+    // A pre-first-byte failure leaves the response untouched so the caller can
+    // still fall through to Anthropic; anything else ends the stream as before.
+    if (err instanceof UpstreamStreamFailure && !wroteAnything) throw err;
     res.end();
+    return;
   }
+  res.end();
 }
 
 export function mountMessagesCrossProviderRoute(

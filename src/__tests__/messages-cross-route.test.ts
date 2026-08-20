@@ -641,6 +641,63 @@ describe("mountMessagesCrossProviderRoute", () => {
     });
   });
 
+  it("degrades to Anthropic when a 200 stream carries an upstream rejection", async () => {
+    // Codex reports an over-long context as response.failed inside a 200
+    // stream. Treating that as success would hand the client an empty message.
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+    const nextSpy = vi.fn();
+    const app = express();
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "codex", provider: "openai_subscription", accessToken: "a",
+        refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+      }),
+      modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+      crossProviderFallback: true,
+      hasAvailableAnthropicAccount: () => false,
+      forwardOpenAI: async () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+            controller.enqueue(encoder.encode(sse({
+              type: "response.failed",
+              response: { id: "r", error: { message: "Your input exceeds the context window of this model." } },
+            })));
+            controller.close();
+          },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+    app.use((_req, _res, next) => { nextSpy(); next(); });
+    app.use((_req, res) => res.status(200).json({ servedBy: "anthropic" }));
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-5", max_tokens: 8,
+          messages: [{ role: "user", content: "hi" }], stream: true,
+        }),
+      });
+
+      expect(await res.json()).toEqual({ servedBy: "anthropic" });
+      expect(nextSpy).toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+  });
+
   describe("session affinity", () => {
     const openAIAccount = {
       id: "openai-victor",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createOpenAIStreamToAnthropicNormalizer, openAIStreamEventToAnthropicEvents } from "../protocol/openai-stream-to-anthropic.js";
+import { createOpenAIStreamToAnthropicNormalizer, openAIStreamEventToAnthropicEvents, openAIStreamFailure } from "../protocol/openai-stream-to-anthropic.js";
 
 describe("openAIStreamEventToAnthropicEvents", () => {
   it("converts common Responses stream events to Anthropic message stream events", () => {
@@ -218,5 +218,28 @@ describe("openAIStreamEventToAnthropicEvents", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 0, output_tokens: 1 } },
       { type: "message_stop" },
     ]);
+  });
+});
+
+describe("openAIStreamFailure", () => {
+  it("recognises a rejection delivered inside a 200 stream", () => {
+    expect(openAIStreamFailure({
+      type: "response.failed",
+      response: { error: { message: "Your input exceeds the context window of this model." } },
+    })).toBe("Your input exceeds the context window of this model.");
+
+    expect(openAIStreamFailure({ type: "error", message: "boom" })).toBe("boom");
+  });
+
+  it("falls back to a code, then to a generic description", () => {
+    expect(openAIStreamFailure({ type: "error", code: "invalid_request_error" })).toBe("invalid_request_error");
+    expect(openAIStreamFailure({ type: "response.failed", response: {} }))
+      .toBe("upstream reported the response failed");
+  });
+
+  it("says nothing about ordinary events", () => {
+    expect(openAIStreamFailure({ type: "response.created" })).toBeNull();
+    expect(openAIStreamFailure({ type: "response.output_text.delta", delta: "hi" })).toBeNull();
+    expect(openAIStreamFailure({ type: "response.completed" })).toBeNull();
   });
 });
