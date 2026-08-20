@@ -3,6 +3,7 @@ interface OpenAIStreamEventItem {
   type?: string;
   call_id?: string;
   name?: string;
+  arguments?: string;
 }
 
 interface OpenAIStreamEvent {
@@ -135,7 +136,15 @@ export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthrop
       }
 
       if (event.type === "response.output_item.done") {
-        return closeBlock(outputIndex);
+        const block = blocks.get(outputIndex);
+        const argumentEvent = block?.kind === "tool_use" && !block.sentArguments && event.item?.arguments
+          ? [{
+              type: "content_block_delta",
+              index: block.index,
+              delta: { type: "input_json_delta", partial_json: event.item.arguments },
+            }]
+          : [];
+        return [...argumentEvent, ...closeBlock(outputIndex)];
       }
 
       if (event.type === "response.completed") {

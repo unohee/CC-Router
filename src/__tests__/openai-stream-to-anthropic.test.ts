@@ -165,4 +165,28 @@ describe("openAIStreamEventToAnthropicEvents", () => {
       content_block: { type: "tool_use", id: "call_2", name: "read_file", input: {} },
     });
   });
+
+  it("uses arguments from output_item.done when no argument events were sent", () => {
+    const normalizer = createOpenAIStreamToAnthropicNormalizer();
+    normalizer.convert({ type: "response.created", response: { id: "resp_4" } });
+    normalizer.convert({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "function_call", call_id: "call_3", name: "read_file" },
+    });
+
+    expect(normalizer.convert({
+      type: "response.output_item.done",
+      output_index: 0,
+      item: { type: "function_call", arguments: "{\"path\":\"README.md\"}" },
+    })).toEqual([
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"path\":\"README.md\"}" },
+      },
+      { type: "content_block_stop", index: 0 },
+    ]);
+  });
+
 });
