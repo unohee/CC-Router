@@ -7,7 +7,7 @@ import { createOpenAIStreamToAnthropicNormalizer } from "../protocol/openai-stre
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
 import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
-import type { OpenAIResponseCompleted } from "../protocol/openai-responses-types.js";
+import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputItem } from "../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 
@@ -148,20 +148,26 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
   let remainder = "";
   let id = "";
   let model = "";
-  let text = "";
   let usage: OpenAIResponseCompleted["usage"] = {};
+  // Keyed by OpenAI `output_index` so text and tool calls can be re-emitted in
+  // the order the model produced them, rather than text-then-tools.
+  const textByIndex = new Map<number, string>();
+  const callsByIndex = new Map<number, OpenAIFunctionCall>();
 
   const applyEvent = (event: unknown) => {
     if (typeof event !== "object" || event === null) return;
     const openAIEvent = event as {
       type?: string;
       delta?: string;
+      output_index?: number;
+      item?: { type?: string; id?: string; call_id?: string; name?: string; arguments?: string };
       response?: {
         id?: string;
         model?: string;
         usage?: OpenAIResponseCompleted["usage"];
       };
     };
+    const outputIndex = openAIEvent.output_index ?? 0;
 
     if (openAIEvent.type === "response.created") {
       id = openAIEvent.response?.id ?? id;
@@ -170,7 +176,23 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
     }
 
     if (openAIEvent.type === "response.output_text.delta") {
-      text += openAIEvent.delta ?? "";
+      textByIndex.set(outputIndex, (textByIndex.get(outputIndex) ?? "") + (openAIEvent.delta ?? ""));
+      return;
+    }
+
+    // `output_item.done` carries the finished call in one piece (call_id, name
+    // and the complete arguments string), so the argument deltas need not be
+    // reassembled here.
+    if (openAIEvent.type === "response.output_item.done") {
+      const item = openAIEvent.item;
+      if (item?.type === "function_call" && item.call_id) {
+        callsByIndex.set(outputIndex, {
+          type: "function_call",
+          call_id: item.call_id,
+          name: item.name ?? "",
+          arguments: item.arguments ?? "",
+        });
+      }
       return;
     }
 
@@ -195,16 +217,20 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
     parseSseLines(remainder + tail + "\n").events.forEach(applyEvent);
   }
 
-  return openAIResponseToAnthropicMessage({
-    id,
-    model,
-    output: text ? [{
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text }],
-    }] : [],
-    usage,
-  });
+  const output: OpenAIResponseOutputItem[] = [...new Set([...textByIndex.keys(), ...callsByIndex.keys()])]
+    .sort((a, b) => a - b)
+    .flatMap((index): OpenAIResponseOutputItem[] => {
+      const call = callsByIndex.get(index);
+      if (call) return [call];
+      const text = textByIndex.get(index);
+      return text ? [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      }] : [];
+    });
+
+  return openAIResponseToAnthropicMessage({ id, model, output, usage });
 }
 
 async function sendOpenAIStreamAsAnthropic(upstream: globalThis.Response, res: Response): Promise<void> {

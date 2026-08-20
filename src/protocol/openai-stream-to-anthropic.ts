@@ -1,6 +1,19 @@
+interface OpenAIStreamEventItem {
+  id?: string;
+  type?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+}
+
 interface OpenAIStreamEvent {
   type?: string;
   delta?: string;
+  /** Index of the output item this event belongs to; absent on text-only streams. */
+  output_index?: number;
+  /** Completed `arguments` string, sent with `response.function_call_arguments.done`. */
+  arguments?: string;
+  item?: OpenAIStreamEventItem;
   response?: {
     id?: string;
     model?: string;
@@ -18,28 +31,54 @@ export interface OpenAIStreamToAnthropicNormalizer {
   reset(): void;
 }
 
-export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthropicNormalizer {
-  let textBlockStarted = false;
+interface OpenBlock {
+  /** Anthropic content-block index, assigned in the order blocks open. */
+  index: number;
+  kind: "text" | "tool_use";
+  /** Whether any input_json_delta has been emitted for this tool_use block. */
+  sentArgumentDelta: boolean;
+}
 
-  const ensureTextBlockStarted = (): AnthropicStreamEvent[] => {
-    if (textBlockStarted) return [];
-    textBlockStarted = true;
-    return [
-      {
-        type: "content_block_start",
-        index: 0,
-        content_block: { type: "text", text: "" },
-      },
-    ];
-  };
+export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthropicNormalizer {
+  /**
+   * OpenAI `output_index` -> the Anthropic block opened for it. OpenAI's index
+   * can skip values (reasoning items occupy slots we do not forward), while
+   * Anthropic requires content blocks numbered contiguously from 0, so the two
+   * are mapped rather than passed through.
+   */
+  let blocks = new Map<number, OpenBlock>();
+  let nextIndex = 0;
+  let sawToolUse = false;
 
   const reset = () => {
-    textBlockStarted = false;
+    blocks = new Map();
+    nextIndex = 0;
+    sawToolUse = false;
+  };
+
+  const openTextBlock = (outputIndex: number): AnthropicStreamEvent[] => {
+    if (blocks.has(outputIndex)) return [];
+    const block: OpenBlock = { index: nextIndex++, kind: "text", sentArgumentDelta: false };
+    blocks.set(outputIndex, block);
+    return [{
+      type: "content_block_start",
+      index: block.index,
+      content_block: { type: "text", text: "" },
+    }];
+  };
+
+  const closeBlock = (outputIndex: number): AnthropicStreamEvent[] => {
+    const block = blocks.get(outputIndex);
+    if (!block) return [];
+    blocks.delete(outputIndex);
+    return [{ type: "content_block_stop", index: block.index }];
   };
 
   return {
     reset,
     convert(event: OpenAIStreamEvent): AnthropicStreamEvent[] {
+      const outputIndex = event.output_index ?? 0;
+
       if (event.type === "response.created") {
         reset();
         return [
@@ -59,28 +98,84 @@ export function createOpenAIStreamToAnthropicNormalizer(): OpenAIStreamToAnthrop
         ];
       }
 
+      // A function call announces itself with the full call_id/name up front;
+      // only its arguments stream in afterwards. Text items are not opened here
+      // — they stay lazy so a message item that never emits a delta does not
+      // produce an empty text block.
+      if (event.type === "response.output_item.added") {
+        if (event.item?.type !== "function_call") return [];
+        if (blocks.has(outputIndex)) return [];
+        const block: OpenBlock = { index: nextIndex++, kind: "tool_use", sentArgumentDelta: false };
+        blocks.set(outputIndex, block);
+        sawToolUse = true;
+        return [{
+          type: "content_block_start",
+          index: block.index,
+          content_block: {
+            type: "tool_use",
+            id: event.item.call_id ?? event.item.id ?? "",
+            name: event.item.name ?? "",
+            input: {},
+          },
+        }];
+      }
+
       if (event.type === "response.output_text.delta") {
+        const prefix = openTextBlock(outputIndex);
+        const block = blocks.get(outputIndex);
         return [
-          ...ensureTextBlockStarted(),
+          ...prefix,
           {
             type: "content_block_delta",
-            index: 0,
+            index: block?.index ?? 0,
             delta: { type: "text_delta", text: event.delta ?? "" },
           },
         ];
       }
 
+      if (event.type === "response.function_call_arguments.delta") {
+        const block = blocks.get(outputIndex);
+        if (!block || block.kind !== "tool_use") return [];
+        block.sentArgumentDelta = true;
+        return [{
+          type: "content_block_delta",
+          index: block.index,
+          delta: { type: "input_json_delta", partial_json: event.delta ?? "" },
+        }];
+      }
+
+      // Normally redundant — the deltas already carried the whole argument
+      // string. It matters when upstream sends short arguments as a single
+      // `done` with no preceding delta, which would otherwise leave the client
+      // with a tool_use block whose input never arrived.
+      if (event.type === "response.function_call_arguments.done") {
+        const block = blocks.get(outputIndex);
+        if (!block || block.kind !== "tool_use") return [];
+        if (block.sentArgumentDelta || !event.arguments) return [];
+        block.sentArgumentDelta = true;
+        return [{
+          type: "content_block_delta",
+          index: block.index,
+          delta: { type: "input_json_delta", partial_json: event.arguments },
+        }];
+      }
+
+      if (event.type === "response.output_item.done") {
+        return closeBlock(outputIndex);
+      }
+
       if (event.type === "response.completed") {
         const usage = event.response?.usage ?? {};
-        const prefix = textBlockStarted
-          ? [{ type: "content_block_stop", index: 0 }]
-          : [];
+        // Anything still open (a stream that ended without per-item `done`
+        // events) is closed here, in the order the blocks were opened.
+        const prefix = [...blocks.keys()].flatMap(closeBlock);
+        const stopReason = sawToolUse ? "tool_use" : "end_turn";
         reset();
         return [
           ...prefix,
           {
             type: "message_delta",
-            delta: { stop_reason: "end_turn", stop_sequence: null },
+            delta: { stop_reason: stopReason, stop_sequence: null },
             usage: { output_tokens: usage.output_tokens ?? 0 },
           },
           { type: "message_stop" },

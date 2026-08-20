@@ -253,6 +253,166 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  it("collapses a function-call SSE into tool_use blocks, preserving model ordering", async () => {
+    const app = express();
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "openai-victor",
+        provider: "openai_subscription",
+        accessToken: "access",
+        refreshToken: "refresh",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        enabled: true,
+      }),
+      forwardOpenAI: async () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            const push = (event: unknown) => controller.enqueue(encoder.encode(sse(event)));
+            push({ type: "response.created", response: { id: "resp_1", model: "gpt-5.6-terra" } });
+            push({ type: "response.output_text.delta", output_index: 0, delta: "Checking." });
+            push({ type: "response.output_item.done", output_index: 0, item: { type: "message" } });
+            push({
+              type: "response.output_item.added",
+              output_index: 1,
+              item: { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "" },
+            });
+            push({ type: "response.function_call_arguments.delta", output_index: 1, delta: "{\"city\":\"Seoul\"}" });
+            push({
+              type: "response.output_item.done",
+              output_index: 1,
+              item: { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "{\"city\":\"Seoul\"}" },
+            });
+            push({ type: "response.completed", response: { id: "resp_1", model: "gpt-5.6-terra", usage: { input_tokens: 63, output_tokens: 19 } } });
+            controller.close();
+          },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-5.6-terra",
+          max_tokens: 128,
+          messages: [{ role: "user", content: "weather?" }],
+          stream: false,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        id: "resp_1",
+        type: "message",
+        role: "assistant",
+        model: "gpt-5.6-terra",
+        content: [
+          { type: "text", text: "Checking." },
+          { type: "tool_use", id: "call_1", name: "get_weather", input: { city: "Seoul" } },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 63, output_tokens: 19 },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+  });
+
+  it("streams a function call back as Anthropic tool_use SSE events", async () => {
+    const app = express();
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "openai-victor",
+        provider: "openai_subscription",
+        accessToken: "access",
+        refreshToken: "refresh",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        enabled: true,
+      }),
+      forwardOpenAI: async () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            const push = (event: unknown) => controller.enqueue(encoder.encode(sse(event)));
+            push({ type: "response.created", response: { id: "resp_1", model: "gpt-5.6-terra" } });
+            push({
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "" },
+            });
+            push({ type: "response.function_call_arguments.delta", output_index: 0, delta: "{\"city\":\"Seoul\"}" });
+            push({
+              type: "response.output_item.done",
+              output_index: 0,
+              item: { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "{\"city\":\"Seoul\"}" },
+            });
+            push({ type: "response.completed", response: { id: "resp_1", usage: { output_tokens: 19 } } });
+            controller.close();
+          },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-5.6-terra",
+          max_tokens: 128,
+          messages: [{ role: "user", content: "weather?" }],
+          stream: true,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      const payloads = body
+        .split("\n")
+        .filter(line => line.startsWith("data: "))
+        .map(line => JSON.parse(line.slice("data: ".length)) as Record<string, unknown>);
+
+      expect(payloads.find(p => p.type === "content_block_start")).toEqual({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_1", name: "get_weather", input: {} },
+      });
+      expect(payloads.find(p => p.type === "content_block_delta")).toEqual({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"city\":\"Seoul\"}" },
+      });
+      expect(payloads.find(p => p.type === "message_delta")).toMatchObject({
+        delta: { stop_reason: "tool_use" },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+  });
+
   it("streams OpenAI Responses SSE back as Anthropic Messages SSE", async () => {
     const app = express();
 

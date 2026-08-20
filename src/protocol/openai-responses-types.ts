@@ -35,6 +35,17 @@ export interface OpenAIInputMessage {
   content: OpenAIInputContent[];
 }
 
+/**
+ * One entry of a Responses request's `input` array. Function calls and their
+ * outputs are TOP-LEVEL items, siblings of messages — not blocks nested inside
+ * a message's `content`. Nesting them is rejected upstream with HTTP 400
+ * `invalid_value` (verified against the Codex backend, 2026-08-20).
+ */
+export type OpenAIInputItem =
+  | OpenAIInputMessage
+  | OpenAIFunctionCall
+  | OpenAIFunctionCallOutput;
+
 export interface OpenAITool {
   type: "function";
   name: string;
@@ -45,7 +56,7 @@ export interface OpenAITool {
 export interface OpenAIResponsesRequest {
   model: string;
   instructions?: string;
-  input: OpenAIInputMessage[];
+  input: OpenAIInputItem[];
   tools?: OpenAITool[];
   max_output_tokens?: number;
   stream?: boolean;
@@ -58,10 +69,20 @@ export interface OpenAIResponseOutputMessage {
   content: OpenAIOutputText[];
 }
 
+/**
+ * One entry of a completed response's `output` array, and equally the `item`
+ * payload of `response.output_item.added` / `.done` stream events. Function
+ * calls reuse the input-side `OpenAIFunctionCall` shape: the Responses API
+ * emits the same `{call_id, name, arguments}` fields in both directions.
+ */
+export type OpenAIResponseOutputItem =
+  | OpenAIResponseOutputMessage
+  | OpenAIFunctionCall;
+
 export interface OpenAIResponseCompleted {
   id: string;
   model?: string;
-  output?: OpenAIResponseOutputMessage[];
+  output?: OpenAIResponseOutputItem[];
   usage?: {
     input_tokens?: number;
     output_tokens?: number;

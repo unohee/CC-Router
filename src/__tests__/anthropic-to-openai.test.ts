@@ -70,12 +70,52 @@ describe("anthropicToOpenAIResponses", () => {
         },
       },
     ]);
-    expect(result.input[0].content).toEqual([
-      { type: "input_text", text: "I will inspect it." },
+    // Verified against the Codex backend (2026-08-20): function calls nested
+    // inside a message's content are rejected with HTTP 400 `invalid_value`,
+    // and assistant text must be output_text rather than input_text.
+    expect(result.input).toEqual([
+      { role: "assistant", content: [{ type: "output_text", text: "I will inspect it." }] },
       { type: "function_call", call_id: "toolu_1", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
-    ]);
-    expect(result.input[1].content).toEqual([
       { type: "function_call_output", call_id: "toolu_1", output: "CC-Router" },
+    ]);
+  });
+
+  it("keeps user text as input_text and assistant text as output_text across turns", () => {
+    const result = anthropicToOpenAIResponses({
+      model: "openai/gpt-5.5",
+      messages: [
+        { role: "user", content: "Say A" },
+        { role: "assistant", content: "A" },
+        { role: "user", content: [{ type: "text", text: "Now say B" }] },
+      ],
+    });
+
+    expect(result.input).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "Say A" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "A" }] },
+      { role: "user", content: [{ type: "input_text", text: "Now say B" }] },
+    ]);
+  });
+
+  it("splits a message into ordered items when text precedes several tool calls", () => {
+    const result = anthropicToOpenAIResponses({
+      model: "openai/gpt-5.5",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Reading both." },
+            { type: "tool_use", id: "t1", name: "read_file", input: { path: "a" } },
+            { type: "tool_use", id: "t2", name: "read_file", input: { path: "b" } },
+          ],
+        },
+      ],
+    });
+
+    expect(result.input).toEqual([
+      { role: "assistant", content: [{ type: "output_text", text: "Reading both." }] },
+      { type: "function_call", call_id: "t1", name: "read_file", arguments: "{\"path\":\"a\"}" },
+      { type: "function_call", call_id: "t2", name: "read_file", arguments: "{\"path\":\"b\"}" },
     ]);
   });
 });
