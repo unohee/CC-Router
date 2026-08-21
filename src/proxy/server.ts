@@ -208,7 +208,7 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
  * service-managed router without a pid file — invisible to `cc-router stop` and
  * to the build guard, which is exactly the deployment both are meant to cover.
  */
-function isManagedProcess(): boolean {
+export function isManagedProcess(): boolean {
   return process.env["CC_ROUTER_DAEMON"] === "1" || process.env["CC_ROUTER_SERVICE"] === "1";
 }
 

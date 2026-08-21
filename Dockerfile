@@ -7,6 +7,9 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+# prebuild/postbuild run scripts/build-info.mjs; without it npm aborts the
+# build with MODULE_NOT_FOUND before tsc ever starts.
+COPY scripts/ ./scripts/
 RUN npm run build
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────

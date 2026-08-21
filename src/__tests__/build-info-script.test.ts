@@ -8,7 +8,14 @@ import { tmpdir } from "os";
  * `scripts/build-info.mjs` runs on every build and shells out to git and ps.
  * Its two promises — never fail a build, stay silent where there is nothing to
  * say — are only checkable by running it, so these tests do.
+ *
+ * POSIX only, and skipped rather than adapted on Windows. The fixtures need
+ * `ps -p N -o command=` (no equivalent on Windows) and drive the script's
+ * `os.homedir()` through HOME, which Windows ignores in favour of USERPROFILE —
+ * the silence assertions would still pass there, but against the runner's real
+ * profile instead of the fixture, which is worse than not running them.
  */
+const posixOnly = process.platform === "win32" ? describe.skip : describe;
 const SCRIPT_SRC = join(__dirname, "..", "..", "scripts", "build-info.mjs");
 
 let root: string;
@@ -65,7 +72,7 @@ function pretendRouterIsRunning(dir: string): void {
     } catch { /* not visible yet */ }
     if (cmd.includes(join(dir, "dist"))) return;
     if (Date.now() > deadline) throw new Error(`sleeper never showed up in ps: ${cmd}`);
-    execFileSync("sleep", ["0.05"]);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
 }
 
@@ -93,13 +100,14 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("build-info.mjs — stamping", () => {
+posixOnly("build-info.mjs — stamping", () => {
   it("records the branch, commit and the anchor it belongs to", () => {
     expect(run(root).code).toBe(0);
     const info = JSON.parse(readFileSync(join(root, "dist", ".build-info.json"), "utf8"));
     expect(info.branch).toBe("main");
     expect(info.commit).toMatch(/^[0-9a-f]{7,}$/);
-    expect(typeof info.anchorMtimeMs).toBe("number");
+    expect(typeof info.anchor.mtimeMs).toBe("number");
+    expect(typeof info.anchor.size).toBe("number");
   });
 
   it("names a detached HEAD by its commit, not the word HEAD", () => {
@@ -126,7 +134,7 @@ describe("build-info.mjs — stamping", () => {
   });
 });
 
-describe("build-info.mjs — the warning", () => {
+posixOnly("build-info.mjs — the warning", () => {
   it("says nothing when no router is running", () => {
     run(root);
     const r = run(root, "check");

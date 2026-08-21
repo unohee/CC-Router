@@ -53,12 +53,28 @@ function run(cmd, args, opts = {}) {
 
 const git = (...args) => run("git", args, { cwd: ROOT });
 
-function anchorMtimeMs() {
+/**
+ * A fingerprint of the compiled output this stamp belongs to.
+ *
+ * Size travels with mtime because mtime alone can stand still: `tsc
+ * --incremental` skips rewriting a file whose output is unchanged, and this
+ * repo is one `tsconfig.json` line away from that. Null when there is nothing
+ * to fingerprint — which the readers must reject rather than compare, since
+ * two nulls are equal and would validate any stamp forever.
+ */
+function anchorFingerprint() {
   try {
-    return statSync(ANCHOR_PATH).mtimeMs;
+    const st = statSync(ANCHOR_PATH);
+    return { mtimeMs: st.mtimeMs, size: st.size };
   } catch {
     return null;
   }
+}
+
+function fingerprintMatches(recorded) {
+  const current = anchorFingerprint();
+  if (!current || typeof recorded?.mtimeMs !== "number" || typeof recorded?.size !== "number") return false;
+  return recorded.mtimeMs === current.mtimeMs && recorded.size === current.size;
 }
 
 /**
@@ -88,7 +104,7 @@ function readStamp() {
     if (!existsSync(INFO_PATH)) return null;
     const parsed = JSON.parse(readFileSync(INFO_PATH, "utf8"));
     if (typeof parsed?.branch !== "string" || typeof parsed?.commit !== "string") return null;
-    if (parsed.anchorMtimeMs !== anchorMtimeMs()) return null;
+    if (!fingerprintMatches(parsed.anchor)) return null;
     return parsed;
   } catch {
     return null;
@@ -124,8 +140,8 @@ function stamp() {
     commit,
     dirty: git("status", "--porcelain") !== "",
     builtAt: new Date().toISOString(),
-    // Written last so it reflects the compile this stamp belongs to.
-    anchorMtimeMs: anchorMtimeMs(),
+    // Read last so it reflects the compile this stamp belongs to.
+    anchor: anchorFingerprint(),
   };
   try {
     writeFileSync(INFO_PATH, JSON.stringify(info, null, 2) + "\n");
