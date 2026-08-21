@@ -385,6 +385,39 @@ keeps its context-window assumptions; the real upstream model is shown in logs (
 and on the dashboard. Subagents carry their own session ids, so a single Claude Code task
 using subagents naturally spreads across providers without breaking any cache.
 
+### Cap the client's context when the pool includes Codex
+
+The model echo above has a cost that has to be paid in configuration.
+
+Codex accepts at most **872,000** tokens (measured from
+`codex/models`; the ordinary window it advertises is 272,000). Claude Code, told
+it is talking to a Claude model, will happily grow a session past that. When it
+does, Codex refuses **every** request for that session — and the refusal arrives
+inside an HTTP 200 stream, so no status code marks the account as unusable.
+
+Set the ceiling to the pool minimum, not the Claude maximum:
+
+```jsonc
+// ~/.claude/settings.json
+{ "autoCompactWindow": 800000 }
+```
+
+The 72k of headroom absorbs the request that triggers compaction — it is still
+sent — plus one large tool result. The numbers live in
+`src/providers/openai/context-limits.ts`.
+
+Two things worth knowing before changing it:
+
+- It applies to **new sessions only**. A session already running keeps the
+  window it started with.
+- It is global. Sessions pinned to a Claude account lose the difference between
+  their real window and this ceiling. Leaving Codex out of the session pool
+  (omit `--enable-session-pool-openai`) avoids the trade entirely, at the cost
+  of one fewer account for Claude Code to spread across.
+
+A session that is refused anyway is re-pinned to a Claude account on the spot,
+so it settles rather than rotating; look for `⤳ repin` in the log.
+
 With `--enable-model-tiers`, tier is preserved across the bridge:
 
 | Requested | Answered by |
