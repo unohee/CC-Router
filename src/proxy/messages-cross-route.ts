@@ -66,6 +66,12 @@ export interface MessagesCrossProviderRouteOptions {
   /** Fired when an explicit `openai/*` request is served. Without it this path
    *  leaves no trace, so OpenAI traffic is invisible in logs and the dashboard. */
   onExplicitRoute?: (info: OpenAIRouteInfo) => void;
+  /** Fired when a session pinned to an OpenAI account could not be served
+   *  there. A returned target replaces the pin for this request and onward.
+   *  Null means the implementation had nowhere better to put the session — this
+   *  request then falls through unpinned, and the implementation decides
+   *  whether the old pin survives. See the call site for why this matters. */
+  onOpenAISessionUnservable?: (sessionId: string) => SessionTarget | null;
 }
 
 export interface OpenAIUsage {
@@ -549,6 +555,20 @@ export function mountMessagesCrossProviderRoute(
           });
           return;
         }
+
+        // The pinned OpenAI account could not serve this session, and the
+        // request is about to fall through to Anthropic. Leaving the pin on
+        // OpenAI makes that fall-through permanent *and* unpinned: the
+        // downstream Anthropic handler only honours an anthropic-provider pin,
+        // so every later request draws from plain rotation and re-writes the
+        // conversation into whichever account comes next. Measured at 600-750K
+        // tokens per bounce on a session whose context had outgrown the Codex
+        // context window, with no 429 anywhere — the rejection arrives inside a
+        // 200 stream, so nothing else marks the account as unusable.
+        //
+        // Re-pin now so the session settles on one Anthropic account instead.
+        const replacement = opts.onOpenAISessionUnservable?.(sessionId) ?? null;
+        if (replacement) req._ccSessionTarget = replacement;
       }
 
       const anthropicExhausted =

@@ -11,7 +11,7 @@ import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExist
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -717,6 +717,33 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     resolveSessionTarget,
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
+    onOpenAISessionUnservable: (sessionId: string) => {
+      if (!sessionAffinityEnabled) return null;
+      // Drop the OpenAI pin, then place among Anthropic accounts only. Resolving
+      // against the full candidate set would just re-pick the account that has
+      // already refused this session.
+      sessionRouter.forget(sessionId);
+      const anthropicOnly: SessionTarget[] = pool.getAll().map(a => ({
+        provider: "anthropic" as const, accountId: a.id,
+      }));
+      const replacement = sessionRouter.resolve(
+        sessionId, anthropicOnly, sessionTargetUsable, sessionTargetUtil, sessionTargetRetainable,
+      );
+      if (replacement) {
+        logSessionRepin(sessionId, replacement.accountId);
+        // Also surface it in RECENT ACTIVITY: a re-pin costs a full cache
+        // rewrite, and account churn is unreadable if only the console shows it.
+        stats.addLog({
+          ts: Date.now(), accountId: replacement.accountId, model: "-", type: "route",
+          details: `repin ${sessionId.slice(0, 8)} — OpenAI refused the session`,
+          sessionId,
+        });
+      }
+      // Note the layering: the pin is already dropped above, so a null return
+      // means "no Anthropic account was usable either", not "keep the OpenAI
+      // pin". The next request places this session fresh.
+      return replacement;
+    },
     onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
       recordOpenAIUsage(usage);

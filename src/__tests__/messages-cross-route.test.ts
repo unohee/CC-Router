@@ -4,6 +4,7 @@ import express from "express";
 import { ReadableStream } from "stream/web";
 import { mountMessagesCrossProviderRoute } from "../proxy/messages-cross-route.js";
 import type { OpenAIResponsesRequest } from "../protocol/openai-responses-types.js";
+import type { SessionTarget } from "../proxy/session-router.js";
 
 describe("mountMessagesCrossProviderRoute", () => {
   it("translates Claude Code openai/* messages into Responses and returns Anthropic-shaped JSON", async () => {
@@ -968,6 +969,118 @@ describe("mountMessagesCrossProviderRoute", () => {
         // accurate, not a compatibility hazard.
         expect(((await res.json()) as { model: string }).model).toBe("gpt-5.6-luna");
       });
+    });
+
+    it("re-pins the session to Anthropic when its OpenAI account refuses it", async () => {
+      // Codex refuses a session whose context has outgrown its window, and the
+      // refusal arrives inside a 200 stream. Without a re-pin the openai pin
+      // survives, the downstream Anthropic handler ignores it, and every later
+      // request round-robins — rewriting the whole prompt cache each time.
+      const app = express();
+      const seen: Array<SessionTarget | undefined> = [];
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onOpenAISessionUnservable: () => ({ provider: "anthropic", accountId: "kyte" }),
+        forwardOpenAI: async () => new Response("context too long", { status: 400 }),
+      });
+      app.use("/v1/messages", (req, res) => {
+        seen.push(req._ccSessionTarget);
+        res.json({ ok: true });
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-refused" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+      });
+
+      expect(seen).toEqual([{ provider: "anthropic", accountId: "kyte" }]);
+    });
+
+    it("re-pins when the refusal arrives inside a 200 stream", async () => {
+      // This is the shape actually seen in production: Codex accepts the
+      // connection, then reports the failure as a response.failed event. No
+      // HTTP status marks it, so only this path can notice the account is
+      // unusable for this session.
+      const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+      const app = express();
+      const seen: Array<SessionTarget | undefined> = [];
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onOpenAISessionUnservable: () => ({ provider: "anthropic", accountId: "kyte" }),
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+              controller.enqueue(encoder.encode(sse({
+                type: "response.failed",
+                response: { error: { message: "input exceeds the context window" } },
+              })));
+              controller.close();
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      });
+      app.use("/v1/messages", (req, res) => {
+        seen.push(req._ccSessionTarget);
+        res.json({ ok: true });
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-stream-refused" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+      });
+
+      expect(seen).toEqual([{ provider: "anthropic", accountId: "kyte" }]);
+    });
+
+    it("leaves the pin alone when nothing offers a replacement", async () => {
+      const app = express();
+      const seen: Array<SessionTarget | undefined> = [];
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onOpenAISessionUnservable: () => null,
+        forwardOpenAI: async () => new Response("nope", { status: 500 }),
+      });
+      app.use("/v1/messages", (req, res) => {
+        seen.push(req._ccSessionTarget);
+        res.json({ ok: true });
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-none" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+      });
+
+      expect(seen).toEqual([{ provider: "openai", accountId: "openai-victor" }]);
     });
 
     it("passes through to the Anthropic proxy when the session is pinned to Anthropic", async () => {

@@ -45,6 +45,21 @@ export function logFallback(accountId: string, model: string): void {
   );
 }
 
+/**
+ * A session left an OpenAI account because that account refused it.
+ *
+ * Worth its own line: the refusal arrives inside a 200 stream, so nothing in
+ * the HTTP-level log marks it, and the move itself costs a full prompt-cache
+ * rewrite. Silent re-pins read as unexplained account churn.
+ */
+export function logSessionRepin(sessionId: string, accountId: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.yellow(` ⤳ repin ${sessionId.slice(0, 8)} → ${accountId}`) +
+    chalk.gray(" (OpenAI account refused the session)")
+  );
+}
+
 export function logRefresh(accountId: string, ok: boolean, expiresInMin?: number): void {
   if (ok) {
     console.log(chalk.yellow(`[${ts()}] [REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));
