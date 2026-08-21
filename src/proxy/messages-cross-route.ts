@@ -440,12 +440,15 @@ async function sendOpenAIStreamAsAnthropic(
     // A stream that produced nothing but an opening still has to be delivered.
     flushPending();
   } catch (err) {
-    // A pre-first-byte failure leaves the response untouched so the caller can
-    // still fall through to Anthropic; anything else ends the stream as before.
-    if (err instanceof UpstreamStreamFailure && !wroteAnything) throw err;
+    // Nothing written means nothing committed: no header has been flushed, so
+    // the caller can still degrade to Anthropic. Ending the response here
+    // instead would hand the client an empty 200 and report it as served.
+    // This covers a transport drop as much as a reported failure — from the
+    // client's side they are the same nothing.
+    if (!wroteAnything) throw err;
     console.error(`[cross-route] OpenAI stream ended abnormally: ${(err as Error).message}`);
     res.end();
-    return wroteAnything;
+    return true;
   }
   res.end();
   return failedMidStream;
@@ -503,6 +506,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: route.upstreamModel,
             usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
         }
@@ -619,6 +623,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,
             usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
           return;

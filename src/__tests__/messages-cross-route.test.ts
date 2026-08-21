@@ -1116,7 +1116,103 @@ describe("mountMessagesCrossProviderRoute", () => {
       );
     });
 
-    it("does not mark a clean response as failed", async () => {
+    it("reports a mid-response failure on the explicit openai/* route too", async () => {
+      // This route deliberately does not move pins, but a truncated answer
+      // still must not be recorded as a clean route.
+      const app = express();
+      const onExplicitRoute = vi.fn();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        onExplicitRoute,
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              const push = (e: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
+              push({ type: "response.created", response: { id: "r" } });
+              push({ type: "response.output_text.delta", output_index: 0, delta: "partial" });
+              push({ type: "response.failed", response: { error: { message: "gave up" } } });
+              controller.close();
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "openai/gpt-5.6-terra", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+        await res.text();
+      });
+
+      expect(onExplicitRoute).toHaveBeenCalledWith(
+        expect.objectContaining({ failedAfterStart: true }),
+      );
+    });
+
+    it("falls through instead of committing an empty 200 when the stream dies before any content", async () => {
+      // The stream opens, then the transport drops before a single delta. No
+      // header has been flushed yet, so this is still recoverable — ending the
+      // response here would hand the client a blank success and record the
+      // account as having served the session.
+      const app = express();
+      const onSessionRoute = vi.fn();
+      const onOpenAISessionUnservable = vi.fn(
+        () => ({ provider: "anthropic", accountId: "kyte" }) as SessionTarget,
+      );
+      const fellThrough = vi.fn();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onSessionRoute,
+        onOpenAISessionUnservable,
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.created", response: { id: "r" } })}\n\n`));
+            },
+            pull(controller) {
+              controller.error(new Error("connection reset"));
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      });
+      // Stands in for the Anthropic proxy this route falls through to.
+      app.use((_req, res) => { fellThrough(); res.status(200).json({ served: "anthropic" }); });
+
+      await withServer(app, async (url) => {
+        const res = await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-early-drop" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+        expect(await res.json()).toEqual({ served: "anthropic" });
+      });
+
+      expect(fellThrough).toHaveBeenCalledTimes(1);
+      // Nothing was served by OpenAI, so it must not be logged as a route.
+      expect(onSessionRoute).not.toHaveBeenCalled();
+    });
+
+    // Uses a *streaming* upstream on purpose. A non-streaming response returns
+    // before any of this logic runs, so asserting there proves nothing — the
+    // path that could wrongly raise the flag is the one that streamed cleanly.
+    it("does not mark a clean streamed response as failed", async () => {
       const app = express();
       const onSessionRoute = vi.fn();
       const onOpenAISessionUnservable = vi.fn();
@@ -1127,22 +1223,31 @@ describe("mountMessagesCrossProviderRoute", () => {
         resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
         onSessionRoute,
         onOpenAISessionUnservable,
-        forwardOpenAI: async () => new Response(JSON.stringify({
-          id: "r", model: "gpt-5.6-terra",
-          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
-          usage: { input_tokens: 3, output_tokens: 1 },
-        }), { status: 200, headers: { "content-type": "application/json" } }),
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              const push = (e: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
+              push({ type: "response.created", response: { id: "r", model: "gpt-5.6-terra" } });
+              push({ type: "response.output_text.delta", output_index: 0, delta: "ok" });
+              push({ type: "response.completed", response: { id: "r", model: "gpt-5.6-terra", usage: { input_tokens: 3, output_tokens: 1 } } });
+              controller.close();
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
       });
 
       await withServer(app, async (url) => {
-        await fetch(`${url}/v1/messages`, {
+        const res = await fetch(`${url}/v1/messages`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-clean" },
           body: JSON.stringify({
             model: "claude-sonnet-5", max_tokens: 8,
-            messages: [{ role: "user", content: "hi" }], stream: false,
+            messages: [{ role: "user", content: "hi" }], stream: true,
           }),
         });
+        await res.text();
       });
 
       expect(onOpenAISessionUnservable).not.toHaveBeenCalled();
