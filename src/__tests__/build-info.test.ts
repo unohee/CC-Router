@@ -6,11 +6,16 @@ import { tmpdir } from "os";
 // The module resolves its path at import time, so each case gets a fresh copy.
 // `stamp` is the JSON to write, minus `anchorMtimeMs` — the helper fills that in
 // from the anchor it just created, which is what a real build does.
-async function loadWith(stamp: Record<string, unknown> | string | null, opts: { stale?: boolean; resize?: boolean } = {}) {
+async function loadWith(
+  stamp: Record<string, unknown> | string | null,
+  opts: { stale?: boolean; noAnchor?: boolean } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "build-info-"));
-  mkdirSync(join(dir, "cli"), { recursive: true });
   const anchor = join(dir, "cli", "index.js");
-  writeFileSync(anchor, "// compiled\n");
+  if (!opts.noAnchor) {
+    mkdirSync(join(dir, "cli"), { recursive: true });
+    writeFileSync(anchor, "// compiled\n");
+  }
 
   vi.resetModules();
   vi.doMock("url", async () => {
@@ -22,19 +27,13 @@ async function loadWith(stamp: Record<string, unknown> | string | null, opts: { 
     writeFileSync(join(dir, ".build-info.json"), stamp);
   } else if (stamp !== null) {
     writeFileSync(join(dir, ".build-info.json"), JSON.stringify({
-      ...stamp, anchor: { mtimeMs: statSync(anchor).mtimeMs, size: statSync(anchor).size },
+      ...stamp, anchorMtimeMs: opts.noAnchor ? null : statSync(anchor).mtimeMs,
     }));
     // Stand in for a rebuild that ran without the stamping script: dist/ is
     // newer than the stamp that claims to describe it.
     if (opts.stale) {
       const later = Date.now() / 1000 + 60;
       utimesSync(anchor, later, later);
-    }
-    // Grow the file but put its mtime back: what an incremental compile can do.
-    if (opts.resize) {
-      const { atimeMs, mtimeMs } = statSync(anchor);
-      writeFileSync(anchor, "// compiled, and then some\n");
-      utimesSync(anchor, atimeMs / 1000, mtimeMs / 1000);
     }
   }
 
@@ -86,28 +85,28 @@ describe("readBuildInfo", () => {
     } finally { cleanup(); }
   });
 
-  it("rejects a stamp whose anchor fingerprint is missing or not numeric", async () => {
-    // Two absent values compare equal, so a stamp written when the anchor could
-    // not be read would otherwise validate against anything, forever.
-    for (const anchor of [null, undefined, {}, { mtimeMs: 1 }, { mtimeMs: "1", size: 2 }]) {
+  it("rejects a stamp written while the anchor could not be read", async () => {
+    // The real reachable case: `dist/` exists but the compiled entry point does
+    // not, so the stamp records null. Both sides are then absent, and absent
+    // compares equal to absent — which would validate that stamp forever.
+    const { mod, cleanup } = await loadWith(
+      { branch: "main", commit: "abc1234", dirty: false, builtAt: "" },
+      { noAnchor: true },
+    );
+    try {
+      expect(mod.describeBuild()).toBeNull();
+    } finally { cleanup(); }
+  });
+
+  it("rejects a stamp whose anchor value is not a number", async () => {
+    for (const anchorMtimeMs of [null, undefined, "123", {}]) {
       const { mod, cleanup } = await loadWith(JSON.stringify({
-        branch: "main", commit: "abc1234", dirty: false, builtAt: "", anchor,
+        branch: "main", commit: "abc1234", dirty: false, builtAt: "", anchorMtimeMs,
       }));
       try {
         expect(mod.describeBuild()).toBeNull();
       } finally { cleanup(); }
     }
-  });
-
-  it("rejects a stamp whose anchor kept its mtime but changed size", async () => {
-    // `tsc --incremental` can leave mtime untouched; size is the second axis.
-    const { mod, cleanup } = await loadWith(
-      { branch: "main", commit: "abc1234", dirty: false, builtAt: "" },
-      { resize: true },
-    );
-    try {
-      expect(mod.describeBuild()).toBeNull();
-    } finally { cleanup(); }
   });
 
   it("says nothing rather than throwing on a corrupt or partial stamp", async () => {

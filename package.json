@@ -15,7 +15,6 @@
     "lint": "tsc --noEmit",
     "prebuild": "node scripts/build-info.mjs check",
     "prepack": "node -e \"require('fs').rmSync('dist/.build-info.json',{force:true})\"",
-    "postpack": "node scripts/build-info.mjs",
     "postbuild": "node scripts/build-info.mjs"
   },
   "keywords": [

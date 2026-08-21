@@ -106,8 +106,7 @@ posixOnly("build-info.mjs — stamping", () => {
     const info = JSON.parse(readFileSync(join(root, "dist", ".build-info.json"), "utf8"));
     expect(info.branch).toBe("main");
     expect(info.commit).toMatch(/^[0-9a-f]{7,}$/);
-    expect(typeof info.anchor.mtimeMs).toBe("number");
-    expect(typeof info.anchor.size).toBe("number");
+    expect(typeof info.anchorMtimeMs).toBe("number");
   });
 
   it("names a detached HEAD by its commit, not the word HEAD", () => {

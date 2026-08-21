@@ -1,4 +1,5 @@
 import { describe, expect, it, afterEach, vi } from "vitest";
+import { execFileSync } from "child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -9,16 +10,17 @@ import { tmpdir } from "os";
  */
 
 describe("isManagedProcess", () => {
-  const saved = { ...process.env };
   afterEach(() => {
-    process.env["CC_ROUTER_DAEMON"] = saved["CC_ROUTER_DAEMON"];
-    process.env["CC_ROUTER_SERVICE"] = saved["CC_ROUTER_SERVICE"];
+    // `process.env.X = undefined` stores the string "undefined", which any
+    // child process would then inherit. In a file about these two variables
+    // that is a landmine, so unstub rather than reassign.
+    vi.unstubAllEnvs();
   });
 
   it("recognises the service launcher, not just the daemon launcher", async () => {
     const { isManagedProcess } = await import("../proxy/server.js");
-    delete process.env["CC_ROUTER_DAEMON"];
-    process.env["CC_ROUTER_SERVICE"] = "1";
+    vi.stubEnv("CC_ROUTER_DAEMON", undefined);
+    vi.stubEnv("CC_ROUTER_SERVICE", "1");
     // launchd and systemd set this one. Checking only CC_ROUTER_DAEMON left
     // every service-managed router without a pid file — invisible to
     // `cc-router stop` and to the prebuild guard.
@@ -27,15 +29,15 @@ describe("isManagedProcess", () => {
 
   it("still recognises the daemon launcher", async () => {
     const { isManagedProcess } = await import("../proxy/server.js");
-    process.env["CC_ROUTER_DAEMON"] = "1";
-    delete process.env["CC_ROUTER_SERVICE"];
+    vi.stubEnv("CC_ROUTER_DAEMON", "1");
+    vi.stubEnv("CC_ROUTER_SERVICE", undefined);
     expect(isManagedProcess()).toBe(true);
   });
 
   it("does not claim a plain foreground run", async () => {
     const { isManagedProcess } = await import("../proxy/server.js");
-    delete process.env["CC_ROUTER_DAEMON"];
-    delete process.env["CC_ROUTER_SERVICE"];
+    vi.stubEnv("CC_ROUTER_DAEMON", undefined);
+    vi.stubEnv("CC_ROUTER_SERVICE", undefined);
     expect(isManagedProcess()).toBe(false);
   });
 });
@@ -48,7 +50,7 @@ describe("describeBuild is a snapshot of what this process loaded", () => {
     writeFileSync(anchor, "// compiled\n");
     const write = (branch: string) => writeFileSync(join(dir, ".build-info.json"), JSON.stringify({
       branch, commit: "abc1234", dirty: false, builtAt: "",
-      anchor: { mtimeMs: statSync(anchor).mtimeMs, size: statSync(anchor).size },
+      anchorMtimeMs: statSync(anchor).mtimeMs,
     }));
 
     vi.resetModules();
@@ -67,32 +69,46 @@ describe("describeBuild is a snapshot of what this process loaded", () => {
       expect(describeBuild()).toBe("at-load@abc1234");
     } finally {
       vi.doUnmock("url");
+      vi.resetModules();   // else the mocked instance outlives this test
       rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
 describe("packaging", () => {
-  const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8"));
+  const root = join(__dirname, "..", "..");
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
   it("ships the script its own build hooks invoke", () => {
-    // prebuild/postbuild travel in the published package.json; without the
-    // script they abort `npm run build` with MODULE_NOT_FOUND.
+    // Asserting on package.json alone would just restate the config next to
+    // itself. Ask npm what it would actually put in the tarball.
+    const packed = execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: root, encoding: "utf8" });
+    const files: string[] = JSON.parse(packed)[0].files.map((f: { path: string }) => f.path);
     expect(pkg.scripts.prebuild).toContain("scripts/build-info.mjs");
-    expect(pkg.files).toContain("scripts/");
-  });
+    // Without it, `npm run build` in a published install aborts with
+    // MODULE_NOT_FOUND before tsc starts.
+    expect(files).toContain("scripts/build-info.mjs");
+  }, 60_000);
 
   it("does not publish a stamp naming the maintainer's branch", () => {
-    expect(pkg.files).toContain("dist/");           // which would otherwise carry it
-    expect(pkg.scripts.prepack).toContain(".build-info.json");
-    // …and restores it, so packing from a checkout that is also serving does
-    // not silently blind the guard it just used.
-    expect(pkg.scripts.postpack).toContain("scripts/build-info.mjs");
-  });
+    const packed = execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: root, encoding: "utf8" });
+    const files: string[] = JSON.parse(packed)[0].files.map((f: { path: string }) => f.path);
+    expect(pkg.files).toContain("dist/");            // which would otherwise carry it
+    expect(files).not.toContain("dist/.build-info.json");
+  }, 60_000);
 
-  it("copies the script into the Docker builder stage", () => {
-    const dockerfile = readFileSync(join(__dirname, "..", "..", "Dockerfile"), "utf8");
-    const builder = dockerfile.slice(0, dockerfile.indexOf("AS runtime"));
-    expect(builder).toMatch(/COPY\s+scripts\//);
+  it("copies the script into the builder stage before it builds", () => {
+    const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8");
+    const marker = dockerfile.indexOf("AS runtime");
+    // A renamed stage would make indexOf return -1, and slice(0, -1) is almost
+    // the whole file — the assertion would silently weaken to "appears
+    // somewhere". Fail loudly instead.
+    expect(marker).toBeGreaterThan(0);
+    const builder = dockerfile.slice(0, marker);
+    const copy = builder.search(/^COPY\s+scripts\//m);
+    const build = builder.search(/^RUN\s+npm run build/m);
+    expect(copy).toBeGreaterThan(-1);
+    // Ordering is the whole point: a COPY after the RUN reproduces the bug.
+    expect(copy).toBeLessThan(build);
   });
 });
