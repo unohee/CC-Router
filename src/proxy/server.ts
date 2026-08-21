@@ -27,6 +27,7 @@ import type { SessionTarget } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
+import { describeBuild } from "../utils/build-info.js";
 
 // Augment Request to carry the selected account and pending log entry
 declare module "express-serve-static-core" {
@@ -198,6 +199,19 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
  * intrect -> kyte -> intrect inside 51 seconds. The two predicates must agree
  * about retention or the pin is decided twice, by different rules.
  */
+/**
+ * Whether this process is one something else is expected to manage.
+ *
+ * Two variables mark it, set by two different launchers: `launcher.ts` spawns a
+ * detached child with CC_ROUTER_DAEMON, while `service.ts` writes a plist or
+ * unit that sets CC_ROUTER_SERVICE. Checking only the first left every
+ * service-managed router without a pid file — invisible to `cc-router stop` and
+ * to the build guard, which is exactly the deployment both are meant to cover.
+ */
+export function isManagedProcess(): boolean {
+  return process.env["CC_ROUTER_DAEMON"] === "1" || process.env["CC_ROUTER_SERVICE"] === "1";
+}
+
 export function pinnedAnthropicAccount(
   pool: Pick<TokenPool, "canRetain" | "getById">,
   target: SessionTarget | undefined,
@@ -466,6 +480,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       totalOutputTokens: stats.totalOutputTokens,
       accounts: accountViews,
       recentLogs: stats.getRecentLogs(50),
+      build: describeBuild(),
     });
   });
 
@@ -1107,7 +1122,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // Flush now: the debounce timer will not fire after exit, and losing the
     // final assignments is what makes a restart rewrite every prompt cache.
     writeSessionAssignments(sessionRouter.snapshot());
-    if (process.env["CC_ROUTER_DAEMON"] === "1") {
+    if (isManagedProcess()) {
       removePid();
     }
     process.exit(0);
@@ -1147,7 +1162,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const host = process.env["HOST"] ?? "127.0.0.1";
   app.listen(port, host, () => {
     // Write PID for daemon/service process management
-    if (process.env["CC_ROUTER_DAEMON"] === "1") {
+    if (isManagedProcess()) {
       writePid(process.pid);
     }
 

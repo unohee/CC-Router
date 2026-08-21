@@ -12,7 +12,10 @@
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prebuild": "node scripts/build-info.mjs check",
+    "prepack": "node -e \"require('fs').rmSync('dist/.build-info.json',{force:true})\"",
+    "postbuild": "node scripts/build-info.mjs"
   },
   "keywords": [
     "claude",
@@ -34,6 +37,7 @@
   "homepage": "https://github.com/VictorMinemu/CC-Router#readme",
   "files": [
     "dist/",
+    "scripts/",
     "src/interceptor/addon.py",
     "litellm-config.yaml",
     "docker-compose.yml",
