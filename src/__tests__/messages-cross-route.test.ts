@@ -1005,6 +1005,150 @@ describe("mountMessagesCrossProviderRoute", () => {
       expect(seen).toEqual([{ provider: "anthropic", accountId: "kyte" }]);
     });
 
+    it("re-pins after a failure that arrives mid-response", async () => {
+      // Once bytes are out the response cannot be retried — but the account
+      // still failed, and leaving the session on it means a truncated answer
+      // every turn while the logs read as success.
+      const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+      const app = express();
+      const onSessionRoute = vi.fn();
+      const onOpenAISessionUnservable = vi.fn(
+        () => ({ provider: "anthropic", accountId: "kyte" }) as SessionTarget,
+      );
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onSessionRoute,
+        onOpenAISessionUnservable,
+        forwardOpenAI: async () => {
+          // pull(), not start(): controller.error() discards anything still
+          // queued, so enqueueing and erroring in one tick would mean no byte
+          // ever reached the client — the opposite of the case under test.
+          const encoder = new TextEncoder();
+          let stage = 0;
+          return new Response(
+            new ReadableStream({
+              pull(controller) {
+                if (stage === 0) {
+                  controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+                } else if (stage === 1) {
+                  // Real content: this commits the response, nothing can be retried.
+                  controller.enqueue(encoder.encode(sse({
+                    type: "response.output_text.delta", output_index: 0, delta: "partial",
+                  })));
+                } else {
+                  controller.error(new Error("upstream died mid-generation"));
+                }
+                stage++;
+              },
+            }) as BodyInit,
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        },
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-midfail" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+      });
+
+      expect(onOpenAISessionUnservable).toHaveBeenCalledWith("sess-midfail");
+      expect(onSessionRoute).toHaveBeenCalledWith(
+        expect.objectContaining({ failedAfterStart: true }),
+      );
+    });
+
+    it("re-pins when response.failed arrives after partial content", async () => {
+      // Codex can accept, emit some output, then report the failure as an
+      // event rather than dropping the connection. Same consequence for the
+      // session, different shape on the wire.
+      const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+      const app = express();
+      const onSessionRoute = vi.fn();
+      const onOpenAISessionUnservable = vi.fn(
+        () => ({ provider: "anthropic", accountId: "kyte" }) as SessionTarget,
+      );
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onSessionRoute,
+        onOpenAISessionUnservable,
+        forwardOpenAI: async () => new Response(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder();
+              const push = (e: unknown) => controller.enqueue(encoder.encode(sse(e)));
+              push({ type: "response.created", response: { id: "r" } });
+              push({ type: "response.output_text.delta", output_index: 0, delta: "partial" });
+              push({ type: "response.failed", response: { error: { message: "gave up" } } });
+              controller.close();
+            },
+          }) as BodyInit,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-lateffail" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: true,
+          }),
+        });
+      });
+
+      expect(onOpenAISessionUnservable).toHaveBeenCalledWith("sess-lateffail");
+      // The activity row must not read as a clean route either.
+      expect(onSessionRoute).toHaveBeenCalledWith(
+        expect.objectContaining({ failedAfterStart: true }),
+      );
+    });
+
+    it("does not mark a clean response as failed", async () => {
+      const app = express();
+      const onSessionRoute = vi.fn();
+      const onOpenAISessionUnservable = vi.fn();
+
+      mountMessagesCrossProviderRoute(app, {
+        getOpenAIAccount: () => openAIAccount,
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        resolveSessionTarget: () => ({ provider: "openai", accountId: "openai-victor" }),
+        onSessionRoute,
+        onOpenAISessionUnservable,
+        forwardOpenAI: async () => new Response(JSON.stringify({
+          id: "r", model: "gpt-5.6-terra",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+          usage: { input_tokens: 3, output_tokens: 1 },
+        }), { status: 200, headers: { "content-type": "application/json" } }),
+      });
+
+      await withServer(app, async (url) => {
+        await fetch(`${url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-claude-code-session-id": "sess-clean" },
+          body: JSON.stringify({
+            model: "claude-sonnet-5", max_tokens: 8,
+            messages: [{ role: "user", content: "hi" }], stream: false,
+          }),
+        });
+      });
+
+      expect(onOpenAISessionUnservable).not.toHaveBeenCalled();
+      expect(onSessionRoute.mock.calls[0]?.[0].failedAfterStart).toBeUndefined();
+    });
+
     it("re-pins when the refusal arrives inside a 200 stream", async () => {
       // This is the shape actually seen in production: Codex accepts the
       // connection, then reports the failure as a response.failed event. No

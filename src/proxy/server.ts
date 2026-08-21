@@ -763,12 +763,19 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // pin". The next request places this session fresh.
       return replacement;
     },
-    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, ...activity }) => {
+    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
       recordOpenAIUsage(usage);
+      // Usage is still recorded — those tokens were spent — but a response that
+      // died mid-generation is logged as an error, or the dashboard reports a
+      // truncated answer as a clean route.
+      if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
-        type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
+        type: failedAfterStart ? "error" : "route",
+        details: failedAfterStart
+          ? `session ${sessionId.slice(0, 8)} — ${openAIAccountId} failed mid-response`
+          : `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
         ...activity,
       });
