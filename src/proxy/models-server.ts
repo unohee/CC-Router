@@ -189,6 +189,17 @@ function toCodexCliModel(model: OpenAIModel): CodexCliModel {
     multi_agent_version: null,
     use_responses_lite: false,
     auto_review_model_override: null,
+    // Inherited value, deliberately left alone. The real Codex limits are
+    // CODEX_CONTEXT_WINDOW / CODEX_MAX_CONTEXT_WINDOW in
+    // src/providers/openai/context-limits.ts, and 128k under-reports both.
+    //
+    // It stays because this descriptor is what Codex CLI sizes its own context
+    // from — `cc-router configure codex` points it here — and under-reporting
+    // only makes that client compact early, while raising its assumed window
+    // untested risks the same in-stream refusal documented in the README. Same
+    // "stay below the ceiling" reasoning, applied to the other client. Note
+    // this shape is returned for every discovered model, Anthropic ones
+    // included, for which neither Codex constant is the right reference.
     context_window: 128_000,
     max_context_window: 128_000,
     auto_compact_token_limit: null,
