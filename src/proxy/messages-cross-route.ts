@@ -45,6 +45,9 @@ type OpenAIRouteInfo = OpenAIActivity & {
   openAIAccountId: string;
   upstreamModel: string;
   usage?: OpenAIUsage;
+  /** The response started and then the upstream failed. Its bytes are already
+   *  gone, so it still counts as served, but not as a success. */
+  failedAfterStart?: boolean;
 };
 
 export interface MessagesCrossProviderRouteOptions {
@@ -129,7 +132,11 @@ export interface OpenAIUsage {
 class UpstreamStreamFailure extends Error {}
 
 type OpenAIForwardOutcome =
-  | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage }
+  /** `ok` answers "is this response finished with?", not "did the account
+   *  serve the session?". Once bytes are out nothing may be retried, but the
+   *  account can still have failed — `failedAfterStart` carries that apart so
+   *  the caller can move the session without touching the response. */
+  | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage; failedAfterStart?: true }
   | { ok: false; reason: "no_account" | "prepare_failed" | "request_failed" };
 
 /**
@@ -197,10 +204,12 @@ async function forwardAnthropicRequestAsOpenAI(
       return { ok: false, reason: "request_failed" };
     }
 
-    await sendOpenAIAsAnthropic(upstream, res, requestedStream, publicModel, usage => {
+    const failedAfterStart = await sendOpenAIAsAnthropic(upstream, res, requestedStream, publicModel, usage => {
       observedUsage = usage;
     });
-    return { ok: true, account, usage: observedUsage };
+    return failedAfterStart
+      ? { ok: true, account, usage: observedUsage, failedAfterStart: true }
+      : { ok: true, account, usage: observedUsage };
   } catch (err) {
     if (err instanceof UpstreamStreamFailure) {
       // Reported inside a 200 stream, before anything was written — treat it
@@ -210,7 +219,7 @@ async function forwardAnthropicRequestAsOpenAI(
     }
     if (res.headersSent) {
       console.error(`[cross-route] OpenAI request to "${account.id}" failed after the response had already started: ${(err as Error).message}`);
-      return { ok: true, account, usage: observedUsage };
+      return { ok: true, account, usage: observedUsage, failedAfterStart: true };
     }
     return { ok: false, reason: "request_failed" };
   }
@@ -241,32 +250,32 @@ function openAIActivity(req: Request, res: Response, startedAt: number, sessionI
   };
 }
 
+/** True when the response was delivered but ended abnormally partway through. */
 async function sendOpenAIAsAnthropic(
   upstream: globalThis.Response,
   res: Response,
   requestedStream: boolean,
   publicModel?: string,
   onUsage?: (usage: OpenAIUsage) => void,
-): Promise<void> {
+): Promise<boolean> {
   const contentType = upstream.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
     if (requestedStream) {
-      await sendOpenAIStreamAsAnthropic(upstream, res, publicModel, onUsage);
-      return;
+      return await sendOpenAIStreamAsAnthropic(upstream, res, publicModel, onUsage);
     }
 
     const collected = await collectOpenAIStreamAsAnthropicMessage(upstream);
     if (publicModel) collected.model = publicModel;
     onUsage?.({ input_tokens: collected.usage.input_tokens, output_tokens: collected.usage.output_tokens });
     res.status(upstream.status).json(collected);
-    return;
+    return false;
   }
 
   if (!contentType.includes("application/json")) {
     res.status(upstream.status);
     res.setHeader("content-type", contentType || "text/plain");
     res.send(await upstream.text());
-    return;
+    return false;
   }
 
   const json = await upstream.json() as OpenAIResponseCompleted;
@@ -274,6 +283,7 @@ async function sendOpenAIAsAnthropic(
   if (publicModel) message.model = publicModel;
   onUsage?.({ input_tokens: message.usage.input_tokens, output_tokens: message.usage.output_tokens });
   res.status(upstream.status).json(message);
+  return false;
 }
 
 async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Response): Promise<ReturnType<typeof openAIResponseToAnthropicMessage>> {
@@ -379,12 +389,18 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
   return openAIResponseToAnthropicMessage({ id, model, output, usage });
 }
 
+/**
+ * Returns true when the stream ended abnormally after bytes had already gone
+ * out. The response itself is unsalvageable at that point, but the caller still
+ * needs to know the account failed — otherwise a session stays pinned to an
+ * upstream that dies mid-generation on every turn.
+ */
 async function sendOpenAIStreamAsAnthropic(
   upstream: globalThis.Response,
   res: Response,
   publicModel?: string,
   onUsage?: (usage: OpenAIUsage) => void,
-): Promise<void> {
+): Promise<boolean> {
   res.status(upstream.status);
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
@@ -395,12 +411,13 @@ async function sendOpenAIStreamAsAnthropic(
   const reader = upstream.body?.getReader();
   if (!reader) {
     res.end();
-    return;
+    return false;
   }
 
   const decoder = new TextDecoder();
   let remainder = "";
   let wroteAnything = false;
+  let failedMidStream = false;
 
   // message_start is emitted from response.created, which always precedes the
   // response.failed that reports a rejection. Writing it immediately would
@@ -441,6 +458,10 @@ async function sendOpenAIStreamAsAnthropic(
         // is raised for the caller to retry on Anthropic.
         const failure = openAIStreamFailure(event as Parameters<typeof normalizer.convert>[0]);
         if (failure && !wroteAnything) throw new UpstreamStreamFailure(failure);
+        // The same failure after bytes are out cannot be retried, but it still
+        // says this account could not serve the session. Ignoring it here left
+        // the session pinned to an upstream that gives up partway every turn.
+        if (failure) failedMidStream = true;
 
         for (const mapped of normalizer.convert(event as Parameters<typeof normalizer.convert>[0])) {
           commit(mapped);
@@ -454,6 +475,7 @@ async function sendOpenAIStreamAsAnthropic(
       for (const event of parsed.events) {
         const failure = openAIStreamFailure(event as Parameters<typeof normalizer.convert>[0]);
         if (failure && !wroteAnything) throw new UpstreamStreamFailure(failure);
+        if (failure) failedMidStream = true;
 
         for (const mapped of normalizer.convert(event as Parameters<typeof normalizer.convert>[0])) {
           commit(mapped);
@@ -464,15 +486,14 @@ async function sendOpenAIStreamAsAnthropic(
     // A stream that produced nothing but an opening still has to be delivered.
     flushPending();
   } catch (err) {
-    // A pre-first-byte failure leaves the response untouched so the caller can
-    // still fall through to Anthropic. An invalid tool stream counts: the
-    // normalizer raises it rather than forward a tool call built from a
-    // truncated or malformed stream, and degrading to Anthropic answers the
-    // request properly. Without this it would fall to the res.end() below and
-    // the client would receive an empty 200 — the exact silence this route
-    // already raises UpstreamStreamFailure to avoid.
-    const salvageable = err instanceof UpstreamStreamFailure || err instanceof OpenAIProtocolError;
-    if (salvageable && !wroteAnything) throw err;
+    // Nothing written means nothing committed: no header has been flushed, so
+    // the caller can still degrade to Anthropic. Ending the response here
+    // instead would hand the client an empty 200 and report it as served.
+    // This covers a transport drop and a reported failure alike, and an invalid
+    // tool stream too — the normalizer raises OpenAIProtocolError rather than
+    // forward a tool call built from a truncated or malformed stream.
+    if (!wroteAnything) throw err;
+    console.error(`[cross-route] OpenAI stream ended abnormally: ${(err as Error).message}`);
     // Past the first byte nothing can be retried, but the stream must not just
     // stop: without a terminal event the client cannot tell a refused response
     // from a complete one.
@@ -483,9 +504,10 @@ async function sendOpenAIStreamAsAnthropic(
       }));
     }
     res.end();
-    return;
+    return true;
   }
   res.end();
+  return failedMidStream;
 }
 
 export function mountMessagesCrossProviderRoute(
@@ -541,6 +563,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: route.upstreamModel,
             usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
         }
@@ -700,8 +723,15 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,
             usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
+          // The response is spent either way, but a failure means this account
+          // could not serve the session. Without moving it here the session
+          // stays pinned to an account that keeps failing mid-generation, and
+          // the client receives a truncated answer every turn while the logs
+          // read as success.
+          if (outcome.failedAfterStart) opts.onOpenAISessionUnservable?.(sessionId);
           return;
         }
 
@@ -744,6 +774,7 @@ export function mountMessagesCrossProviderRoute(
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,
             usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
           return;
