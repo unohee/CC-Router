@@ -778,32 +778,46 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // pin". The next request places this session fresh.
       return replacement;
     },
-    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, ...activity }) => {
+    onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
       recordOpenAIUsage(usage);
+      // Usage is still recorded — those tokens were spent — but a response that
+      // died mid-generation is logged as an error, or the dashboard reports a
+      // truncated answer as a clean route.
+      if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
-        type: "route", details: `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
+        type: failedAfterStart ? "error" : "route",
+        details: failedAfterStart
+          ? `session ${sessionId.slice(0, 8)} — ${openAIAccountId} failed mid-response`
+          : `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
         ...activity,
       });
     },
-    onExplicitRoute: ({ openAIAccountId, upstreamModel, usage, ...activity }) => {
+    onExplicitRoute: ({ openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel);
       recordOpenAIUsage(usage);
+      if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
-        type: "route", details: `explicit openai/* → ${openAIAccountId}`,
+        type: failedAfterStart ? "error" : "route",
+        details: failedAfterStart
+          ? `explicit openai/* → ${openAIAccountId} — upstream failed mid-response`
+          : `explicit openai/* → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
         ...activity,
       });
     },
-    onFallback: ({ openAIAccountId, upstreamModel, usage, ...activity }) => {
+    onFallback: ({ openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
       recordOpenAIUsage(usage);
+      if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
-        ts: Date.now(), accountId: openAIAccountId, model: upstreamModel, type: "route", details: msg,
+        ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
+        type: failedAfterStart ? "error" : "route",
+        details: failedAfterStart ? `${msg} — upstream failed mid-response` : msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
         ...activity,
       });
