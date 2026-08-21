@@ -395,7 +395,7 @@ it is talking to a Claude model, will happily grow a session past that. When it
 does, Codex refuses **every** request for that session — and the refusal arrives
 inside an HTTP 200 stream, so no status code marks the account as unusable.
 
-Set the ceiling to the pool minimum, not the Claude maximum:
+Set the ceiling below the pool minimum, not at the Claude maximum:
 
 ```jsonc
 // ~/.claude/settings.json
@@ -408,15 +408,22 @@ sent — plus one large tool result. The numbers live in
 
 Two things worth knowing before changing it:
 
-- It applies to **new sessions only**. A session already running keeps the
-  window it started with.
-- It is global. Sessions pinned to a Claude account lose the difference between
-  their real window and this ceiling. Leaving Codex out of the session pool
-  (omit `--enable-session-pool-openai`) avoids the trade entirely, at the cost
-  of one fewer account for Claude Code to spread across.
+- It takes effect **without restarting**. Claude Code watches its settings files
+  and re-resolves the auto-compact window at the start of each turn, so a
+  session already over the ceiling is fixable in place — which matters, because
+  restarting one costs the very cache rewrite this is meant to prevent.
+- It knows nothing about which account a session landed on, so a session pinned
+  to a Claude account gives up the difference between its real window and this
+  ceiling. Three ways out, in rough order of bluntness: scope the setting to a
+  project (`.claude/settings.json`), override it per launch
+  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`), or leave Codex out of the session pool
+  entirely (omit `--enable-session-pool-openai`) and spread Claude Code across
+  one fewer account.
 
-A session that is refused anyway is re-pinned to a Claude account on the spot,
-so it settles rather than rotating; look for `⤳ repin` in the log.
+A session the account cannot serve — refused for size, or failing partway
+through — is re-pinned to a Claude account on the spot, so it settles rather
+than rotating; look for `⤳ repin` in the log. That needs session affinity on and
+a usable Claude account; with neither there is nowhere to move it to.
 
 With `--enable-model-tiers`, tier is preserved across the bridge:
 

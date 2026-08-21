@@ -27,6 +27,13 @@ describe("context limits", () => {
     expect(CODEX_CONTEXT_WINDOW).toBeLessThan(CODEX_MAX_CONTEXT_WINDOW);
   });
 
+  it("keeps the headroom figure the README quotes in step with the constants", () => {
+    // README:405 states the gap in prose. Lowering a constant and updating only
+    // the limit it appears next to would leave that sentence quietly wrong.
+    const headroomK = (CODEX_MAX_CONTEXT_WINDOW - CLIENT_CONTEXT_CEILING) / 1_000;
+    expect(README).toContain(`${headroomK}k of headroom`);
+  });
+
   it("keeps the README's numbers equal to the constants", () => {
     // The README tells an operator what to put in settings.json, and nothing
     // imports these constants at runtime — so a drift between the two would be

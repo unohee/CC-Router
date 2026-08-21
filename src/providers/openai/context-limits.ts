@@ -1,10 +1,14 @@
 /**
  * Context limits of the Codex backend, and what the client must be told.
  *
- * These are measured, not documented: `codex/models?client_version=1.0.0`
- * reports them per model (verified 2026-08-20 against `gpt-5.6-sol`). They are
- * named here because three separate places need the same numbers and there is
- * no other record of where they came from.
+ * Read once by hand out of `codex/models?client_version=1.0.0`, which reports
+ * them per model (2026-08-20, `gpt-5.6-sol`) — not probed against the refusal
+ * boundary, and nothing here re-reads them: `model-discovery` calls that
+ * endpoint but keeps only the ids. Treat them as an observation that has since
+ * gone unverified, and re-check before shaving the headroom below.
+ *
+ * They are named here because several places need the same numbers and there
+ * was no other record of where they came from.
  */
 
 /** Window Codex advertises as its ordinary limit. */
