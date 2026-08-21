@@ -118,6 +118,42 @@ export class SessionRouter {
   }
 
   /**
+   * Move a session onto one of `candidates`, away from wherever it is now.
+   *
+   * Idempotent by design. Several in-flight requests for one session can each
+   * discover their target is unusable and all call this; without the early
+   * return the second caller deletes the assignment the first just made, and
+   * `leastLoaded` hands back a different account — deterministically, since the
+   * cursor has advanced. One cache rewrite becomes one per concurrent request.
+   */
+  repinOnto(
+    sessionId: string,
+    candidates: SessionTarget[],
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number,
+    isRetainable?: (target: SessionTarget) => boolean,
+  ): SessionTarget | null {
+    // Sweep first, exactly as `resolve` does. Reading the map directly would
+    // let the early return hand back an assignment the TTL has already
+    // retired — correctness must not depend on the caller having swept.
+    this.sweep();
+
+    const keepable = isRetainable ?? isUsable;
+    const existing = this.assignments.get(sessionId);
+    if (existing && candidates.some(c => sameTarget(c, existing.target)) && keepable(existing.target)) {
+      // Keeping a pin still counts as using it, same as `resolve`. Without this
+      // the TTL would measure from the last re-placement rather than the last
+      // request, and a busy session could be swept while actively serving.
+      existing.lastSeen = this.now();
+      this.onAssignmentsChanged?.();
+      return existing.target;
+    }
+
+    this.forget(sessionId);
+    return this.resolve(sessionId, candidates, isUsable, utilOf, isRetainable);
+  }
+
+  /**
    * Serialisable view of the live assignments, for surviving a restart.
    *
    * Losing these on restart is not merely a cosmetic reset: a live Claude Code
@@ -169,8 +205,16 @@ export class SessionRouter {
     return this.assignments.size;
   }
 
+  /**
+   * Drop a session's assignment.
+   *
+   * Persists, because losing a deletion is not symmetric with losing an
+   * addition: a stale snapshot restores the very pin the caller just decided
+   * was wrong, and the session returns to an account that refuses it.
+   */
   forget(sessionId: string): void {
-    this.assignments.delete(sessionId);
+    if (!this.assignments.delete(sessionId)) return;
+    this.onAssignmentsChanged?.();
   }
 
   /**

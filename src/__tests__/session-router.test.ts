@@ -255,3 +255,109 @@ describe("SessionRouter", () => {
     expect(moved.accountId).not.toBe(pinned.accountId);
   });
 });
+
+describe("repin durability and idempotence", () => {
+  const anthropicOnly: SessionTarget[] = [
+    { provider: "anthropic", accountId: "intrect" },
+    { provider: "anthropic", accountId: "kyte" },
+  ];
+  const usable = () => true;
+
+  it("persists a forget, because a lost deletion restores the rejected pin", () => {
+    // Losing an addition costs one placement. Losing a deletion sends the
+    // session back to the account that just refused it.
+    let persists = 0;
+    const router = new SessionRouter({ onAssignmentsChanged: () => persists++ });
+    router.restore([{ sessionId: "s", provider: "openai", accountId: "codex", lastSeen: Date.now() }]);
+
+    persists = 0;
+    router.forget("s");
+
+    expect(persists).toBe(1);
+  });
+
+  it("does not persist a forget for a session it never had", () => {
+    let persists = 0;
+    const router = new SessionRouter({ onAssignmentsChanged: () => persists++ });
+
+    router.forget("never-seen");
+
+    expect(persists).toBe(0);
+  });
+
+  it("returns the same account when concurrent refusals both repin", () => {
+    // The production bug: two in-flight requests are both refused, each calls
+    // in, and the second wipes the first's placement. leastLoaded's cursor has
+    // advanced, so it hands back a different account every time — and the
+    // conversation is re-written into it.
+    const router = new SessionRouter();
+    router.restore([{ sessionId: "s", provider: "openai", accountId: "codex", lastSeen: Date.now() }]);
+
+    const first = router.repinOnto("s", anthropicOnly, usable, undefined, usable);
+    const second = router.repinOnto("s", anthropicOnly, usable, undefined, usable);
+
+    expect(first?.accountId).toBe(second?.accountId);
+  });
+
+  it("still moves a session off an account that has gone unusable", () => {
+    // Idempotence must not become stickiness. `canRetain` is looser than
+    // `canServe` by exactly one condition, so an account that fails retention
+    // also fails placement — both predicates have to reject it here, which is
+    // the only combination production can actually produce.
+    const router = new SessionRouter();
+    router.restore([{ sessionId: "s", provider: "anthropic", accountId: "intrect", lastSeen: Date.now() }]);
+    const notIntrect = (t: SessionTarget) => t.accountId !== "intrect";
+
+    const moved = router.repinOnto("s", anthropicOnly, notIntrect, undefined, notIntrect);
+
+    expect(moved?.accountId).toBe("kyte");
+  });
+
+  it("re-places rather than revives a pin the TTL has already retired", () => {
+    // The early return reads the assignment map, so it has to sweep first.
+    // Otherwise a long-idle session is handed straight back to its old account
+    // instead of being placed against current load — the account it left may
+    // now be the busiest one.
+    // The clock has to move *between* restore and repin: restore drops entries
+    // that are already expired, so a fixed future clock never puts one in the
+    // map and the sweep path is never exercised.
+    let clock = Date.now();
+    const router = new SessionRouter({ ttlMs: 1_000, now: () => clock });
+    router.restore([{ sessionId: "s", provider: "anthropic", accountId: "intrect", lastSeen: clock }]);
+    clock += 5_000;
+
+    // intrect is nearly exhausted; a fresh placement must prefer kyte.
+    const got = router.repinOnto(
+      "s", anthropicOnly, usable,
+      t => (t.accountId === "intrect" ? 0.95 : 0.05),
+      usable,
+    );
+
+    expect(got?.accountId).toBe("kyte");
+  });
+
+  it("refreshes lastSeen when it keeps a pin, so the TTL tracks use", () => {
+    let clock = Date.now();
+    const router = new SessionRouter({ ttlMs: 1_000, now: () => clock });
+    router.restore([{ sessionId: "s", provider: "anthropic", accountId: "intrect", lastSeen: clock }]);
+
+    clock += 900;                                              // still inside the TTL
+    router.repinOnto("s", anthropicOnly, usable, undefined, usable);
+    clock += 900;                                              // past the original expiry
+
+    // size() sweeps; peek() does not, so asserting on peek alone would pass
+    // whether or not lastSeen was refreshed.
+    expect(router.size()).toBe(1);
+    expect(router.peek("s")?.accountId).toBe("intrect");
+  });
+
+  it("does not keep a pin that is not among the offered candidates", () => {
+    // The whole point of the call is to leave the OpenAI account.
+    const router = new SessionRouter();
+    router.restore([{ sessionId: "s", provider: "openai", accountId: "codex", lastSeen: Date.now() }]);
+
+    const moved = router.repinOnto("s", anthropicOnly, usable, undefined, usable);
+
+    expect(moved?.provider).toBe("anthropic");
+  });
+});

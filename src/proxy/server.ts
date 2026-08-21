@@ -313,6 +313,23 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       sessionFlush.unref?.();
     },
   });
+
+  /**
+   * Write the snapshot now instead of at the end of the debounce window.
+   *
+   * The debounce exists because ordinary routing changes assignments on nearly
+   * every request. A repin is the opposite: rare, and expensive enough that
+   * losing it to a kill inside the window costs a full prompt-cache rewrite on
+   * the next start. `process.on("exit")` does not run on SIGKILL, so there is
+   * no later chance to save it.
+   */
+  const flushSessionAssignments = (): void => {
+    if (sessionFlush) {
+      clearTimeout(sessionFlush);
+      sessionFlush = null;
+    }
+    writeSessionAssignments(sessionRouter.snapshot());
+  };
   // Restore before serving: a session that arrives first thing after a restart
   // must find its old account, not be handed a new one.
   sessionRouter.restore(readSessionAssignments() as Parameters<typeof sessionRouter.restore>[0]);
@@ -719,14 +736,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
     onOpenAISessionUnservable: (sessionId: string) => {
       if (!sessionAffinityEnabled) return null;
-      // Drop the OpenAI pin, then place among Anthropic accounts only. Resolving
-      // against the full candidate set would just re-pick the account that has
-      // already refused this session.
-      sessionRouter.forget(sessionId);
+      // Anthropic candidates only: resolving against the full set would just
+      // re-pick the account that has already refused this session. repinOnto is
+      // idempotent, so concurrent refusals converge on one account.
       const anthropicOnly: SessionTarget[] = pool.getAll().map(a => ({
         provider: "anthropic" as const, accountId: a.id,
       }));
-      const replacement = sessionRouter.resolve(
+      const replacement = sessionRouter.repinOnto(
         sessionId, anthropicOnly, sessionTargetUsable, sessionTargetUtil, sessionTargetRetainable,
       );
       if (replacement) {
@@ -739,6 +755,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           sessionId,
         });
       }
+      // Persist immediately rather than waiting out the debounce: a kill inside
+      // that window would restore the OpenAI pin this call just abandoned.
+      flushSessionAssignments();
       // Note the layering: the pin is already dropped above, so a null return
       // means "no Anthropic account was usable either", not "keep the OpenAI
       // pin". The next request places this session fresh.
