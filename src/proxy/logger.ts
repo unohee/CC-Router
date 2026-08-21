@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { describeBuild } from "../utils/build-info.js";
 
 function ts(): string {
   return new Date().toISOString().slice(11, 19); // HH:MM:SS
@@ -83,16 +84,36 @@ function formatStartupAccountCounts(counts: StartupAccountCounts): string {
   return `${total} (Claude ${counts.anthropic}, OpenAI ${counts.openai})`;
 }
 
+/**
+ * Fit a build string into the banner without losing the parts that identify it.
+ *
+ * Plain truncation cuts the tail, which is exactly the commit and the `+dirty`
+ * marker — the two things you look at when a build surprises you. Elide the
+ * branch instead; a branch is recognisable from its head.
+ */
+export function fitBuild(build: string, width: number): string {
+  if (build.length <= width) return build;
+  const at = build.lastIndexOf("@");
+  const suffix = at === -1 ? "" : build.slice(at);
+  const room = width - suffix.length - 1; // 1 for the ellipsis
+  if (room < 1) return build.slice(0, width);
+  return `${build.slice(0, room)}\u2026${suffix}`;
+}
+
 export function logStartup(port: number, host: string, mode: string, target: string, accountCounts: StartupAccountCounts): void {
   const listen = host === "127.0.0.1" ? `http://localhost:${port}` : `http://${host}:${port}`;
   const accounts = formatStartupAccountCounts(accountCounts);
+  // Only shown for a build made in place: a published install has no branch to
+  // report, and printing "unknown" every start would be noise.
+  const build = describeBuild();
   console.log(chalk.cyan(`
 ╔══════════════════════════════════════════════╗
 ║  CC-Router                                   ║
 ║  Listening: ${listen.padEnd(33)}║
 ║  Mode     : ${mode.padEnd(33)}║
 ║  Target   : ${target.slice(0, 33).padEnd(33)}║
-║  Accounts : ${accounts.padEnd(33)}║
+║  Accounts : ${accounts.padEnd(33)}║${build ? `
+║  Build    : ${fitBuild(build, 33).padEnd(33)}║` : ""}
 ╚══════════════════════════════════════════════╝
 `));
 }

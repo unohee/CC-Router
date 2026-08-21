@@ -12,7 +12,9 @@
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prebuild": "node scripts/build-info.mjs check",
+    "postbuild": "node scripts/build-info.mjs"
   },
   "keywords": [
     "claude",

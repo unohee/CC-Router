@@ -27,6 +27,7 @@ import type { SessionTarget } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
+import { describeBuild } from "../utils/build-info.js";
 
 // Augment Request to carry the selected account and pending log entry
 declare module "express-serve-static-core" {
@@ -466,6 +467,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       totalOutputTokens: stats.totalOutputTokens,
       accounts: accountViews,
       recentLogs: stats.getRecentLogs(50),
+      build: describeBuild(),
     });
   });
 
