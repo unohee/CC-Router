@@ -8,7 +8,7 @@ import type { Request } from "express";
 import { TokenPool, EmptyPoolError } from "./token-pool.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
-import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
+import { checkForUpdate, performUpdate, restartSelf, isLinkedInstall, explainLinkedInstall } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin } from "./logger.js";
@@ -1119,7 +1119,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Auto-update enabled by default — users can disable via config or env var
   const cfg = readConfig();
   const autoUpdate = cfg.autoUpdate !== false && process.env["CC_ROUTER_NO_AUTO_UPDATE"] !== "1";
-  if (autoUpdate) {
+  // A linked install is a working tree; installing over it would replace the
+  // operator's checkout with the registry's copy. Checked here rather than only
+  // inside performUpdate so the loop does not announce a refusal every 6 hours.
+  if (autoUpdate && isLinkedInstall()) {
+    explainLinkedInstall();
+  } else if (autoUpdate) {
     const AUTO_UPDATE_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
     const runAutoUpdate = async () => {
       try {
@@ -1156,7 +1161,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       anthropic: accounts.length,
       openai: openAIAccounts.length,
     });
-    if (autoUpdate) console.log(chalk.gray("  Auto-update: enabled (patch/minor)"));
+    // Only claim it is on when it can actually act — a linked install is
+    // refused at every entry point, and saying "enabled" there is a wrong
+    // signal about what this process will do.
+    if (autoUpdate && !isLinkedInstall()) {
+      console.log(chalk.gray("  Auto-update: enabled (patch/minor)"));
+    }
 
     // Anonymous telemetry — fire-and-forget, never blocks proxy startup.
     try {

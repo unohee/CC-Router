@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, dirname, sep } from "path";
 import { createRequire } from "module";
 import chalk from "chalk";
 import { CONFIG_DIR } from "../config/paths.js";
@@ -97,6 +97,88 @@ export async function checkForUpdate(force = false): Promise<UpdateCheckResult> 
   }
 }
 
+// ─── Linked (development) installs ───────────────────────────────────────────
+
+/**
+ * The directory this build actually runs from, or null if it cannot be found.
+ *
+ * Walks up from the running script to the `package.json` that declares this
+ * package. Everything below needs the *real* location, not the path the shim
+ * was invoked through.
+ */
+function runningPackageRoot(): string | null {
+  try {
+    let dir = dirname(realpathSync(process.argv[1] ?? ""));
+    for (let up = 0; up < 10; up++) {
+      const manifest = join(dir, "package.json");
+      if (existsSync(manifest)) {
+        const pkg = JSON.parse(readFileSync(manifest, "utf-8")) as { name?: string };
+        if (pkg.name === PKG_NAME) return dir;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
+ * Whether this install is a working tree linked into place rather than a
+ * package npm put there.
+ *
+ * This matters because updating means `npm install -g`, which replaces
+ * `<prefix>/lib/node_modules/<pkg>` — and when that path is an `npm link`
+ * symlink, replacing it silently swaps a development checkout, and everything
+ * unreleased in it, for whatever the registry is serving. The operator would
+ * see a router that still starts and still works, running code they did not
+ * write.
+ *
+ * Detection deliberately does not go through `detectInstallPrefix()`: for a
+ * linked install that function's marker lookup fails by construction (the real
+ * path is the checkout, which contains no `node_modules/<pkg>` segment) and it
+ * falls back to `npm config get prefix` — the one answer that points straight
+ * at the symlink to overwrite.
+ *
+ * Two independent signals, either of which is enough:
+ *   - the package root is not inside a `node_modules` directory, so npm did not
+ *     put it there;
+ *   - it carries a `.git`, so it is somebody's checkout.
+ */
+let linkedCache: boolean | undefined;
+
+export function isLinkedInstall(): boolean {
+  if (linkedCache !== undefined) return linkedCache;
+  linkedCache = computeIsLinkedInstall();
+  return linkedCache;
+}
+
+/** Exposed for tests, which need to re-evaluate after moving `process.argv[1]`. */
+export function resetLinkedInstallCache(): void {
+  linkedCache = undefined;
+}
+
+function computeIsLinkedInstall(): boolean {
+  const root = runningPackageRoot();
+  // Fail closed. `detectInstallPrefix()` reads the same argv[1] and the same
+  // marker, so when the layout is unidentifiable here it is unidentifiable
+  // there too, and its fallback answer is the symlink. Refusing costs the
+  // operator one manual `npm i -g`; permitting costs them the checkout.
+  if (!root) return true;
+  if (!root.includes(`${sep}node_modules${sep}`)) return true;
+  return existsSync(join(root, ".git"));
+}
+
+/** Why an available update is being ignored, and how to take it anyway. */
+export function explainLinkedInstall(): void {
+  const root = runningPackageRoot();
+  console.log(chalk.gray(
+    `  Update skipped: this install is linked to ${root ?? "a working tree"}.\n` +
+    `  Installing would replace that checkout with the published package.\n` +
+    `  To take the update anyway: npm unlink -g ${PKG_NAME}, then install.`,
+  ));
+}
+
 // ─── Install prefix detection ────────────────────────────────────────────────
 // Detect from process.argv[1] (the actual script), NOT from `npm config get prefix`
 // which can return a wrong path under nvm/volta/fnm.
@@ -126,6 +208,12 @@ function detectInstallPrefix(): string {
 // ─── Perform update ──────────────────────────────────────────────────────────
 
 export async function performUpdate(targetVersion: string): Promise<boolean> {
+  // Deliberately here rather than only at the call sites: this is the function
+  // that destroys the link, so it is the one that has to refuse.
+  if (isLinkedInstall()) {
+    explainLinkedInstall();
+    return false;
+  }
   const prefix = detectInstallPrefix();
 
   console.log(chalk.cyan(`\nUpdating ${PKG_NAME} to v${targetVersion}...`));
@@ -218,24 +306,17 @@ export function getLastGoodVersion(): string | null {
 
 // ─── High-level: check + update + restart ────────────────────────────────────
 
-/** Background auto-update check. Only patches/minor. Returns true if update was started. */
-export async function autoUpdateIfAvailable(): Promise<boolean> {
-  const check = await checkForUpdate();
-  if (!check.updateAvailable || check.diff === "major") return false;
-
-  console.log(chalk.cyan(`\nNew version available: v${check.current} → v${check.latest}`));
-  const ok = await performUpdate(check.latest);
-  if (ok) {
-    restartSelf();
-    return true;
-  }
-  return false;
-}
-
 // ─── Notification banner (for interactive CLI) ──────────────────────────────
 
 export function printUpdateBanner(check: UpdateCheckResult): void {
   if (!check.updateAvailable) return;
+  // `cc-router update` refuses on a linked install, which would leave this
+  // banner offering `npm i -g` as the one instruction that still "works" —
+  // and it is the one that replaces the checkout.
+  if (isLinkedInstall()) {
+    explainLinkedInstall();
+    return;
+  }
 
   const border = "─".repeat(50);
   console.log();

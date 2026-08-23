@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { checkForUpdate, performUpdate, restartSelf, getCurrentVersion } from "../utils/self-update.js";
+import { checkForUpdate, performUpdate, restartSelf, getCurrentVersion, isLinkedInstall, explainLinkedInstall } from "../utils/self-update.js";
 
 export function registerUpdate(program: Command): void {
   program
@@ -26,6 +26,14 @@ export function registerUpdate(program: Command): void {
       );
 
       if (opts.check) return;
+
+      // Before the major-version branch and before performUpdate's own refusal:
+      // both of those fall through to "install it manually with npm i -g",
+      // which is precisely what would overwrite the linked checkout.
+      if (isLinkedInstall()) {
+        explainLinkedInstall();
+        return;
+      }
 
       if (check.diff === "major") {
         console.log(chalk.yellow("\n⚠ Major version update — may contain breaking changes."));

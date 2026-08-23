@@ -10,7 +10,7 @@ import {
   type RunPreferences,
 } from "../config/manager.js";
 import { writeClaudeSettings } from "../utils/claude-config.js";
-import { checkForUpdate, performUpdate } from "../utils/self-update.js";
+import { checkForUpdate, performUpdate, isLinkedInstall, explainLinkedInstall } from "../utils/self-update.js";
 import { launchDaemon } from "../daemon/launcher.js";
 import { isProxyRunning } from "../daemon/pid.js";
 import { installService } from "../daemon/service.js";
@@ -222,12 +222,21 @@ async function ensureClaudeCodeConfigured(
 
 // ─── Update check ────────────────────────────────────────────────────────────
 
-async function maybeUpdate(): Promise<void> {
+export async function maybeUpdate(): Promise<void> {
   // `cc-router configure --disable-auto-update` must silence this path too.
   // It previously governed only the server's 6-hour loop, so start kept
   // offering (and with the confirm defaulting to yes, performing) installs
   // the operator had explicitly turned off.
   if (readConfig().autoUpdate === false || process.env["CC_ROUTER_NO_AUTO_UPDATE"] === "1") return;
+
+  // A linked install is somebody's working tree. Updating replaces it with the
+  // registry's copy, taking everything unreleased with it — and the config flag
+  // above is a single line in a file that has been rewritten before, so this
+  // cannot be the only thing standing between a checkout and `npm install -g`.
+  if (isLinkedInstall()) {
+    explainLinkedInstall();
+    return;
+  }
 
   let check;
   try {
@@ -245,9 +254,22 @@ async function maybeUpdate(): Promise<void> {
   }
 
   console.log(chalk.cyan(`\n  Update available: v${check.current} → v${check.latest} (${check.diff})`));
+
+  // Background and service launches give this process no stdin
+  // (`launcher.ts` spawns with stdio "ignore"), and asking anyway does not
+  // wait politely — it threw ExitPromptError out of startup while the previous
+  // process was still writing its session assignments. Say what is available
+  // and let a human run it.
+  if (!process.stdin.isTTY) {
+    console.log(chalk.gray(`  Run: npm i -g ai-cc-router@${check.latest}\n`));
+    return;
+  }
+
   const doUpdate = await confirm({
     message: "Update now?",
-    default: true,
+    // Not `true`: this replaces the installed package, and a stray Enter
+    // during startup should not be how that happens.
+    default: false,
   });
   if (!doUpdate) return;
 
