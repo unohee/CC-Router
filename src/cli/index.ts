@@ -13,6 +13,7 @@ import { registerTelemetry } from "./cmd-telemetry.js";
 import { registerLogs } from "./cmd-logs.js";
 import { registerModels } from "./cmd-models.js";
 import { getCurrentVersion, checkForUpdate, printUpdateBanner } from "../utils/self-update.js";
+import { readConfig } from "../config/manager.js";
 
 const program = new Command();
 
@@ -55,7 +56,14 @@ registerLogs(program);
 
 // Background update check — fires on every CLI invocation, uses 6h disk cache
 // so it's essentially free after the first check. Notify on process exit.
-if (!process.env["NO_UPDATE_NOTIFIER"] && !process.env["CI"]) {
+//
+// The config flag belongs here too. Turning auto-update off and still being
+// told, on every `cc-router status`, to run the install by hand is the same
+// setting being honoured in one place and ignored in another.
+const updateNotifierOff =
+  process.env["NO_UPDATE_NOTIFIER"] || process.env["CI"] ||
+  process.env["CC_ROUTER_NO_AUTO_UPDATE"] === "1" || readConfig().autoUpdate === false;
+if (!updateNotifierOff) {
   checkForUpdate().then((check) => {
     if (check.updateAvailable) {
       process.on("exit", () => printUpdateBanner(check));
