@@ -22,6 +22,8 @@ export function registerConfigure(program: Command): void {
     .option("--remove-password", "Remove proxy password protection (open access)")
     .option("--enable-auto-update", "Enable automatic updates for the proxy")
     .option("--disable-auto-update", "Disable automatic updates for the proxy")
+    .option("--enable-session-affinity", "Pin each session to one account (default)")
+    .option("--disable-session-affinity", "Pick an account per request instead of per session")
     .action((target: string | undefined, opts: {
       remove?: boolean;
       port: string;
@@ -34,6 +36,8 @@ export function registerConfigure(program: Command): void {
       removePassword?: boolean;
       enableAutoUpdate?: boolean;
       disableAutoUpdate?: boolean;
+      enableSessionAffinity?: boolean;
+      disableSessionAffinity?: boolean;
     }) => {
       if (target === "codex") {
         const port = parseInt(opts.port, 10);
@@ -90,6 +94,8 @@ export function registerConfigure(program: Command): void {
         const auStatus = autoUpdateEnabled ? chalk.green("enabled") : chalk.gray("disabled");
         console.log(`    Password protected:  ${pwStatus}`);
         console.log(`    Auto-update:         ${auStatus}`);
+        const affinity = cfg.sessionAffinity !== false;
+        console.log(`    Session affinity:    ${affinity ? chalk.green("enabled") : chalk.gray("disabled")}`);
         return;
       }
 
@@ -105,6 +111,22 @@ export function registerConfigure(program: Command): void {
         writeConfig({ ...readConfig(), autoUpdate: false });
         console.log(chalk.green("✓ Auto-update disabled."));
         console.log(chalk.gray("  Use `cc-router update` to update manually."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.disableSessionAffinity) {
+        writeConfig({ ...readConfig(), sessionAffinity: false });
+        console.log(chalk.green("✓ Session affinity disabled — an account is picked per request."));
+        console.log(chalk.gray("  Note: this re-splits a single conversation across accounts, so each"));
+        console.log(chalk.gray("  one re-writes the prompt cache instead of reading it."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableSessionAffinity) {
+        writeConfig({ ...readConfig(), sessionAffinity: true });
+        console.log(chalk.green("✓ Session affinity enabled."));
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

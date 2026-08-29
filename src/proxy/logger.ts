@@ -4,12 +4,36 @@ function ts(): string {
   return new Date().toISOString().slice(11, 19); // HH:MM:SS
 }
 
-export function logRoute(accountId: string, requestCount: number, expiresInMin: number): void {
+export function logRoute(
+  accountId: string,
+  requestCount: number,
+  expiresInMin: number,
+  /** Session this request was pinned to, when session affinity picked the account. */
+  pinnedSessionId?: string,
+): void {
   console.log(
     chalk.gray(`[${ts()}]`) +
     chalk.green(` → ${accountId}`) +
     chalk.gray(` req#${requestCount}`) +
-    chalk.yellow(` exp=${expiresInMin}min`)
+    chalk.yellow(` exp=${expiresInMin}min`) +
+    (pinnedSessionId ? chalk.cyan(` pin=${pinnedSessionId.slice(0, 8)}`) : "")
+  );
+}
+
+/**
+ * A session that moved to a different account.
+ *
+ * Worth a line of its own: the move costs a full prompt-cache rebuild for that
+ * conversation, and it happens for reasons the route line does not show - the
+ * old account went unhealthy, hit a cooldown, or was disabled. Recording it
+ * only in the dashboard buffer leaves anyone watching the console with an
+ * unexplained jump between accounts.
+ */
+export function logSessionReassign(sessionId: string, from: string, to: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.magenta(` [SESSION] ${sessionId.slice(0, 8)}`) +
+    chalk.gray(` reassigned ${from} → ${to}`)
   );
 }
 

@@ -140,12 +140,7 @@ export class TokenPool {
     // whose reset window has passed would never re-enter rotation.
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
 
-    const available = this.accounts.filter(a =>
-      a.healthy &&
-      !a.busy &&
-      a.rateLimits.status !== "rate_limited" &&
-      isUsable(a)
-    );
+    const available = this.accounts.filter(a => this.isAvailable(a));
 
     if (available.length === 0) {
       const healthyUsable = this.accounts.filter(a => a.healthy && isUsable(a));
@@ -176,6 +171,52 @@ export class TokenPool {
     account.requestCount++;
     account.lastUsed = Date.now();
     return account;
+  }
+
+  /** Look up one account by id, regardless of its current health. */
+  getById(id: string): Account | undefined {
+    return this.accounts.find(a => a.id === id);
+  }
+
+  /**
+   * Whether one specific account can take traffic right now - the same
+   * predicate `getNext()` applies to its primary tier. Used by session
+   * affinity to decide whether a pinned account is still serviceable before
+   * reassigning the session elsewhere.
+   */
+  canServe(id: string): boolean {
+    const a = this.getById(id);
+    if (!a) return false;
+    // Sweep first, or an account whose cooldown has already elapsed would look
+    // unusable and the session would be reassigned for no reason.
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    return this.isAvailable(a);
+  }
+
+  /**
+   * Whether a session already pinned to this account should stay on it.
+   *
+   * Looser than `canServe` by exactly one condition: `busy` is ignored. Busy
+   * means "a request is in flight", not "cannot serve", and a pinned session
+   * that abandons its account over a moment of concurrency re-writes its whole
+   * prompt cache into the next one - measured at 954K tokens for a single
+   * conversation. Concurrency is a fair reason to place a NEW session
+   * elsewhere; it is never a reason to move an existing one.
+   */
+  canRetain(id: string): boolean {
+    const a = this.getById(id);
+    if (!a) return false;
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    // `cooling` is still honoured: a 429/529 cooldown is upstream telling us to
+    // stop, which a pin must respect. Only plain in-flight concurrency is
+    // forgiven here.
+    const cooling = (a.coolingUntil ?? 0) > Date.now();
+    return a.healthy && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
+  }
+
+  /** The predicate `getNext()` uses for its primary (non-degraded) tier. */
+  private isAvailable(a: Account): boolean {
+    return a.healthy && !a.busy && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
 
   /** Optional listener fired when a request is routed to a capped account

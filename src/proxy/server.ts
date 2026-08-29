@@ -6,12 +6,13 @@ import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Request } from "express";
 import { TokenPool, EmptyPoolError } from "./token-pool.js";
+import { SessionRouter } from "./session-router.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup } from "./logger.js";
+import { logRoute, logError, logStartup, logSessionReassign } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -237,6 +238,26 @@ function extractRateLimits(headers: Record<string, string | string[] | undefined
   };
 }
 
+/**
+ * The Anthropic account a request should stay on, given the pin the session
+ * router already decided to keep.
+ *
+ * Judged with `canRetain`, not `canServe`: the router has just held this pin
+ * through `canRetain`, so re-testing it with the stricter placement predicate
+ * would discard the pin the moment the account is merely mid-request, and the
+ * conversation would round-robin onto another account and re-write its whole
+ * prompt cache. Measured at 670K tokens for one session that bounced between
+ * two accounts inside 51 seconds. The two predicates must agree about
+ * retention, or the pin is decided twice by different rules.
+ */
+export function pinnedAnthropicAccount(
+  pool: Pick<TokenPool, "canRetain" | "getById">,
+  accountId: string | null,
+): Account | undefined {
+  if (!accountId) return undefined;
+  return pool.canRetain(accountId) ? pool.getById(accountId) : undefined;
+}
+
 export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const port = opts.port ?? PROXY_PORT;
 
@@ -267,6 +288,79 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts);
   const initialConfig = readConfig();
   const modelRouting = initialConfig.modelRouting ?? {};
+
+  // ─── Session affinity ─────────────────────────────────────────────────────
+  // Request-level round-robin and prompt caching work against each other: a
+  // conversation that moves to another account re-writes its entire cached
+  // context there. Pin each session to one account instead. See
+  // session-router.ts for the placement and retention rules.
+  //
+  // Assignments are flushed on a timer rather than on every change: a busy
+  // router reassigns often, and the snapshot only has to be recent enough that
+  // a restart lands sessions back on their own accounts.
+  let sessionFlush: NodeJS.Timeout | null = null;
+  const sessionRouter = new SessionRouter({
+    onReassign: ({ sessionId, from, to }) => {
+      logSessionReassign(sessionId, from, to);
+      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from} → ${to}`;
+      stats.addLog({
+        ts: Date.now(), accountId: to, model: "-", type: "route",
+        details: msg, sessionId,
+      });
+    },
+    onAssignmentsChanged: () => {
+      if (sessionFlush) return;
+      sessionFlush = setTimeout(() => {
+        sessionFlush = null;
+        writeSessionAssignments(sessionRouter.snapshot());
+      }, 2_000);
+      sessionFlush.unref?.();
+    },
+  });
+  const sessionAffinityEnabled = initialConfig.sessionAffinity !== false;
+
+  // Restore before serving: a session that arrives first thing after a restart
+  // must find its old account, not be handed a new one.
+  sessionRouter.restore(readSessionAssignments() as Parameters<typeof sessionRouter.restore>[0]);
+
+  // Snapshot on the way out, whichever way that is. The graceful path below
+  // covers signals, but an auto-update restart calls process.exit directly and
+  // would otherwise discard the pending debounce - losing exactly the
+  // assignments the restart is about to need.
+  process.on("exit", () => {
+    writeSessionAssignments(sessionRouter.snapshot());
+  });
+
+  /**
+   * How full an account's quota is, as the worst of its two windows. The tighter
+   * window is what actually stops the account, so the maximum - not the
+   * currently-claimed one - is the honest measure of remaining headroom.
+   * Unknown quota reads as empty, which lets an unmeasured account take work
+   * and thereby produce the reading.
+   */
+  const sessionAccountUtil = (accountId: string): number => {
+    const limits = pool.getById(accountId)?.rateLimits;
+    if (!limits) return 0;
+    return Math.max(limits.fiveHourUtil, limits.sevenDayUtil);
+  };
+
+  /**
+   * The account this session should use, or null to fall back to rotation.
+   *
+   * Placement asks `canServe`; retention asks the more lenient `canRetain`.
+   * Requests routed to an OpenAI subscription account are selected by their own
+   * picker and are not part of session assignment.
+   */
+  const resolveSessionAccount = (sessionId: string): string | null => {
+    if (!sessionAffinityEnabled) return null;
+    return sessionRouter.resolve(
+      sessionId,
+      pool.getAll().map(a => a.id),
+      id => pool.canServe(id),
+      sessionAccountUtil,
+      id => pool.canRetain(id),
+    );
+  };
 
   // Log when the pool falls back to a capped account — makes the cap bypass
   // visible in the dashboard's "RECENT ACTIVITY" instead of being silent.
@@ -687,6 +781,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           logError(account.id, 429, `Rate limited — cooldown ${retryAfter}s`);
 
           account.busy = true;
+          // Extend, never shorten: a later failure must not be cleared by an
+          // earlier timer that happens to fire first. `busy` alone could not
+          // express this - it meant both "a request is in flight" and
+          // "upstream told us to stop", and a pin must respect only the second.
+          account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + retryAfter * 1_000);
           setTimeout(() => { account.busy = false; }, retryAfter * 1_000);
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.
@@ -697,6 +796,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           logError(account.id, 529, "Service overloaded — cooldown 30s");
 
           account.busy = true;
+          account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + 30_000);
           setTimeout(() => { account.busy = false; }, 30_000);
         }
 
@@ -801,9 +901,24 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // CRITICAL: Do NOT use express.json() here — it consumes the body stream
   // and breaks SSE streaming passthrough.
   app.use("/v1", async (req, res, next) => {
+    const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+    // Resolved at most once per request: resolve() advances the assignment
+    // cursor for a session it has not seen before.
+    const pinnedAccountId = sessionId ? resolveSessionAccount(sessionId) : null;
+
     let account: Account;
     try {
-      account = pool.getNext();
+      // A held pin wins over rotation. getNext() would both pick a different
+      // account and advance the cursor, so the pinned path accounts for its
+      // own request rather than routing through it.
+      const pinnedAccount = pinnedAnthropicAccount(pool, pinnedAccountId);
+      if (pinnedAccount) {
+        pinnedAccount.requestCount++;
+        pinnedAccount.lastUsed = Date.now();
+        account = pinnedAccount;
+      } else {
+        account = pool.getNext();
+      }
     } catch (err) {
       if (err instanceof EmptyPoolError) {
         stats.totalErrors++;
@@ -837,7 +952,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     req._ccAccount = account;
     req._startTime = Date.now();
-    const source = req.headers["x-claude-code-session-id"]
+    const source = sessionId
       ? "cli" as const
       : req.headers["x-api-key"]
       ? "desktop" as const
@@ -851,6 +966,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       method: req.method,
       path: req.path,
       source,
+      ...(sessionId ? { sessionId } : {}),
     };
     stats.totalRequests++;
 
@@ -858,6 +974,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       account.id,
       account.requestCount,
       Math.round((account.tokens.expiresAt - Date.now()) / 60_000),
+      pinnedAccountId === account.id ? sessionId : undefined,
     );
 
     next();
@@ -873,6 +990,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = () => {
     console.log(chalk.yellow("\nShutting down — saving tokens..."));
     saveAccounts(pool.getAll());
+    // Flush now: the debounce timer will not fire after exit, and losing the
+    // final assignments is what makes a restart rewrite every prompt cache.
+    writeSessionAssignments(sessionRouter.snapshot());
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();
     }

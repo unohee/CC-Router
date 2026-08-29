@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createHealthAccountViews, createOperationalStatus } from "../proxy/server.js";
+import { createHealthAccountViews, createOperationalStatus, pinnedAnthropicAccount } from "../proxy/server.js";
+import { TokenPool } from "../proxy/token-pool.js";
+import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
 import type { Account } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 
@@ -132,5 +134,68 @@ describe("createOperationalStatus", () => {
 
     expect(JSON.stringify(status)).not.toContain("openai-access");
     expect(JSON.stringify(status)).not.toContain("ant-access");
+  });
+});
+
+describe("pinnedAnthropicAccount", () => {
+  function poolWith(overrides: Partial<Account> = {}): TokenPool {
+    return new TokenPool([{
+      id: "pinned",
+      healthy: true,
+      busy: false,
+      enabled: true,
+      requestCount: 0,
+      errorCount: 0,
+      lastUsed: 0,
+      lastRefresh: 0,
+      consecutiveErrors: 0,
+      sessionLimitPercent: 100,
+      weeklyLimitPercent: 100,
+      tokens: { accessToken: "a", refreshToken: "r", expiresAt: Date.now() + 3_600_000 },
+      rateLimits: { ...DEFAULT_RATE_LIMITS },
+      ...overrides,
+    } as Account]);
+  }
+
+  it("keeps the pin while the account is merely mid-request", () => {
+    // The session router already held this pin through canRetain. Re-testing it
+    // with the placement predicate here would drop it on any concurrent
+    // request and rewrite the conversation into another account's cache.
+    const account = pinnedAnthropicAccount(poolWith({ busy: true }), "pinned");
+
+    expect(account?.id).toBe("pinned");
+  });
+
+  it("gives up the pin when upstream put the account on cooldown", () => {
+    const account = pinnedAnthropicAccount(
+      poolWith({ busy: true, coolingUntil: Date.now() + 60_000 }),
+      "pinned",
+    );
+
+    expect(account).toBeUndefined();
+  });
+
+  it("gives up the pin when the account is rate limited or unhealthy", () => {
+    const limited = pinnedAnthropicAccount(
+      poolWith({
+        rateLimits: {
+          ...DEFAULT_RATE_LIMITS,
+          status: "rate_limited",
+          fiveHourReset: Math.floor(Date.now() / 1000) + 3600,
+        },
+      }),
+      "pinned",
+    );
+    expect(limited).toBeUndefined();
+
+    const unhealthy = pinnedAnthropicAccount(poolWith({ healthy: false }), "pinned");
+    expect(unhealthy).toBeUndefined();
+  });
+
+  it("ignores an absent pin and one naming an account that is gone", () => {
+    const pool = poolWith();
+
+    expect(pinnedAnthropicAccount(pool, null)).toBeUndefined();
+    expect(pinnedAnthropicAccount(pool, "gone")).toBeUndefined();
   });
 });

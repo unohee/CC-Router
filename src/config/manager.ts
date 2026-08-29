@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "fs";
 import { randomBytes } from "crypto";
-import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH } from "./paths.js";
+import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH, SESSIONS_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -188,6 +188,9 @@ export interface ProxyConfig {
   proxyRequesTime?: number;
   /** Auto-update on patch/minor releases. Default: true (enabled). Set to false to disable. */
   autoUpdate?: boolean;
+  /** Pin each Claude Code session to one account so its prompt cache survives.
+   *  Default: true. Sessions without the header keep plain round-robin. */
+  sessionAffinity?: boolean;
   /** Default and alias model routing for Claude and OpenAI subscription providers. */
   modelRouting?: ModelRoutingConfig;
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
@@ -283,4 +286,32 @@ export function serialize(accounts: Account[]): AccountRecord[] {
     sessionLimitPercent: a.sessionLimitPercent,
     weeklyLimitPercent: a.weeklyLimitPercent,
   }));
+}
+
+/**
+ * Session assignments survive a restart here. Without this the router forgets
+ * which account each live conversation belongs to, reassigns it, and the whole
+ * prompt cache is re-written into the new account - measured at 917K tokens
+ * for a single session.
+ */
+export function readSessionAssignments(): unknown[] {
+  try {
+    const raw = readFileSync(SESSIONS_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as { sessions?: unknown[] };
+    return Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+  } catch {
+    // Missing, unreadable or corrupt: start empty rather than fail to boot.
+    return [];
+  }
+}
+
+export function writeSessionAssignments(sessions: unknown[]): void {
+  try {
+    ensureConfigDir();
+    const tmp = SESSIONS_PATH + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ version: 1, sessions }), "utf-8");
+    renameSync(tmp, SESSIONS_PATH);
+  } catch {
+    // Losing the snapshot costs one round of reassignment, not correctness.
+  }
 }

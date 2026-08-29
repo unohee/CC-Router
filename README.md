@@ -62,6 +62,28 @@ Claude Desktop  ─[mitmproxy]─┐  (optional — intercepts api.anthropic.com
 
 All standard Claude Code features work transparently on the Claude route: streaming, extended thinking, tool use, prompt caching. OpenAI subscription routing is available for Codex-compatible Responses requests and Claude Code cross-routing with the limitations documented below.
 
+### Session affinity
+
+Account selection is per **session**, not per request. Claude Code resends the whole
+conversation every turn and leans on Anthropic's prompt cache, but that cache lives with
+the account that wrote it - spreading one conversation across accounts makes every account
+re-write the prefix (cache writes cost 1.25x base input; reads cost 0.1x).
+
+So each session is pinned to one account, and *different* sessions spread across the pool:
+a new session goes to the usable account holding the fewest live sessions, ties broken by
+remaining quota, then rotation. Requests without a session header keep plain round-robin.
+
+A pin is held more leniently than it is placed. An account that is merely mid-request is
+still the right home for a session already on it, but the wrong home for a new one - so
+concurrency never moves an existing session, while a 429/529 cooldown, an unhealthy
+account or a disabled one does. Reassignments are logged, because each one costs that
+conversation a full cache rebuild.
+
+Assignments are written to `~/.cc-router/sessions.json` (override with `SESSIONS_PATH`)
+and restored on start, so a restart does not scatter live conversations across accounts.
+
+Turn it off with `cc-router configure --disable-session-affinity`.
+
 **Claude Desktop support** is opt-in and requires a small interceptor (mitmproxy) because Claude Desktop doesn't expose a custom API endpoint setting. See [Claude Desktop support](#claude-desktop-support).
 
 ---
@@ -308,6 +330,8 @@ cc-router configure codex --model openai/gpt-5-codex
 cc-router configure models --claude-model claude-sonnet-4-6 --openai-model gpt-5-codex
 cc-router configure --show   Show current Claude Code proxy settings
 cc-router configure --remove Remove cc-router settings (same as revert without stopping)
+cc-router configure --disable-session-affinity   Pick an account per request, not per session
+cc-router configure --enable-session-affinity    Pin each session to one account (default)
 
 cc-router client connect <url>       Connect Claude Code to a remote CC-Router
 cc-router client connect --desktop   Also configure Claude Desktop interception
