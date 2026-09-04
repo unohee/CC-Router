@@ -11,13 +11,14 @@ import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExist
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
+import { codexCanHold, targetCanHoldContext } from "../providers/openai/context-limits.js";
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
@@ -375,15 +376,59 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     return Math.max(limits.fiveHourUtil, limits.sevenDayUtil);
   };
 
-  const resolveSessionTarget = (sessionId: string): SessionTarget | null => {
+  /**
+   * Where this session's next request should go.
+   *
+   * `estimatedPromptTokens` is what makes the placement context-aware. A Codex
+   * account is offered — and an existing Codex pin is kept — only while it
+   * could still hold the conversation. Deciding that here, rather than at the
+   * refusal, is the entire point: Codex answers an oversized session by
+   * refusing inside an HTTP 200 stream, so the cost never appears as an error,
+   * only as a re-pin and a full prefix rewrite into the next account.
+   *
+   * The ceiling used to be applied by the operator instead, as a global
+   * `autoCompactWindow` on the client. That capped every session in the pool,
+   * including ones pinned to a Claude account with room to spare, to make one
+   * target's limit safe. Applying it per request, to the target that actually
+   * has the limit, leaves the Claude accounts their full window.
+   */
+  const resolveSessionTarget = (
+    sessionId: string,
+    estimatedPromptTokens: number | null = null,
+  ): SessionTarget | null => {
     if (!sessionAffinityEnabled) return null;
+
+    const codexFits = codexCanHold(estimatedPromptTokens);
     const candidates: SessionTarget[] = pool.getAll().map(a => ({
       provider: "anthropic" as const, accountId: a.id,
     }));
-    if (sessionPoolIncludesOpenAI) {
+    if (sessionPoolIncludesOpenAI && codexFits) {
       for (const a of openAIAccounts) candidates.push({ provider: "openai", accountId: a.id });
     }
-    return sessionRouter.resolve(sessionId, candidates, sessionTargetUsable, sessionTargetUtil, sessionTargetRetainable);
+
+    // Leaving Codex out of `candidates` only governs where a *new* session is
+    // placed: `resolve` keeps an existing pin on the strength of the retention
+    // predicate alone, without consulting the candidate list. So the predicates
+    // are what actually release a pin the conversation has outgrown.
+    const usableNow = (t: SessionTarget): boolean =>
+      sessionTargetUsable(t) && targetCanHoldContext(t.provider, estimatedPromptTokens);
+    const retainableNow = (t: SessionTarget): boolean =>
+      sessionTargetRetainable(t) && targetCanHoldContext(t.provider, estimatedPromptTokens);
+
+    const before = sessionRouter.peek(sessionId);
+    const target = sessionRouter.resolve(sessionId, candidates, usableNow, sessionTargetUtil, retainableNow);
+
+    // Report the move only once it has actually happened. `resolve` returns
+    // null and leaves the pin alone when no Anthropic account is usable either,
+    // and announcing a move that did not occur would send an operator looking
+    // for a session on an account it never reached. The generic reassignment
+    // line `onReassign` writes does not carry the reason, and the reason is the
+    // whole point of this one.
+    if (before?.provider === "openai" && target?.provider === "anthropic" && estimatedPromptTokens !== null) {
+      logSessionOutgrewCodex(sessionId, estimatedPromptTokens);
+    }
+
+    return target;
   };
 
   // Log when the pool falls back to a capped account — makes the cap bypass
@@ -920,6 +965,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           account.busy = true;
           account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + 30_000);
           setTimeout(() => { account.busy = false; }, 30_000);
+        } else if (status >= 400) {
+          // Everything else upstream refused. Chief among them is the 400 for a
+          // prompt past the model's window: it is forwarded to the client, which
+          // reacts by compacting, so the only trace left in the router was a
+          // routine "route" line with a 400 next to it. An operator watching a
+          // session compact in a loop had nothing here to tell them why, and
+          // the answer had to be dug out of the client's own transcript.
+          //
+          // Counted globally but NOT against the account: the request was
+          // refused on its own merits, and marking the account would put an
+          // error on the one column an operator reads to decide an account is
+          // unhealthy.
+          stats.totalErrors++;
+          pendingLog.type = "error";
+          pendingLog.details = `upstream refused (${status})`;
+          logError(account.id, status, "upstream refused the request");
         }
 
         const entry = pendingLog as LogEntry;
@@ -975,10 +1036,23 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
             proxyRes.on("data", (chunk: Buffer) => { buf += chunk.toString("utf8"); });
             proxyRes.on("end", () => {
               try {
-                const body = JSON.parse(buf) as { usage?: Record<string, number> };
+                const body = JSON.parse(buf) as {
+                  usage?: Record<string, number>;
+                  error?: { message?: string };
+                };
                 if (body.usage) {
                   applyInputUsage(entry, body.usage);
                   applyOutputUsage(entry, body.usage);
+                }
+                // Upstream says why it refused; without this the log records
+                // only that it did. "prompt is too long: N tokens > M maximum"
+                // names both the limit and how far past it the session ran,
+                // which is the whole diagnosis for a compaction loop.
+                // `entry` is the object stats is holding, so this reaches the
+                // dashboard the same way the usage above does.
+                const reason = body.error?.message?.trim();
+                if (status >= 400 && reason) {
+                  entry.details = `upstream refused (${status}): ${reason.slice(0, 200)}`;
                 }
               } catch { /* ignore */ }
             });

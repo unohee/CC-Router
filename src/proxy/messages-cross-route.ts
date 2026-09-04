@@ -7,6 +7,7 @@ import { openAIResponseToAnthropicMessage } from "../protocol/openai-response-to
 import { createOpenAIStreamToAnthropicNormalizer, openAIStreamFailure } from "../protocol/openai-stream-to-anthropic.js";
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
+import { codexCanHold, estimatePromptTokens } from "../providers/openai/context-limits.js";
 import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
 import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputItem } from "../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -54,8 +55,13 @@ export interface MessagesCrossProviderRouteOptions {
   /** Fired after a successful automatic fallback so the caller can log/record it. */
   onFallback?: (info: OpenAIRouteInfo) => void;
   /** Resolve the account this session is pinned to. Called at most once per
-   *  request — it advances the assignment cursor for sessions seen first time. */
-  resolveSessionTarget?: (sessionId: string) => SessionTarget | null;
+   *  request — it advances the assignment cursor for sessions seen first time.
+   *  `estimatedPromptTokens` lets the implementation refuse a target that could
+   *  not hold this conversation; null means the size could not be measured. */
+  resolveSessionTarget?: (
+    sessionId: string,
+    estimatedPromptTokens: number | null,
+  ) => SessionTarget | null;
   /** Read an existing pin without creating one. Used on the explicit `openai/*`
    *  route, which must honour an existing pin but must not itself decide that a
    *  session belongs to OpenAI — that would silently divert the session's later
@@ -525,11 +531,19 @@ export function mountMessagesCrossProviderRoute(
       const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting)
         ?? openAIDefaultModel;
 
+      // Size the conversation before deciding where it goes. Codex refuses a
+      // session whose context has outgrown its window, and that refusal arrives
+      // inside an HTTP 200 stream — so it does not surface as an error, it
+      // surfaces as a re-pin and a full prefix rewrite into the next account
+      // (600-750K tokens measured). Measuring here is the only place with the
+      // body in hand; deciding what fits is the caller's, which owns the pool.
+      const estimatedPromptTokens = estimatePromptTokens(req._ccRawBody);
+
       // Session affinity. Resolved once here and stashed on the request so the
       // Anthropic proxy downstream reuses the same decision rather than
       // resolving again (which would advance the assignment cursor twice).
       const sessionTarget = sessionId && opts.resolveSessionTarget
-        ? opts.resolveSessionTarget(sessionId)
+        ? opts.resolveSessionTarget(sessionId, estimatedPromptTokens)
         : null;
       if (sessionTarget) req._ccSessionTarget = sessionTarget;
 
@@ -575,7 +589,14 @@ export function mountMessagesCrossProviderRoute(
         opts.crossProviderFallback === true &&
         opts.hasAvailableAnthropicAccount?.() === false;
 
-      if (anthropicExhausted && openAIDefaultModel && tieredModel) {
+      // The fallback picks an OpenAI account directly rather than through the
+      // session router, so the size guard above does not cover it. Without this
+      // check, exhausting the Anthropic pool would hand Codex exactly the
+      // oversized conversations it cannot answer — and because the request is
+      // mid-session, the client has nowhere to retry: falling through to the
+      // degraded Anthropic path at least returns the upstream's own 429.
+      if (anthropicExhausted && openAIDefaultModel && tieredModel
+          && codexCanHold(estimatedPromptTokens)) {
         const outcome = await forwardAnthropicRequestAsOpenAI(
           { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,

@@ -385,40 +385,37 @@ keeps its context-window assumptions; the real upstream model is shown in logs (
 and on the dashboard. Subagents carry their own session ids, so a single Claude Code task
 using subagents naturally spreads across providers without breaking any cache.
 
-### Cap the client's context when the pool includes Codex
+### Keeping a session inside what Codex can hold
 
-The model echo above has a cost that has to be paid in configuration.
+The model echo above has a cost, and the router is what pays it.
 
-Codex accepts at most **872,000** tokens (measured from
-`codex/models`; the ordinary window it advertises is 272,000). Claude Code, told
-it is talking to a Claude model, will happily grow a session past that. When it
-does, Codex refuses **every** request for that session — and the refusal arrives
-inside an HTTP 200 stream, so no status code marks the account as unusable.
+Codex accepts at most **872,000** tokens (read from `codex/models`; the ordinary
+window it advertises is 272,000). Claude Code, told it is talking to a Claude
+model, will happily grow a session past that. When it does, Codex refuses
+**every** request for that session — and the refusal arrives inside an HTTP 200
+stream, so no status code marks the account as unusable.
 
-Set the ceiling below the pool minimum, not at the Claude maximum:
-
-```jsonc
-// ~/.claude/settings.json
-{ "autoCompactWindow": 800000 }
-```
-
-The 72k of headroom absorbs the request that triggers compaction — it is still
-sent — plus one large tool result. The numbers live in
+So the router sizes each request before it routes it, and stops handing a
+session to a Codex account once its conversation passes **800,000** tokens. The
+72k of headroom absorbs the estimate's own error plus one more turn's growth,
+which matters because being refused is not free: the session is re-pinned and
+its whole prefix is rewritten into the next account's cache, measured at
+600-750K tokens. The numbers live in
 `src/providers/openai/context-limits.ts`.
 
-Two things worth knowing before changing it:
+This needs nothing configured on the client. Earlier versions asked for a
+matching ceiling in `~/.claude/settings.json`:
 
-- It takes effect **without restarting**. Claude Code watches its settings files
-  and re-resolves the auto-compact window at the start of each turn, so a
-  session already over the ceiling is fixable in place — which matters, because
-  restarting one costs the very cache rewrite this is meant to prevent.
-- It knows nothing about which account a session landed on, so a session pinned
-  to a Claude account gives up the difference between its real window and this
-  ceiling. Three ways out, in rough order of bluntness: scope the setting to a
-  project (`.claude/settings.json`), override it per launch
-  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`), or leave Codex out of the session pool
-  entirely (omit `--enable-session-pool-openai`) and spread Claude Code across
-  one fewer account.
+```jsonc
+{ "autoCompactWindow": 800000 }   // no longer needed
+```
+
+That setting is global — it knows nothing about which account a session landed
+on, so it also capped sessions pinned to a Claude account that could hold 1M.
+Every session in the pool compacted ~200k early to accommodate the one target
+that could not hold more. If you set it for this reason, you can take it out;
+if you set it for your own reasons, it still works and the router does not
+fight it.
 
 A session the account cannot serve — refused for size, or failing partway
 through — is re-pinned to a Claude account on the spot, so it settles rather

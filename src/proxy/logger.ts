@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { CODEX_SESSION_CEILING } from "../providers/openai/context-limits.js";
 
 function ts(): string {
   return new Date().toISOString().slice(11, 19); // HH:MM:SS
@@ -57,6 +58,21 @@ export function logSessionRepin(sessionId: string, accountId: string): void {
     chalk.gray(`[${ts()}]`) +
     chalk.yellow(` ⤳ repin ${sessionId.slice(0, 8)} → ${accountId}`) +
     chalk.gray(" (OpenAI account refused the session)")
+  );
+}
+
+/**
+ * A session moved off Codex because its conversation no longer fits there.
+ *
+ * The counterpart to `logSessionRepin`, and the one worth reading: this move
+ * happens *before* a refusal, so the operator sees the pool re-shaping itself
+ * rather than an account going quiet for no visible reason.
+ */
+export function logSessionOutgrewCodex(sessionId: string, estimatedTokens: number): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.yellow(` ⤳ ${sessionId.slice(0, 8)} outgrew Codex`) +
+    chalk.gray(` (~${Math.round(estimatedTokens / 1_000)}K tokens > ${CODEX_SESSION_CEILING / 1_000}K ceiling)`)
   );
 }
 
