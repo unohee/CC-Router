@@ -114,6 +114,19 @@ export function logSessionCompaction(
   );
 }
 
+/**
+ * A pinned session left an account that could still serve it, because the
+ * account crossed the soft cap. `logSessionMove` prices the move; this line
+ * says why a retainable pin was given up, which nothing else records.
+ */
+export function logSessionReassign(sessionId: string, from: string, to: string, why: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.yellow(` ⤳ reassign ${sessionId.slice(0, 8)} ${from} → ${to}`) +
+    chalk.gray(` (${why})`)
+  );
+}
+
 export function logRefresh(accountId: string, ok: boolean, expiresInMin?: number): void {
   if (ok) {
     console.log(chalk.yellow(`[${ts()}] [REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));

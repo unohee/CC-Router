@@ -133,7 +133,7 @@ export class SessionRouter {
       // still be spent here rather than declared unusable — which would also
       // tip the caller into cross-provider fallback.
       if (!this.overSoftCap(existing.target, utilOf)
-        || !candidates.some(c => !sameTarget(c, existing.target) && isUsable(c) && !this.overSoftCap(c, utilOf))) {
+        || !candidates.some(c => this.softCapRelief(c, existing.target, isUsable, utilOf))) {
         existing.lastSeen = this.now();
         // Refreshing the timestamp is itself a change worth persisting: a busy
         // long-lived session never re-assigns, so without this its snapshot
@@ -144,7 +144,12 @@ export class SessionRouter {
       reason = "soft-cap";
     }
 
-    const usable = candidates.filter(isUsable);
+    // A soft-cap move stays within the provider: the session's cache is lost
+    // either way, but switching the model that answers mid-conversation is a
+    // bigger disruption than the 429 the move exists to prevent.
+    const usable = reason === "soft-cap"
+      ? candidates.filter(c => this.softCapRelief(c, existing!.target, isUsable, utilOf))
+      : candidates.filter(isUsable);
     if (usable.length === 0) return null;
 
     const target = this.place(usable, utilOf);
@@ -277,6 +282,16 @@ export class SessionRouter {
     const m = utilOf?.(target);
     if (m === undefined) return { util: 0 };
     return typeof m === "number" ? { util: m } : m;
+  }
+
+  /** Whether `c` can take a session that `from` is shedding for the soft cap. */
+  private softCapRelief(
+    c: SessionTarget,
+    from: SessionTarget,
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): boolean {
+    return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
   }
 
   private overSoftCap(

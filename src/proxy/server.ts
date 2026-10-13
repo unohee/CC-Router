@@ -16,7 +16,7 @@ import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -314,8 +314,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const sessionRouter = new SessionRouter({
     softCapUtil,
     onReassign: ({ sessionId, from, to, reason }) => {
-      const why = reason === "soft-cap" ? ` (soft cap ${Math.round((softCapUtil ?? 0) * 100)}%)` : "";
-      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId}${why}`;
+      const why = reason === "soft-cap" ? `soft cap ${Math.round((softCapUtil ?? 0) * 100)}%` : "account unservable";
+      // Only the soft-cap reason needs its own console line: other moves are
+      // already logged with their cost by `logSessionMove` / `logSessionRepin`,
+      // which do not know why a retainable pin was given up.
+      if (reason === "soft-cap") logSessionReassign(sessionId, from.accountId, to.accountId, why);
+      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId} (${why})`;
       stats.addLog({ ts: Date.now(), accountId: to.accountId, model: "-", type: "route", details: msg });
     },
     onAssignmentsChanged: () => {

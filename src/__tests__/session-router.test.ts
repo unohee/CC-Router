@@ -447,3 +447,24 @@ describe("SessionRouter soft cap", () => {
     }
   });
 });
+
+describe("SessionRouter soft cap across providers", () => {
+  const now = () => 1_000_000;
+  const hotA = (t: SessionTarget) => (t.accountId === "a" ? 0.95 : t.accountId === "b" ? 0.95 : 0.1);
+
+  it("does not move a Claude session to OpenAI for the soft cap", () => {
+    const r = new SessionRouter({ softCapUtil: 0.9, now });
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "a", lastSeen: now() }]);
+
+    // Only the OpenAI account has room; the session stays on Claude.
+    expect(r.resolve("s", ALL, always, hotA)).toEqual(A);
+  });
+
+  it("still moves within the provider when a sibling has room", () => {
+    const r = new SessionRouter({ softCapUtil: 0.9, now });
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "a", lastSeen: now() }]);
+    const onlyAHot = (t: SessionTarget) => (t.accountId === "a" ? 0.95 : 0.1);
+
+    expect(r.resolve("s", ALL, always, onlyAHot)).toEqual(B);
+  });
+});

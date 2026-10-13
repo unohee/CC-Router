@@ -18,6 +18,7 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 - **Codex CLI support** — configure Codex to use CC-Router as a Responses-compatible provider
 - **Automatic token refresh** — OAuth tokens are refreshed before they expire, saved atomically to disk
 - **Rate limit awareness** — detects 429/529 responses and cools accounts down; quota utilization is parsed for both Claude (`anthropic-ratelimit-*`) and Codex (`x-codex-*`) accounts and steers session assignment
+- **Session soft cap (opt-in)** — moves pinned sessions off an account nearing its quota while another has room, and places new sessions on the window about to reset first, so hand-offs happen before the 429 instead of after it
 - **Quota-aware throttle (opt-in)** — paces upstream sends and caps per-account concurrency as an account's quota utilization rises, trading a short wait for the burst-driven 429 and the retry that follows; off by default
 - **Token accounting** — input/output/cache tokens per request and in aggregate, for both providers, on the live dashboard
 - **Client mode** — connect to a remote CC-Router from any machine with one command (`cc-router client connect <url>`)
@@ -561,6 +562,23 @@ Disable it:
 ```bash
 cc-router configure --disable-fallback
 ```
+
+---
+
+## Session soft cap (opt-in)
+
+With session affinity, a session stays on its account until that account answers 429 — so every hand-off reaches Claude Code as a failed request and a retry. A soft cap moves sessions earlier, on their next request, while another account still has room. Set it in `config.json`:
+
+```json
+{ "routing": { "softCapUtil": 0.9 } }
+```
+
+- An account at or above `softCapUtil` takes no new sessions, and its pinned sessions move to an account below the cap — within the same provider, so a Claude session is never handed to OpenAI by this rule.
+- When every account is past the cap, pins stay where they are and the last of each window is still spent. The cap never makes an account "unavailable", so it cannot trigger cross-provider fallback on its own.
+- New sessions go to the account that can absorb work fastest: `(cap − util) / minutes-to-reset / (1 + live sessions)`. Quota left in a window that is about to reset is spent first; an account with no open window is held in reserve, which keeps the accounts' windows staggered instead of running out together.
+- Each move costs one prompt-cache rewrite on the new account. Moves are logged as `⤳ reassign <session> <from> → <to> (soft cap 90%)`.
+
+Must be a fraction strictly between 0 and 1; anything else (including `90`) leaves placement exactly as it was.
 
 ---
 
