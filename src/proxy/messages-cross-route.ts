@@ -8,6 +8,11 @@ import { createOpenAIStreamToAnthropicNormalizer, openAIStreamFailure } from "..
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
 import { codexCanHold, estimatePromptTokens } from "../providers/openai/context-limits.js";
+import {
+  decideMigration,
+  type PinBlock, type CompactAskGuard,
+} from "./session-migration.js";
+import type { SessionContextTracker } from "./session-context-tracker.js";
 import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
 import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputItem } from "../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -20,6 +25,7 @@ declare module "express-serve-static-core" {
     /** Set once per request so the downstream Anthropic proxy reuses this
      *  session's pinned account instead of drawing a fresh one. */
     _ccSessionTarget?: SessionTarget;
+    _ccAnthropicModel?: string;
   }
 }
 
@@ -51,7 +57,7 @@ export interface MessagesCrossProviderRouteOptions {
   /** Opt-in: when true, exhausted Anthropic capacity triggers automatic OpenAI fallback. Default false. */
   crossProviderFallback?: boolean;
   /** Point-in-time Anthropic-pool availability check (TokenPool.hasAvailableAccount). Required when crossProviderFallback is true. */
-  hasAvailableAnthropicAccount?: () => boolean;
+  hasAvailableAnthropicAccount?: (model?: string) => boolean;
   /** Fired after a successful automatic fallback so the caller can log/record it. */
   onFallback?: (info: OpenAIRouteInfo) => void;
   /** Resolve the account this session is pinned to. Called at most once per
@@ -61,6 +67,7 @@ export interface MessagesCrossProviderRouteOptions {
   resolveSessionTarget?: (
     sessionId: string,
     estimatedPromptTokens: number | null,
+    model?: string,
   ) => SessionTarget | null;
   /** Read an existing pin without creating one. Used on the explicit `openai/*`
    *  route, which must honour an existing pin but must not itself decide that a
@@ -77,7 +84,39 @@ export interface MessagesCrossProviderRouteOptions {
    *  Null means the implementation had nowhere better to put the session — this
    *  request then falls through unpinned, and the implementation decides
    *  whether the old pin survives. See the call site for why this matters. */
-  onOpenAISessionUnservable?: (sessionId: string) => SessionTarget | null;
+  onOpenAISessionUnservable?: (sessionId: string, model?: string) => SessionTarget | null;
+  /** Why an existing Anthropic pin cannot serve this request. Absent means the
+   *  caller does not price account moves, and routing behaves as it always did.
+   *  Consulted BEFORE `resolveSessionTarget`, because both answers it can lead
+   *  to — wait, or ask the client to compact — must leave the pin exactly where
+   *  it is. Resolving first would already have moved it. */
+  inspectSessionPin?: (target: SessionTarget, model?: string) => PinBlock;
+  /** Whether any account other than `excludeAccountId` could take this session.
+   *  Without one there is nothing to move to, so neither mechanism applies. */
+  hasAlternativeAccount?: (excludeAccountId: string, model?: string) => boolean;
+  /** Fired when a large session is held on its own account instead of moved. */
+  onMigrationWait?: (info: {
+    sessionId: string; accountId: string; retryAfterSeconds: number; estimatedRewriteTokens: number;
+  }) => void;
+  /** Fired when the client is asked to compact before an unavoidable move. */
+  onCompactAsk?: (info: {
+    sessionId: string; accountId: string; estimatedPromptTokens: number; limitTokens: number;
+  }) => void;
+  /** Remembers which sessions were already asked to compact. Injected so the
+   *  memory outlives a request without this module owning process state. */
+  compactAskGuard?: CompactAskGuard;
+  /** Kill switches for the two mechanisms above. Absent means the caller did
+   *  not configure them; see ProxyConfig.contextMigration for the defaults and
+   *  why they differ. */
+  holdOnCooldown?: boolean;
+  askClientToCompact?: boolean;
+  /** Fired when a session is observed to have compacted, with the size it fell
+   *  from. The router cannot see client-side compaction any other way. */
+  onCompactionObserved?: (info: {
+    sessionId: string; accountId: string; fromTokens: number; toTokens: number;
+  }) => void;
+  /** Tracks per-session prompt size so a compaction can be spotted. */
+  contextTracker?: SessionContextTracker;
 }
 
 export interface OpenAIUsage {
@@ -461,6 +500,7 @@ export function mountMessagesCrossProviderRoute(
       }
 
       const route = selectRoute(req.body.model, opts.modelRouting);
+      if (route.provider === "anthropic_subscription") req._ccAnthropicModel = route.upstreamModel;
       const requestedStream = req.body.stream === true;
       const startedAt = Date.now();
       const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
@@ -531,19 +571,98 @@ export function mountMessagesCrossProviderRoute(
       const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting)
         ?? openAIDefaultModel;
 
-      // Size the conversation before deciding where it goes. Codex refuses a
-      // session whose context has outgrown its window, and that refusal arrives
-      // inside an HTTP 200 stream — so it does not surface as an error, it
-      // surfaces as a re-pin and a full prefix rewrite into the next account
-      // (600-750K tokens measured). Measuring here is the only place with the
-      // body in hand; deciding what fits is the caller's, which owns the pool.
+      // Size the conversation once, here: both the account-move policy below
+      // and the placement decision further down need the same number, and
+      // measuring twice invites them to disagree.
       const estimatedPromptTokens = estimatePromptTokens(req._ccRawBody);
+
+      // Watch the size on every session request, not just the ones where a move
+      // is in question: a compaction matters most when nothing is moving,
+      // because that is when it reports what the CLIENT decided to do, and at
+      // what size. The router has no other way to see it.
+      if (sessionId) {
+        const compacted = opts.contextTracker?.observe(sessionId, estimatedPromptTokens);
+        if (compacted) {
+          opts.onCompactionObserved?.({
+            sessionId,
+            accountId: opts.peekSessionTarget?.(sessionId)?.accountId ?? "-",
+            ...compacted,
+          });
+        }
+      }
+
+      // Price the account move before routing gets a chance to make it.
+      //
+      // A session whose pinned account has gone unusable is about to be moved,
+      // and for a large conversation that move is not free: the prompt cache is
+      // account-local, so the next request re-writes the whole prefix into the
+      // new account. Both answers below therefore run BEFORE
+      // `resolveSessionTarget` — they must leave the pin untouched, and
+      // resolving first would already have released it.
+      const pinnedBefore = sessionId && opts.peekSessionTarget
+        ? opts.peekSessionTarget(sessionId)
+        : null;
+      if (
+        pinnedBefore?.provider === "anthropic" &&
+        opts.inspectSessionPin &&
+        req.body.messages
+      ) {
+        const guard = opts.compactAskGuard;
+        const decision = decideMigration({
+          estimatedPromptTokens,
+          turnCount: req.body.messages.length,
+          block: opts.inspectSessionPin(pinnedBefore, route.upstreamModel),
+          alternativeAvailable:
+            opts.hasAlternativeAccount?.(pinnedBefore.accountId, route.upstreamModel) ?? false,
+          alreadyAskedCompact: guard?.askedRecently(sessionId) ?? false,
+        });
+
+        if (decision.action === "wait" && opts.holdOnCooldown !== false) {
+          opts.onMigrationWait?.({
+            sessionId, accountId: pinnedBefore.accountId,
+            retryAfterSeconds: decision.retryAfterSeconds,
+            estimatedRewriteTokens: decision.estimatedRewriteTokens,
+          });
+          res.setHeader("Retry-After", String(decision.retryAfterSeconds));
+          res.setHeader("x-cc-router-reason", "hold-session-on-account");
+          res.status(429).json({
+            type: "error",
+            error: {
+              type: "rate_limit_error",
+              message: `${pinnedBefore.accountId} is cooling down — holding this session on it rather than re-writing its context into another account`,
+            },
+          });
+          return;
+        }
+
+        if (decision.action === "compact" && opts.askClientToCompact === true) {
+          guard?.markAsked(sessionId);
+          opts.onCompactAsk?.({
+            sessionId, accountId: pinnedBefore.accountId,
+            estimatedPromptTokens: decision.estimatedPromptTokens,
+            limitTokens: decision.limitTokens,
+          });
+          // Upstream's own wording, because that is what makes the client
+          // compact its history and retry instead of surfacing an error. The
+          // numbers are this router's policy, not Anthropic's window, and the
+          // header says so for anyone reading the exchange.
+          res.setHeader("x-cc-router-reason", "compact-before-account-move");
+          res.status(400).json({
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: `prompt is too long: ${decision.estimatedPromptTokens} tokens > ${decision.limitTokens} maximum`,
+            },
+          });
+          return;
+        }
+      }
 
       // Session affinity. Resolved once here and stashed on the request so the
       // Anthropic proxy downstream reuses the same decision rather than
       // resolving again (which would advance the assignment cursor twice).
       const sessionTarget = sessionId && opts.resolveSessionTarget
-        ? opts.resolveSessionTarget(sessionId, estimatedPromptTokens)
+        ? opts.resolveSessionTarget(sessionId, estimatedPromptTokens, route.upstreamModel)
         : null;
       if (sessionTarget) req._ccSessionTarget = sessionTarget;
 
@@ -581,13 +700,13 @@ export function mountMessagesCrossProviderRoute(
         // 200 stream, so nothing else marks the account as unusable.
         //
         // Re-pin now so the session settles on one Anthropic account instead.
-        const replacement = opts.onOpenAISessionUnservable?.(sessionId) ?? null;
+        const replacement = opts.onOpenAISessionUnservable?.(sessionId, route.upstreamModel) ?? null;
         if (replacement) req._ccSessionTarget = replacement;
       }
 
       const anthropicExhausted =
         opts.crossProviderFallback === true &&
-        opts.hasAvailableAnthropicAccount?.() === false;
+        opts.hasAvailableAnthropicAccount?.(route.upstreamModel) === false;
 
       // The fallback picks an OpenAI account directly rather than through the
       // session router, so the size guard above does not cover it. Without this

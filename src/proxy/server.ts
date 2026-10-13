@@ -5,13 +5,16 @@ import { timingSafeEqual } from "crypto";
 import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Request } from "express";
-import { TokenPool, EmptyPoolError } from "./token-pool.js";
+import { TokenPool, EmptyPoolError, NoAvailableAccountError } from "./token-pool.js";
+import { recordRateLimitCooldown } from "./model-cooldown.js";
+import { CompactAskGuard, expensiveMove } from "./session-migration.js";
+import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -51,6 +54,8 @@ export interface HealthAccountView {
   enabled: boolean;
   healthy: boolean;
   busy: boolean;
+  modelCooldowns?: Record<string, number>;
+  coolingUntil?: number;
   requestCount: number;
   errorCount: number;
   expiresInMs: number;
@@ -158,7 +163,9 @@ function publicAnthropicAccountView(a: Account): HealthAccountView {
     sessionLimitPercent: a.sessionLimitPercent,
     weeklyLimitPercent: a.weeklyLimitPercent,
     healthy: a.enabled !== false && a.healthy,
-    busy: a.busy,
+    busy: a.busy || (a.coolingUntil ?? 0) > Date.now(),
+    coolingUntil: a.coolingUntil,
+    modelCooldowns: Object.fromEntries(Object.entries(a.modelCooldowns ?? {}).filter(([, until]) => until > Date.now())),
     requestCount: a.requestCount,
     errorCount: a.errorCount,
     expiresInMs: a.tokens.expiresAt - Date.now(),
@@ -202,9 +209,10 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
 export function pinnedAnthropicAccount(
   pool: Pick<TokenPool, "canRetain" | "getById">,
   target: SessionTarget | undefined,
+  model?: string,
 ): Account | undefined {
   if (target?.provider !== "anthropic") return undefined;
-  return pool.canRetain(target.accountId) ? pool.getById(target.accountId) : undefined;
+  return pool.canRetain(target.accountId, model) ? pool.getById(target.accountId) : undefined;
 }
 
 function providerStatus(accounts: HealthAccountView[]): ProviderOperationalStatus {
@@ -342,6 +350,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   process.on("exit", () => {
     writeSessionAssignments(sessionRouter.snapshot());
   });
+  // One ask per session per window, held for the life of the process: the
+  // client answers the ask by compacting and retrying, and a retry that is
+  // still large must not be asked again or the session compacts in a loop.
+  const compactAskGuard = new CompactAskGuard();
+  // Sees client-side compaction, which nothing else in the router can.
+  const contextTracker = new SessionContextTracker();
+  const contextMigration = initialConfig.contextMigration ?? {};
   const sessionAffinityEnabled = initialConfig.sessionAffinity !== false;
   // OpenAI joins the session pool only when explicitly enabled AND a default
   // model exists — without one, "openai/default" would go out as a literal.
@@ -349,14 +364,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     initialConfig.sessionPoolIncludesOpenAI === true && !!modelRouting.openAIDefaultModel?.trim();
 
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
-  const sessionTargetRetainable = (t: SessionTarget): boolean =>
+  const sessionTargetRetainable = (t: SessionTarget, model?: string): boolean =>
     t.provider === "anthropic"
-      ? pool.canRetain(t.accountId)
+      ? pool.canRetain(t.accountId, model)
       : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
 
-  const sessionTargetUsable = (t: SessionTarget): boolean =>
+  const sessionTargetUsable = (t: SessionTarget, model?: string): boolean =>
     t.provider === "anthropic"
-      ? pool.canServe(t.accountId)
+      ? pool.canServe(t.accountId, model)
       // Same predicate the OpenAI picker applies, so a session is never pinned
       // to an account the picker would refuse.
       : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
@@ -395,6 +410,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const resolveSessionTarget = (
     sessionId: string,
     estimatedPromptTokens: number | null = null,
+    model?: string,
   ): SessionTarget | null => {
     if (!sessionAffinityEnabled) return null;
 
@@ -411,9 +427,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // predicate alone, without consulting the candidate list. So the predicates
     // are what actually release a pin the conversation has outgrown.
     const usableNow = (t: SessionTarget): boolean =>
-      sessionTargetUsable(t) && targetCanHoldContext(t.provider, estimatedPromptTokens);
+      sessionTargetUsable(t, model) && targetCanHoldContext(t.provider, estimatedPromptTokens);
     const retainableNow = (t: SessionTarget): boolean =>
-      sessionTargetRetainable(t) && targetCanHoldContext(t.provider, estimatedPromptTokens);
+      sessionTargetRetainable(t, model) && targetCanHoldContext(t.provider, estimatedPromptTokens);
 
     const before = sessionRouter.peek(sessionId);
     const target = sessionRouter.resolve(sessionId, candidates, usableNow, sessionTargetUtil, retainableNow);
@@ -426,6 +442,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // whole point of this one.
     if (before?.provider === "openai" && target?.provider === "anthropic" && estimatedPromptTokens !== null) {
       logSessionOutgrewCodex(sessionId, estimatedPromptTokens);
+    }
+
+    // An Anthropic-to-Anthropic move is the expensive case the migration policy
+    // exists to price, and until now it logged only as a reassignment with no
+    // cost attached. Reported here rather than from `onReassign` because this is
+    // the only scope holding the request's estimated size.
+    const move = expensiveMove(before, target, estimatedPromptTokens);
+    if (move) {
+      logSessionMove(sessionId, move.fromAccountId, move.toAccountId, move.estimatedTokens);
+      stats.addLog({
+        ts: Date.now(), accountId: move.toAccountId, model: model ?? "-", type: "route",
+        details: `move ${sessionId.slice(0, 8)} ${move.fromAccountId} → ${move.toAccountId} — re-writing ~${Math.round(move.estimatedTokens / 1_000)}K tokens`,
+        sessionId,
+      });
     }
 
     return target;
@@ -775,11 +805,47 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     prepareOpenAIAccount: (account) => prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts),
     modelRouting,
     crossProviderFallback: initialConfig.crossProviderFallback === true,
-    hasAvailableAnthropicAccount: () => pool.hasAvailableAccount(),
+    hasAvailableAnthropicAccount: (model) => pool.hasAvailableAccount(model),
     resolveSessionTarget,
     peekSessionTarget: (sessionId: string) =>
       sessionAffinityEnabled ? sessionRouter.peek(sessionId) : null,
-    onOpenAISessionUnservable: (sessionId: string) => {
+    inspectSessionPin: (target, model) =>
+      target.provider === "anthropic" ? pool.blockState(target.accountId, model) : { kind: "none" },
+    hasAlternativeAccount: (excludeAccountId, model) =>
+      pool.getAll().some(a => a.id !== excludeAccountId && pool.canServe(a.id, model)),
+    compactAskGuard,
+    contextTracker,
+    // Holding a session only delays a request that was going to be re-routed
+    // anyway, so it is on unless switched off. Asking the client to compact
+    // induces the failure mode this area exists to prevent, so it is off until
+    // explicitly opted into — see ProxyConfig.contextMigration.
+    holdOnCooldown: contextMigration.holdOnCooldown !== false,
+    askClientToCompact: contextMigration.askClientToCompact === true,
+    onCompactionObserved: ({ sessionId, accountId, fromTokens, toTokens }) => {
+      logSessionCompaction(sessionId, fromTokens, toTokens);
+      stats.addLog({
+        ts: Date.now(), accountId, model: "-", type: "route",
+        details: `compacted ${sessionId.slice(0, 8)} — ~${Math.round(fromTokens / 1_000)}K → ~${Math.round(toTokens / 1_000)}K`,
+        sessionId,
+      });
+    },
+    onMigrationWait: ({ sessionId, accountId, retryAfterSeconds, estimatedRewriteTokens }) => {
+      const detail = `hold ${sessionId.slice(0, 8)} on ${accountId} — waiting ${retryAfterSeconds}s beats re-writing ~${Math.round(estimatedRewriteTokens / 1_000)}K tokens`;
+      logError(accountId, 429, detail);
+      stats.addLog({
+        ts: Date.now(), accountId, model: "-", type: "route", statusCode: 429,
+        details: detail, sessionId,
+      });
+    },
+    onCompactAsk: ({ sessionId, accountId, estimatedPromptTokens, limitTokens }) => {
+      const detail = `asked ${sessionId.slice(0, 8)} to compact before leaving ${accountId} (~${Math.round(estimatedPromptTokens / 1_000)}K > ${Math.round(limitTokens / 1_000)}K)`;
+      logError(accountId, 400, detail);
+      stats.addLog({
+        ts: Date.now(), accountId, model: "-", type: "route", statusCode: 400,
+        details: detail, sessionId,
+      });
+    },
+    onOpenAISessionUnservable: (sessionId: string, model?: string) => {
       if (!sessionAffinityEnabled) return null;
       // Anthropic candidates only: resolving against the full set would just
       // re-pick the account that has already refused this session. repinOnto is
@@ -788,7 +854,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         provider: "anthropic" as const, accountId: a.id,
       }));
       const replacement = sessionRouter.repinOnto(
-        sessionId, anthropicOnly, sessionTargetUsable, sessionTargetUtil, sessionTargetRetainable,
+        sessionId, anthropicOnly, t => sessionTargetUsable(t, model), sessionTargetUtil,
+        t => sessionTargetRetainable(t, model),
       );
       if (replacement) {
         logSessionRepin(sessionId, replacement.accountId);
@@ -940,20 +1007,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // Rate limited — put account on cooldown for Retry-After seconds.
           stats.totalErrors++;
           account.errorCount++;
-          const retryAfter = Number(proxyRes.headers["retry-after"] ?? 60);
+          const rawRetryAfter = String(proxyRes.headers["retry-after"] ?? "60");
+          const numericRetry = Number(rawRetryAfter);
+          const parsedRetry = Number.isFinite(numericRetry) ? numericRetry
+            : (Date.parse(rawRetryAfter) - Date.now()) / 1000;
+          const retryAfter = Number.isFinite(parsedRetry) && parsedRetry > 0 ? Math.ceil(parsedRetry) : 60;
+          const scoped = recordRateLimitCooldown(account, req._ccAnthropicModel, rl?.claim ?? "", retryAfter);
           const windowLabel = rl?.claim === "five_hour" ? "5-hour limit"
             : rl?.claim === "seven_day" ? "weekly limit"
             : null;
-          const reason = windowLabel ? `rate limited (${windowLabel})` : "rate limited";
+          const reason = scoped ? `rate limited (model: ${req._ccAnthropicModel})`
+            : windowLabel ? `rate limited (${windowLabel})` : "rate limited";
           pendingLog.type = "error";
           pendingLog.details = `${reason} — cooldown ${retryAfter}s`;
           logError(account.id, 429, `${reason} — cooldown ${retryAfter}s`);
 
-          account.busy = true;
-          // Extend, never shorten: a later failure must not be cleared by an
-          // earlier timer that happens to fire first.
-          account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + retryAfter * 1_000);
-          setTimeout(() => { account.busy = false; }, retryAfter * 1_000);
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.
           stats.totalErrors++;
@@ -962,9 +1030,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           pendingLog.details = "service overloaded — cooldown 30s";
           logError(account.id, 529, "Service overloaded — cooldown 30s");
 
-          account.busy = true;
           account.coolingUntil = Math.max(account.coolingUntil ?? 0, Date.now() + 30_000);
-          setTimeout(() => { account.busy = false; }, 30_000);
         } else if (status >= 400) {
           // Everything else upstream refused. Chief among them is the 400 for a
           // prompt past the model's window: it is forwarded to the client, which
@@ -1098,12 +1164,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Reuse the pin resolved by the cross-provider route (same request), so
       // the cursor advances once. Falls back to round-robin when the request
       // carried no session header or the pinned account went unusable.
-      const pinnedAccount = pinnedAnthropicAccount(pool, req._ccSessionTarget);
+      const pinnedAccount = pinnedAnthropicAccount(pool, req._ccSessionTarget, req._ccAnthropicModel);
       if (pinnedAccount) {
         pinnedAccount.requestCount++;
         pinnedAccount.lastUsed = Date.now();
       }
-      account = pinnedAccount ?? pool.getNext();
+      account = pinnedAccount ?? pool.getNext(req._ccAnthropicModel);
     } catch (err) {
       if (err instanceof EmptyPoolError) {
         stats.totalErrors++;
@@ -1111,6 +1177,19 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         res.status(503).json({
           type: "error",
           error: { type: "no_accounts", message: err.message },
+        });
+        return;
+      }
+      if (err instanceof NoAvailableAccountError) {
+        stats.totalErrors++;
+        logError("pool", 429, err.message);
+        res.setHeader("Retry-After", String(err.retryAfterSeconds));
+        res.status(429).json({
+          type: "error",
+          error: {
+            type: "rate_limit_error",
+            message: "No configured account is currently available",
+          },
         });
         return;
       }
@@ -1147,7 +1226,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     req._pendingLog = {
       ts: Date.now(),
       accountId: account.id,
-      model: "-",
+      model: req._ccAnthropicModel ?? "-",
       type: "route",
       method: req.method,
       path: req.path,

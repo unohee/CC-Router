@@ -12,7 +12,7 @@ const MODEL_VISIBLE_ROWS = 16;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-import { accountProviderTag, paddedProviderTag, PROVIDER_TAG_WIDTH } from "./account-view.js";
+import { accountProviderTag, paddedProviderTag, PROVIDER_TAG_WIDTH, accountCooldownSummary, formatDurationUntil } from "./account-view.js";
 
 interface AccountRateLimitsView {
   status: string;
@@ -31,6 +31,10 @@ interface AccountStat {
   provider?: "anthropic_subscription" | "openai_subscription";
   healthy: boolean;
   busy: boolean;
+  /** Epoch ms when an account-wide 429/529 cooldown ends. */
+  coolingUntil?: number;
+  /** Active per-model-family cooldown deadlines (epoch ms). */
+  modelCooldowns?: Record<string, number>;
   requestCount: number;
   errorCount: number;
   expiresInMs: number;
@@ -849,11 +853,15 @@ function AccountRow({ account: a, selected }: { account: AccountStat; selected: 
   const rl = a.rateLimits ?? EMPTY_RL;
   const isLimited = rl.status === "rate_limited";
   const isDisabled = a.enabled === false;
+  const cooldownLabel = accountCooldownSummary(a);
+  const isCooling = cooldownLabel !== null;
+  // Health ORs cooling into `busy`; prefer an explicit cool state when we have a deadline.
+  const isBusyOnly = a.busy && !isCooling;
 
-  const dot = isDisabled ? "⊘" : isLimited ? "⊘" : a.busy ? "◌" : a.healthy ? "●" : "●";
-  const dotColor = isDisabled ? "gray" : isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
-  const statusLabel = isDisabled ? "OFF    " : isLimited ? "LIMITED" : a.busy ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
-  const statusColor = isDisabled ? "gray" : isLimited ? "red" : a.busy ? "yellow" : a.healthy ? "green" : "red";
+  const dot = isDisabled ? "⊘" : isLimited || isCooling ? "⊘" : isBusyOnly ? "◌" : a.healthy ? "●" : "●";
+  const dotColor = isDisabled ? "gray" : isLimited || isCooling ? "red" : isBusyOnly ? "yellow" : a.healthy ? "green" : "red";
+  const statusLabel = isDisabled ? "OFF    " : isLimited ? "LIMITED" : isCooling ? "COOL   " : isBusyOnly ? "busy   " : a.healthy ? "ok     " : "ERROR  ";
+  const statusColor = isDisabled ? "gray" : isLimited || isCooling ? "red" : isBusyOnly ? "yellow" : a.healthy ? "green" : "red";
 
   const expiryLabel = a.expiresInMs > 0 ? formatMs(a.expiresInMs) : "EXPIRED";
   const expiryColor = a.expiresInMs < 10 * 60 * 1000 ? "red"
@@ -901,6 +909,11 @@ function AccountRow({ account: a, selected }: { account: AccountStat; selected: 
           <UtilBar label="7d" util={rl.sevenDayUtil} resetTs={rl.sevenDayReset} isActive={rl.claim === "seven_day"} cap={w7} />
         </Box>
       )}
+      {cooldownLabel && (
+        <Box paddingLeft={4}>
+          <Text color="red">{cooldownLabel}</Text>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -930,14 +943,7 @@ function UtilBar({ label, util, resetTs, isActive, cap }: { label: string; util:
 }
 
 function formatResetIn(unixSeconds: number): string {
-  const diff = unixSeconds - Date.now() / 1000;
-  if (diff <= 0) return "now";
-  const d = Math.floor(diff / 86400);
-  const h = Math.floor((diff % 86400) / 3600);
-  const m = Math.floor((diff % 3600) / 60);
-  if (d > 0) return `${d}d${h}h`;
-  if (h > 0) return `${h}h${m}m`;
-  return `${m}m`;
+  return formatDurationUntil(unixSeconds * 1000);
 }
 
 // ─── Log row ──────────────────────────────────────────────────────────────────

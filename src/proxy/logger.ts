@@ -76,6 +76,44 @@ export function logSessionOutgrewCodex(sessionId: string, estimatedTokens: numbe
   );
 }
 
+/**
+ * A session's pin moved between two Anthropic accounts, and what that cost.
+ *
+ * The move itself was already visible; the price was not. The prompt cache is
+ * account-local, so the next request re-writes the whole prefix into the new
+ * account — this line is the only place that number appears, and the migration
+ * thresholds are meant to be tuned from it rather than from intuition.
+ */
+export function logSessionMove(
+  sessionId: string, fromAccountId: string, toAccountId: string, estimatedTokens: number,
+): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.yellow(` ⇄ ${sessionId.slice(0, 8)} ${fromAccountId} → ${toAccountId}`) +
+    chalk.gray(` (re-writing ~${Math.round(estimatedTokens / 1_000)}K tokens of context)`)
+  );
+}
+
+/**
+ * A session compacted, and the size it compacted from.
+ *
+ * The number is the point of the line. Compaction at the top of the window is
+ * a long conversation working as intended; compaction well below it means
+ * something is capping the client early, which has happened before — a global
+ * `autoCompactWindow` once held every session to 800K so that one target which
+ * could not hold 1M stayed safe. Without this line, telling the two apart
+ * meant reading the client's own transcripts.
+ */
+export function logSessionCompaction(
+  sessionId: string, fromTokens: number, toTokens: number,
+): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.cyan(` ✂ ${sessionId.slice(0, 8)} compacted`) +
+    chalk.gray(` (~${Math.round(fromTokens / 1_000)}K → ~${Math.round(toTokens / 1_000)}K)`)
+  );
+}
+
 export function logRefresh(accountId: string, ok: boolean, expiresInMin?: number): void {
   if (ok) {
     console.log(chalk.yellow(`[${ts()}] [REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));

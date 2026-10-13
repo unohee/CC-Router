@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { TokenPool, EmptyPoolError } from "../proxy/token-pool.js";
+import { TokenPool, EmptyPoolError, NoAvailableAccountError } from "../proxy/token-pool.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS } from "../proxy/types.js";
+import { recordRateLimitCooldown } from "../proxy/model-cooldown.js";
+import { SessionRouter } from "../proxy/session-router.js";
 
 function makeAccount(id: string, healthy = true, busy = false): Account {
   return {
@@ -27,6 +29,46 @@ function makeAccount(id: string, healthy = true, busy = false): Account {
 }
 
 describe("TokenPool — round-robin", () => {
+  it("keeps Sonnet on its pin after Fable quota exhaustion and rotates only Fable", () => {
+    const a = makeAccount("kyte");
+    const b = makeAccount("other");
+    const pool = new TokenPool([a, b]);
+    const router = new SessionRouter();
+    const targets = [a, b].map(a => ({provider: "anthropic" as const, accountId: a.id}));
+    router.resolve("s", targets, t => pool.canServe(t.accountId, "claude-sonnet-4-6"));
+    a.rateLimits.status = "rate_limited";
+    expect(recordRateLimitCooldown(a, "claude-fable-5-1[1m]", "seven_day_overage_included", 3600)).toBe(true);
+    expect(a.busy).toBe(false);
+    expect(pool.canServe(a.id, "claude-sonnet-4-6")).toBe(true);
+    expect(pool.canRetain(a.id, "claude-fable-5")).toBe(false);
+    expect(router.resolve("s", targets, t => pool.canServe(t.accountId, "claude-sonnet-4-6"),
+      undefined, t => pool.canRetain(t.accountId, "claude-sonnet-4-6"))?.accountId).toBe("kyte");
+    expect(pool.getNext("claude-fable-5").id).toBe("other");
+    expect(pool.getNext("claude-sonnet-4-6").id).toBe("kyte");
+  });
+
+  it("blocks all Fable requests without blocking Sonnet, then recovers at the deadline", () => {
+    const a = makeAccount("a");
+    const pool = new TokenPool([a]);
+    recordRateLimitCooldown(a, "claude-fable-5", "seven_day_overage_included", 3600);
+    expect(() => pool.getNext("claude-fable-5-1")).toThrow(NoAvailableAccountError);
+    expect(pool.hasAvailableAccount("claude-fable-5")).toBe(false);
+    expect(pool.hasAvailableAccount("claude-sonnet-4-6")).toBe(true);
+    // A successful request to another model must not clear the Fable deadline.
+    a.rateLimits = { ...DEFAULT_RATE_LIMITS };
+    expect(pool.canServe("a", "claude-fable-5")).toBe(false);
+    a.modelCooldowns!.fable = Date.now() - 1;
+    expect(pool.getNext("claude-fable-5").id).toBe("a");
+  });
+
+  it("preserves account-wide limits even alongside model-specific failures", () => {
+    const a = makeAccount("a");
+    const pool = new TokenPool([a]);
+    recordRateLimitCooldown(a, "claude-sonnet-4-6", "five_hour", 3600);
+    recordRateLimitCooldown(a, "claude-fable-5", "seven_day_overage_included", 60);
+    expect(pool.hasAvailableAccount("claude-sonnet-4-6")).toBe(false);
+    expect(() => pool.getNext("claude-fable-5")).toThrow(NoAvailableAccountError);
+  });
   it("cycles through all healthy accounts in order", () => {
     const pool = new TokenPool([makeAccount("a"), makeAccount("b"), makeAccount("c")]);
     const ids = Array.from({ length: 4 }, () => pool.getNext().id);
@@ -103,6 +145,43 @@ describe("TokenPool — busy accounts", () => {
     // All unhealthy → emergency path returns first account
     const pool = new TokenPool([a, b]);
     expect(pool.getNext().id).toBe("a");
+  });
+
+  it("does not bypass a cooldown when the only other account is capped", () => {
+    const cooling = makeAccount("cooling");
+    cooling.coolingUntil = Date.now() + 60_000;
+
+    const capped = makeAccount("capped");
+    capped.sessionLimitPercent = 50;
+    capped.rateLimits = { ...DEFAULT_RATE_LIMITS, fiveHourUtil: 0.6 };
+
+    const pool = new TokenPool([cooling, capped]);
+    expect(pool.getNext().id).toBe("capped");
+  });
+
+  it("fails fast instead of repeatedly sending to blocked keys", () => {
+    const now = Date.now();
+    const a = makeAccount("a");
+    a.coolingUntil = now + 30_000;
+    const b = makeAccount("b");
+    b.rateLimits = {
+      ...DEFAULT_RATE_LIMITS,
+      status: "rate_limited",
+      claim: "five_hour",
+      fiveHourReset: Math.floor(now / 1000) + 90,
+    };
+
+    const pool = new TokenPool([a, b]);
+    expect(() => pool.getNext()).toThrow(NoAvailableAccountError);
+    try {
+      pool.getNext();
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoAvailableAccountError);
+      expect((err as NoAvailableAccountError).retryAfterSeconds).toBeGreaterThanOrEqual(30);
+      expect((err as NoAvailableAccountError).retryAfterSeconds).toBeLessThanOrEqual(90);
+    }
+    expect(a.requestCount).toBe(0);
+    expect(b.requestCount).toBe(0);
   });
 });
 
@@ -530,5 +609,76 @@ describe("canServe / canRetain", () => {
     const { pool } = poolWith();
     expect(pool.canServe("missing")).toBe(false);
     expect(pool.canRetain("missing")).toBe(false);
+  });
+});
+
+describe("TokenPool — blockState", () => {
+  it("reports no block while the pin can be retained", () => {
+    const a = makeAccount("a");
+    const pool = new TokenPool([a]);
+    expect(pool.blockState("a")).toEqual({ kind: "none" });
+  });
+
+  it("reports an unknown account as indefinite rather than waitable", () => {
+    const pool = new TokenPool([makeAccount("a")]);
+    expect(pool.blockState("gone")).toEqual({ kind: "indefinite" });
+  });
+
+  it("reports a cooldown as temporary, with the seconds left on it", () => {
+    const a = makeAccount("a");
+    const pool = new TokenPool([a]);
+    recordRateLimitCooldown(a, "claude-opus-5", "five_hour", 45);
+    const block = pool.blockState("a", "claude-opus-5");
+    expect(block.kind).toBe("temporary");
+    if (block.kind !== "temporary") throw new Error("expected a temporary block");
+    expect(block.retryAfterSeconds).toBeGreaterThan(40);
+    expect(block.retryAfterSeconds).toBeLessThanOrEqual(45);
+  });
+
+  it("keeps a model-scoped cooldown off the families it does not cover", () => {
+    const a = makeAccount("a");
+    const pool = new TokenPool([a]);
+    recordRateLimitCooldown(a, "claude-opus-5", "seven_day_opus", 3600);
+    expect(pool.blockState("a", "claude-opus-5").kind).toBe("temporary");
+    expect(pool.blockState("a", "claude-sonnet-4-6")).toEqual({ kind: "none" });
+  });
+
+  it("reports rate_limited with a known reset as temporary", () => {
+    const a = makeAccount("a");
+    a.rateLimits.status = "rate_limited";
+    a.rateLimits.claim = "five_hour";
+    a.rateLimits.fiveHourReset = Math.floor(Date.now() / 1000) + 30;
+    const pool = new TokenPool([a]);
+    const block = pool.blockState("a");
+    expect(block.kind).toBe("temporary");
+  });
+
+  it("reports no block when a rate_limited flag has no window behind it", () => {
+    // The sweep inside blockState returns such an account to rotation, because
+    // a flag with no reset would otherwise strand it forever. So there is no
+    // block left to classify — and consequently no "rate limited but waiting
+    // for nothing" state for the migration policy to mishandle.
+    const a = makeAccount("a");
+    a.rateLimits.status = "rate_limited";
+    const pool = new TokenPool([a]);
+    expect(pool.blockState("a")).toEqual({ kind: "none" });
+    expect(a.rateLimits.status).toBe("allowed");
+  });
+
+  it("reports an unhealthy or disabled account as indefinite", () => {
+    const unhealthy = makeAccount("u", false);
+    const disabled = makeAccount("d");
+    disabled.enabled = false;
+    const pool = new TokenPool([unhealthy, disabled]);
+    expect(pool.blockState("u")).toEqual({ kind: "indefinite" });
+    expect(pool.blockState("d")).toEqual({ kind: "indefinite" });
+  });
+
+  it("reports an account over its user cap as indefinite", () => {
+    const a = makeAccount("a");
+    a.sessionLimitPercent = 50;
+    a.rateLimits.fiveHourUtil = 0.9;
+    const pool = new TokenPool([a]);
+    expect(pool.blockState("a")).toEqual({ kind: "indefinite" });
   });
 });

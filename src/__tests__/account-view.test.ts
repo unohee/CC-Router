@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountProviderTag, paddedProviderTag, PROVIDER_TAG_WIDTH } from "../ui/account-view.js";
+import { accountProviderTag, paddedProviderTag, PROVIDER_TAG_WIDTH, accountCooldownSummary, formatDurationUntil } from "../ui/account-view.js";
 
 describe("accountProviderTag", () => {
   it("names the provider and its plan for OpenAI accounts", () => {
@@ -38,5 +38,30 @@ describe("accountProviderTag", () => {
     for (const account of cases) {
       expect(paddedProviderTag(account)).toHaveLength(PROVIDER_TAG_WIDTH);
     }
+  });
+});
+
+describe("formatDurationUntil", () => {
+  it("formats remaining time from an epoch-ms deadline", () => {
+    const now = 1_700_000_000_000;
+    expect(formatDurationUntil(now - 1_000, now)).toBe("now");
+    expect(formatDurationUntil(now + 90_000, now)).toBe("1m");
+    expect(formatDurationUntil(now + 3_600_000 + 120_000, now)).toBe("1h2m");
+    expect(formatDurationUntil(now + 86_400_000 + 3_600_000, now)).toBe("1d1h");
+  });
+});
+
+describe("accountCooldownSummary", () => {
+  it("returns null when nothing is cooling", () => {
+    expect(accountCooldownSummary({}, 1_000)).toBeNull();
+    expect(accountCooldownSummary({ coolingUntil: 500, modelCooldowns: { fable: 500 } }, 1_000)).toBeNull();
+  });
+
+  it("shows account-wide and model-scoped deadlines the pool waits on", () => {
+    const now = 1_000_000;
+    expect(accountCooldownSummary({
+      coolingUntil: now + 3_600_000,
+      modelCooldowns: { fable: now + 86_400_000, opus: now - 1 },
+    }, now)).toBe("cool ↻1h0m  fable ↻1d0h");
   });
 });

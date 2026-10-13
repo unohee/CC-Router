@@ -229,6 +229,25 @@ export interface ProxyConfig {
    *  account, not just Anthropic ones. Off by default — it changes which model
    *  answers, so it must be opted into. Requires modelRouting.openAIDefaultModel. */
   sessionPoolIncludesOpenAI?: boolean;
+  /** How the router prices moving a large session between accounts.
+   *
+   *  `holdOnCooldown` keeps a large session on its own account while that
+   *  account is briefly cooling down, answering 429 + Retry-After instead of
+   *  re-writing the whole prompt cache elsewhere. Default: true — it only ever
+   *  delays a request that was going to be re-routed anyway.
+   *
+   *  `askClientToCompact` answers a 400 "prompt is too long" before an
+   *  unavoidable move, so Claude Code compacts its own history and the move
+   *  carries a small prefix. Default: FALSE. It deliberately induces client
+   *  compaction, which is the one failure mode this whole area exists to avoid,
+   *  and that the client compacts-and-retries rather than surfacing an error to
+   *  the user rests on a single observation (2026-09-18). Opt in once that is
+   *  confirmed on a long session; the flag exists so it can be switched off
+   *  again without rebuilding a proxy that other machines depend on. */
+  contextMigration?: {
+    holdOnCooldown?: boolean;
+    askClientToCompact?: boolean;
+  };
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
   /** Run preferences — asked once on first start, reused on subsequent starts */

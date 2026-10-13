@@ -1,10 +1,23 @@
 import type { Account, AccountRecord } from "./types.js";
+import type { PinBlock } from "./session-migration.js";
+import { cooldownDeadline } from "./model-cooldown.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "./types.js";
 
 export class EmptyPoolError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "EmptyPoolError";
+  }
+}
+
+/** Thrown when every healthy, enabled account is rate-limited or cooling down. */
+export class NoAvailableAccountError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super(`no account is currently available — retry in ${retryAfterSeconds}s`);
+    this.name = "NoAvailableAccountError";
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -27,6 +40,22 @@ function limitingReset(a: Account): number {
   if (r.claim === "seven_day" && r.sevenDayReset) return r.sevenDayReset;
   const earliest = earliestReset(a);
   return Number.isFinite(earliest) ? earliest : 0;
+}
+
+function isCooling(a: Account, model?: string): boolean {
+  return cooldownDeadline(a, model) > Date.now();
+}
+
+/** Seconds until a blocked account can plausibly be tried again. */
+function retryAfterSeconds(a: Account, model?: string, now = Date.now()): number {
+  const nowSec = Math.floor(now / 1000);
+  let blockedUntil = cooldownDeadline(a, model);
+  const reset = limitingReset(a);
+  if (a.rateLimits.status === "rate_limited" && reset > nowSec) {
+    blockedUntil = Math.max(blockedUntil, reset * 1000);
+  }
+  if (blockedUntil <= now) return 60;
+  return Math.max(1, Math.ceil((blockedUntil - now) / 1000));
 }
 
 /**
@@ -114,24 +143,29 @@ export class TokenPool {
    * Round-robin selection among accounts that are:
    *   • healthy
    *   • not busy
+   *   • not in a 429/529 cooldown
    *   • not rate-limited by Anthropic
    *   • enabled (user toggle)
    *   • under the user-configured 5h/7d caps
    *
-   * Fallback chain when nothing is available:
-   *   1. Any healthy+usable (enabled & under caps) account — pick earliest reset.
-   *   2. Any healthy account — pick earliest reset. This intentionally ignores
-   *      user caps when every option is capped; limits are advisory, not a hard
-   *      ban that would leave Claude Code with no working account. The fallback
-   *      is logged via the optional onCapBypass callback so the dashboard can
-   *      surface it instead of silently exceeding the cap.
-   *   3. accounts[0] as a last resort (only if every account is unhealthy).
+   * Fallback chain when nothing is immediately available:
+   *   1. A healthy, enabled, non-rate-limited account — pick earliest reset.
+   *      This still allows a busy account to take traffic when every account is
+   *      already in flight, but never bypasses a 429/529 cooldown.
+   *   2. The same kind of account even when it is over a user cap. Limits are
+   *      advisory, not a hard ban that would leave Claude Code with no working
+   *      account; the bypass is surfaced through `onCapBypass`.
+   *   3. accounts[0] as a last resort only if every account is unhealthy.
+   *
+   * If all healthy accounts are cooling or rate-limited, throws
+   * `NoAvailableAccountError` instead of sending repeated requests to one
+   * known-blocked key. The caller should return 429 with its retry-after.
    *
    * Throws `EmptyPoolError` when there are no accounts at all — callers in
    * the request path should map this to a 503. The DELETE endpoint guards
    * against this state by refusing to remove the last account.
    */
-  getNext(): Account {
+  getNext(model?: string): Account {
     if (this.accounts.length === 0) {
       throw new EmptyPoolError("token pool is empty — add an account first");
     }
@@ -140,34 +174,50 @@ export class TokenPool {
     // whose reset window has passed would never re-enter rotation.
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
 
-    const available = this.accounts.filter(a => this.isAvailable(a));
+    const available = this.accounts.filter(a => this.isAvailable(a, model));
 
     if (available.length === 0) {
-      const healthyUsable = this.accounts.filter(a => a.healthy && isUsable(a));
-      if (healthyUsable.length > 0) {
-        return healthyUsable.reduce((best, a) =>
-          earliestReset(a) < earliestReset(best) ? a : best
-        );
-      }
       const healthy = this.accounts.filter(a => a.healthy);
       if (healthy.length === 0) {
-        return this.accounts[0];
+        return this.markSelected(this.accounts[0]);
       }
-      // All healthy accounts are either busy, rate-limited, or over user caps.
-      // Fall back to the one that'll reset soonest — see docstring. Notify
-      // the listener so the bypass becomes visible in the dashboard.
-      const fallback = healthy.reduce((best, a) =>
-        earliestReset(a) < earliestReset(best) ? a : best
+
+      // Busy is a transient concurrency signal and can be bypassed when no
+      // idle account exists. Cooling/rate-limited is an upstream refusal and
+      // must never be bypassed: doing so was the key-rotation deadlock seen in
+      // production, where the same account received every retry after both
+      // accounts had returned 429.
+      const notBlocked = healthy.filter(a =>
+        a.enabled && !isCooling(a, model) && a.rateLimits.status !== "rate_limited"
       );
-      const someCapped = this.accounts.some(a => a.healthy && overUserCap(a));
-      if (someCapped && this.onCapBypass) {
-        this.onCapBypass(fallback);
+      const healthyUsable = notBlocked.filter(isUsable);
+      if (healthyUsable.length > 0) {
+        return this.markSelected(healthyUsable.reduce((best, a) =>
+          earliestReset(a) < earliestReset(best) ? a : best
+        ));
       }
-      return fallback;
+
+      if (notBlocked.length > 0) {
+        // All non-blocked accounts are over a user cap. Limits are advisory;
+        // use the soonest reset rather than hammering a cooling account.
+        const fallback = this.markSelected(notBlocked.reduce((best, a) =>
+          earliestReset(a) < earliestReset(best) ? a : best
+        ));
+        if (this.onCapBypass) this.onCapBypass(fallback);
+        return fallback;
+      }
+
+      const retryAfter = Math.min(...healthy.filter(a => a.enabled).map(a => retryAfterSeconds(a, model)));
+      if (!Number.isFinite(retryAfter)) throw new EmptyPoolError("no healthy enabled accounts");
+      throw new NoAvailableAccountError(retryAfter);
     }
 
     const account = available[this.currentIndex % available.length];
     this.currentIndex = (this.currentIndex + 1) % available.length;
+    return this.markSelected(account);
+  }
+
+  private markSelected(account: Account): Account {
     account.requestCount++;
     account.lastUsed = Date.now();
     return account;
@@ -185,13 +235,13 @@ export class TokenPool {
    * affinity to decide whether a pinned account is still serviceable before
    * reassigning the session elsewhere.
    */
-  canServe(id: string): boolean {
+  canServe(id: string, model?: string): boolean {
     const a = this.getById(id);
     if (!a) return false;
     // Sweep first, or an account whose cooldown has already elapsed would look
     // unusable and the session would be reassigned for no reason.
     clearExpiredCooldown(a, this.onCooldownExpired);
-    return this.isAvailable(a);
+    return this.isAvailable(a, model);
   }
 
   /**
@@ -204,19 +254,50 @@ export class TokenPool {
    * conversation. Concurrency is a fair reason to place a NEW session
    * elsewhere; it is never a reason to move an existing one.
    */
-  canRetain(id: string): boolean {
+  canRetain(id: string, model?: string): boolean {
     const a = this.getById(id);
     if (!a) return false;
     clearExpiredCooldown(a, this.onCooldownExpired);
     // `cooling` is still honoured: a 429/529 cooldown is upstream telling us to
     // stop, which a pin must respect. Only plain in-flight concurrency is
     // forgiven here.
-    const cooling = (a.coolingUntil ?? 0) > Date.now();
+    const cooling = isCooling(a, model);
     return a.healthy && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
 
-  private isAvailable(a: Account): boolean {
-    return a.healthy && !a.busy && a.rateLimits.status !== "rate_limited" && isUsable(a);
+  /**
+   * Why a pinned account cannot be retained right now, and for how long.
+   *
+   * `canRetain` answers yes/no; a session large enough that moving it costs a
+   * full prefix rewrite needs the reason too, because the two reasons call for
+   * opposite responses. A cooldown has a deadline and can be sat out. Being
+   * unhealthy, disabled or over a user cap has none, so waiting would stall the
+   * request forever and the session has to go somewhere else.
+   *
+   * Reuses `retryAfterSeconds`, which already reconciles the cooldown deadline
+   * with the limiting rate-limit window; duplicating that reconciliation here
+   * is how the two would drift apart.
+   */
+  blockState(id: string, model?: string): PinBlock {
+    const a = this.getById(id);
+    if (!a) return { kind: "indefinite" };
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    if (this.canRetain(id, model)) return { kind: "none" };
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const hasDeadline =
+      cooldownDeadline(a, model) > Date.now() ||
+      (a.rateLimits.status === "rate_limited" && limitingReset(a) > nowSec);
+    // A deadline is what makes waiting a real option. An account that is
+    // rate_limited with no reset in its headers is indistinguishable from one
+    // that is simply unavailable, so it reads as indefinite rather than as a
+    // wait of the fallback length.
+    if (!hasDeadline) return { kind: "indefinite" };
+    return { kind: "temporary", retryAfterSeconds: retryAfterSeconds(a, model) };
+  }
+
+  private isAvailable(a: Account, model?: string): boolean {
+    return a.healthy && !a.busy && !isCooling(a, model) && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
 
   /** Optional listener fired when a request is routed to a capped account
@@ -244,9 +325,9 @@ export class TokenPool {
    * pool (returns false instead) — safe to call speculatively on every
    * request to decide whether to consider cross-provider fallback.
    */
-  hasAvailableAccount(): boolean {
+  hasAvailableAccount(model?: string): boolean {
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
-    return this.accounts.some(a => this.isAvailable(a));
+    return this.accounts.some(a => this.isAvailable(a, model));
   }
 
   getAll(): Account[] {

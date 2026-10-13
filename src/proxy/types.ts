@@ -40,6 +40,8 @@ export interface Account {
    *  than a boolean so overlapping failures extend the wait instead of the
    *  earliest timer clearing it for all of them. */
   coolingUntil?: number;
+  /** Runtime-only deadlines per model family; independent of global cooldown. */
+  modelCooldowns?: Record<string, number>;
   requestCount: number;
   errorCount: number;
   lastUsed: number;      // Unix timestamp in ms
