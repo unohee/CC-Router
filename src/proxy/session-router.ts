@@ -54,6 +54,10 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000;
 /** Assumed time-to-reset for a target with no open window: a fresh window is
  *  taken to start on first use and last five hours. */
 const UNOPENED_WINDOW_MIN = 5 * 60;
+/** A pin past the soft cap whose window resets within this many minutes is
+ *  kept: the quota is about to refill, and moving would pay a full cache
+ *  rewrite to avoid a few minutes on a hot account. */
+const SOFT_CAP_GRACE_MIN = 15;
 /** Floor on time-to-reset, so a window seconds from rolling over does not
  *  score as unbounded capacity. */
 const MIN_TTR_MIN = 5;
@@ -133,6 +137,7 @@ export class SessionRouter {
       // still be spent here rather than declared unusable — which would also
       // tip the caller into cross-provider fallback.
       if (!this.overSoftCap(existing.target, utilOf)
+        || this.resetsWithin(existing.target, SOFT_CAP_GRACE_MIN, utilOf)
         || !candidates.some(c => this.softCapRelief(c, existing.target, isUsable, utilOf))) {
         existing.lastSeen = this.now();
         // Refreshing the timestamp is itself a change worth persisting: a busy
@@ -292,6 +297,16 @@ export class SessionRouter {
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): boolean {
     return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
+  }
+
+  private resetsWithin(
+    target: SessionTarget,
+    minutes: number,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): boolean {
+    const { resetAtSec } = this.metricsOf(target, utilOf);
+    const nowSec = this.now() / 1000;
+    return !!resetAtSec && resetAtSec > nowSec && resetAtSec - nowSec <= minutes * 60;
   }
 
   private overSoftCap(

@@ -408,6 +408,15 @@ describe("SessionRouter soft cap", () => {
     expect(r.resolve("s", POOL, notVega, allHot)!.accountId).toBe("lyra");
   });
 
+  it("keeps a pin past the cap when its window is about to reset", () => {
+    const r = router();
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "lyra", lastSeen: NOW_SEC * 1000 }]);
+    const lyraResetsSoon = (t: SessionTarget) =>
+      t.accountId === "lyra" ? { util: 0.95, resetAtSec: NOW_SEC + 10 * 60 } : metrics(t);
+
+    expect(r.resolve("s", POOL, notVega, lyraResetsSoon)!.accountId).toBe("lyra");
+  });
+
   it("still places a new session when every account is past the cap", () => {
     expect(router().resolve("new", POOL, notVega, () => 0.95)).not.toBeNull();
   });

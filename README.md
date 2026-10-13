@@ -576,7 +576,7 @@ With session affinity, a session stays on its account until that account answers
 - An account at or above `softCapUtil` takes no new sessions, and its pinned sessions move to an account below the cap — within the same provider, so a Claude session is never handed to OpenAI by this rule.
 - When every account is past the cap, pins stay where they are and the last of each window is still spent. The cap never makes an account "unavailable", so it cannot trigger cross-provider fallback on its own.
 - New sessions go to the account that can absorb work fastest: `(cap − util) / minutes-to-reset / (1 + live sessions)`. Quota left in a window that is about to reset is spent first; an account with no open window is held in reserve, which keeps the accounts' windows staggered instead of running out together.
-- Each move costs one prompt-cache rewrite on the new account. Moves are logged as `⤳ reassign <session> <from> → <to> (soft cap 90%)`.
+- A pin whose window resets within 15 minutes is kept even past the cap — the quota is about to refill. Each move costs one prompt-cache rewrite on the new account; moves are logged as `⤳ reassign <session> <from> → <to> (soft cap 90%)`.
 
 Must be a fraction strictly between 0 and 1; anything else (including `90`) leaves placement exactly as it was.
 
