@@ -18,6 +18,7 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 - **Codex CLI support** — configure Codex to use CC-Router as a Responses-compatible provider
 - **Automatic token refresh** — OAuth tokens are refreshed before they expire, saved atomically to disk
 - **Rate limit awareness** — detects 429/529 responses and cools accounts down; quota utilization is parsed for both Claude (`anthropic-ratelimit-*`) and Codex (`x-codex-*`) accounts and steers session assignment
+- **Quota-aware throttle (opt-in)** — paces upstream sends and caps per-account concurrency as an account's quota utilization rises, trading a short wait for the burst-driven 429 and the retry that follows; off by default
 - **Token accounting** — input/output/cache tokens per request and in aggregate, for both providers, on the live dashboard
 - **Client mode** — connect to a remote CC-Router from any machine with one command (`cc-router client connect <url>`)
 - **Claude Desktop support** — route Cowork / Agent-mode traffic through CC-Router via mitmproxy interception (macOS, Windows, Linux)
@@ -316,6 +317,11 @@ cc-router configure --enable-fallback           Route to OpenAI when every Claud
 cc-router configure --enable-session-pool-openai  Let whole sessions be assigned to OpenAI accounts
 cc-router configure --enable-model-tiers        Map Claude tiers to comparable Codex models
 cc-router configure --disable-session-affinity  Pick an account per request instead of per session
+cc-router configure --enable-throttle           Pace requests to accounts whose quota is running hot
+cc-router configure --throttle-max-inflight 4   Max concurrent in-flight requests per account
+cc-router configure --throttle-min-interval 250 Spacing (ms) between sends at full saturation
+cc-router configure --throttle-start-util 0.75  Utilization below which no pacing applies
+cc-router configure --throttle-hard-util 0.95   Utilization at which concurrency is 1, spacing max
 cc-router configure --disable-auto-update       Never self-install newer npm releases
 
 cc-router client connect <url>       Connect Claude Code to a remote CC-Router
@@ -554,6 +560,64 @@ Disable it:
 
 ```bash
 cc-router configure --disable-fallback
+```
+
+---
+
+## Request pacing / admission throttle (opt-in)
+
+When an account's quota utilization climbs toward its ceiling, CC-Router can **pace** the requests it sends to that account instead of firing them off in a burst and collecting 429s. This is **off by default**: absent (or `enabled: false`) leaves scheduling exactly as it is today.
+
+To be explicit about what this is and is not: **this paces requests — it does not reduce token consumption.** No prompt is trimmed, no account is capped, no session is moved. What it reduces is burst-driven 429s and the retry waste that follows them — a 429 makes Claude Code retry, and a retry re-sends the conversation, which costs more tokens than the short wait it avoided.
+
+Enable it:
+
+```bash
+cc-router configure --enable-throttle
+```
+
+Tune it in the same call (each flag also works on its own):
+
+```bash
+cc-router configure --enable-throttle --throttle-max-inflight 4 --throttle-min-interval 250
+```
+
+- `--throttle-max-inflight <n>` — max concurrent in-flight requests per account. `0` disables the concurrency gate.
+- `--throttle-min-interval <ms>` — spacing kept between two consecutive sends to one account, reached at `hardUtil`. `0` disables pacing (concurrency cap still applies).
+- `--throttle-start-util <0-1>` — utilization below which nothing is restricted.
+- `--throttle-hard-util <0-1>` — utilization at/above which concurrency is 1 and spacing is at its maximum.
+
+Config keys (all under `throttle` in `config.json`):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. |
+| `perAccountMaxInFlight` | `4` | Concurrent requests allowed per account; `0` disables the gate. |
+| `startUtil` | `0.75` | Below this utilization, no restriction. |
+| `hardUtil` | `0.95` | At/above this, concurrency 1 and maximum spacing. |
+| `maxWaitMs` | `20000` | Hard cap on any single wait before the request proceeds anyway. |
+| `pollMaxDelayMs` | `250` | Sleep slice while waiting for a free slot. |
+| `minIntervalMs` | `0` | Minimum spacing between sends to one account; `0` disables pacing. |
+| `logSaturation` | `true` | Log once when every enabled+healthy account is saturated, and once on recovery. |
+
+Utilization is read as the worse of the account's two windows (`max(fiveHourUtil, sevenDayUtil)`) — the tighter window is what actually stops the account.
+
+Behavior guarantees:
+
+- **A request is never rejected by the throttle.** If a wait expires, the request proceeds anyway (fail-open) — the client always has a working account.
+- **No 429 is ever synthesized** toward the client, and the router's own cooldown is untouched. Caps and pacing are orthogonal layers.
+- **Session affinity is untouched**, so a session is never moved (and never pays a prompt-cache rewrite) because of pacing.
+
+Disable it:
+
+```bash
+cc-router configure --disable-throttle
+```
+
+Check what's in effect:
+
+```bash
+cc-router configure --show
 ```
 
 ---

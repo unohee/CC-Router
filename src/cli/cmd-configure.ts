@@ -3,7 +3,8 @@ import chalk from "chalk";
 import { SUGGESTED_TIER_MODELS } from "../protocol/model-ref.js";
 import { writeClaudeSettings, removeClaudeSettings, readClaudeProxySettings } from "../utils/claude-config.js";
 import { writeCodexRouterConfig } from "../utils/codex-config.js";
-import { readConfig, writeConfig, generateProxySecret } from "../config/manager.js";
+import { readConfig, writeConfig, generateProxySecret, getThrottleConfig } from "../config/manager.js";
+import { DEFAULT_THROTTLE } from "../proxy/throttle.js";
 import { PROXY_PORT, CLAUDE_SETTINGS_PATH } from "../config/paths.js";
 import { buildModelRoutingUpdate } from "../protocol/model-routing-config.js";
 
@@ -31,6 +32,12 @@ export function registerConfigure(program: Command): void {
     .option("--enable-session-affinity", "Pin each session to one account (default)")
     .option("--enable-model-tiers", "Map Claude tiers (opus/sonnet/haiku) to comparable Codex models")
     .option("--disable-model-tiers", "Send every cross-provider request to the single default model")
+    .option("--enable-throttle", "Pace requests to accounts whose quota is running hot (reduces burst-driven 429s)")
+    .option("--disable-throttle", "Disable request pacing (default)")
+    .option("--throttle-max-inflight <n>", "Max concurrent in-flight requests per account (0 disables the gate)")
+    .option("--throttle-min-interval <ms>", "Minimum spacing between consecutive sends to one account at full saturation")
+    .option("--throttle-start-util <0-1>", "Quota utilization below which no pacing applies")
+    .option("--throttle-hard-util <0-1>", "Quota utilization at which concurrency is 1 and spacing is maximum")
     .action((target: string | undefined, opts: {
       remove?: boolean;
       port: string;
@@ -51,6 +58,12 @@ export function registerConfigure(program: Command): void {
       disableSessionAffinity?: boolean;
       enableModelTiers?: boolean;
       disableModelTiers?: boolean;
+      enableThrottle?: boolean;
+      disableThrottle?: boolean;
+      throttleMaxInflight?: string;
+      throttleMinInterval?: string;
+      throttleStartUtil?: string;
+      throttleHardUtil?: string;
     }) => {
       if (target === "codex") {
         const port = parseInt(opts.port, 10);
@@ -114,6 +127,11 @@ export function registerConfigure(program: Command): void {
         console.log(`    Session affinity:    ${affinity ? chalk.green("enabled") : chalk.gray("disabled")}`);
         const poolOpenAI = cfg.sessionPoolIncludesOpenAI === true;
         console.log(`    OpenAI in session pool: ${poolOpenAI ? chalk.green("enabled") : chalk.gray("disabled")}`);
+        const throttle = getThrottleConfig();
+        const throttleStatus = throttle.enabled
+          ? chalk.green("enabled") + chalk.gray(` (per-account max ${throttle.perAccountMaxInFlight}, +${throttle.minIntervalMs}ms between sends, start ${Math.round(throttle.startUtil * 100)}%)`)
+          : chalk.gray("disabled");
+        console.log(`    Throttle:            ${throttleStatus}`);
         const tierMap = cfg.modelRouting?.openAITierMap;
         if (tierMap && Object.keys(tierMap).length > 0) {
           const gated = !cfg.modelRouting?.openAIDefaultModel;
@@ -230,6 +248,81 @@ export function registerConfigure(program: Command): void {
       if (opts.disableFallback) {
         writeConfig({ ...readConfig(), crossProviderFallback: false });
         console.log(chalk.green("✓ Cross-provider fallback disabled."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      // ─── Throttle (opt-in pacing) ──────────────────────────────────────────
+      // Handled as one block so `--enable-throttle --throttle-min-interval 500`
+      // configures and turns on in a single invocation.
+      const throttleTouched = opts.enableThrottle || opts.disableThrottle
+        || opts.throttleMaxInflight !== undefined || opts.throttleMinInterval !== undefined
+        || opts.throttleStartUtil !== undefined || opts.throttleHardUtil !== undefined;
+      if (throttleTouched) {
+        const cfg = readConfig();
+        const throttle = { ...(cfg.throttle ?? {}) };
+        const parseNumber = (raw: string, label: string): number => {
+          const value = Number(raw.trim());
+          if (raw.trim() === "" || !Number.isFinite(value)) {
+            console.error(chalk.red(`Invalid ${label}: "${raw}" (expected a number)`));
+            process.exit(1);
+          }
+          return value;
+        };
+        if (opts.throttleMaxInflight !== undefined) {
+          const n = parseNumber(opts.throttleMaxInflight, "max in-flight");
+          if (n < 0) {
+            console.error(chalk.red("--throttle-max-inflight must be >= 0 (0 disables the concurrency gate)"));
+            process.exit(1);
+          }
+          throttle.perAccountMaxInFlight = n;
+        }
+        if (opts.throttleMinInterval !== undefined) {
+          const ms = parseNumber(opts.throttleMinInterval, "min interval (ms)");
+          if (ms < 0) {
+            console.error(chalk.red("--throttle-min-interval must be >= 0 (0 disables pacing)"));
+            process.exit(1);
+          }
+          throttle.minIntervalMs = ms;
+        }
+        if (opts.throttleStartUtil !== undefined) {
+          const u = parseNumber(opts.throttleStartUtil, "start utilization");
+          if (u < 0 || u > 1) {
+            console.error(chalk.red("--throttle-start-util must be between 0 and 1"));
+            process.exit(1);
+          }
+          throttle.startUtil = u;
+        }
+        if (opts.throttleHardUtil !== undefined) {
+          const u = parseNumber(opts.throttleHardUtil, "hard utilization");
+          if (u < 0 || u > 1) {
+            console.error(chalk.red("--throttle-hard-util must be between 0 and 1"));
+            process.exit(1);
+          }
+          throttle.hardUtil = u;
+        }
+        // Explicit toggles win over the previous state; a settings-only call
+        // leaves the switch exactly where it was.
+        if (opts.disableThrottle) throttle.enabled = false;
+        else if (opts.enableThrottle) throttle.enabled = true;
+
+        writeConfig({ ...cfg, throttle });
+        const effective = getThrottleConfig();
+        if (effective.enabled) {
+          console.log(chalk.green("✓ Request pacing enabled."));
+          console.log(chalk.gray("  As an account's quota fills, requests to it are spaced out and their"));
+          console.log(chalk.gray("  concurrency is capped — a short wait instead of a burst-driven 429"));
+          console.log(chalk.gray("  and the retry that burns more tokens than the wait saved."));
+        } else if (opts.disableThrottle) {
+          console.log(chalk.green("✓ Request pacing disabled."));
+        } else {
+          console.log(chalk.green("✓ Throttle settings updated."));
+          console.log(chalk.gray("  Pacing is still off — add --enable-throttle to turn it on."));
+        }
+        console.log(chalk.gray(`  per-account max in-flight: ${effective.perAccountMaxInFlight}${effective.perAccountMaxInFlight === 0 ? " (gate off)" : ""}`));
+        console.log(chalk.gray(`  spacing at saturation:     ${effective.minIntervalMs}ms`));
+        console.log(chalk.gray(`  ramp:                      ${Math.round(effective.startUtil * 100)}% → ${Math.round(effective.hardUtil * 100)}% utilization`));
+        console.log(chalk.gray("  This paces requests; it does not reduce token consumption."));
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

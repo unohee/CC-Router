@@ -5,6 +5,8 @@ import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
+import { DEFAULT_THROTTLE } from "../proxy/throttle.js";
+import type { ThrottleConfig } from "../proxy/throttle.js";
 
 export const DEFAULT_PROXY_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -229,6 +231,12 @@ export interface ProxyConfig {
    *  account, not just Anthropic ones. Off by default — it changes which model
    *  answers, so it must be opted into. Requires modelRouting.openAIDefaultModel. */
   sessionPoolIncludesOpenAI?: boolean;
+  /** Opt-in request pacing / admission throttle. OFF by default: absent (or
+   *  `enabled: false`) leaves the proxy's scheduling behavior byte-identical to
+   *  no-throttle. When on, requests to an account are spaced out and their
+   *  concurrency is capped as that account's quota utilization rises. This is
+   *  scheduling only — it does not reduce token consumption. */
+  throttle?: Partial<ThrottleConfig>;
   /** How the router prices moving a large session between accounts.
    *
    *  `holdOnCooldown` keeps a large session on its own account while that
@@ -276,6 +284,37 @@ export function getProxyRequestTimeoutMs(): number {
   return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
     ? timeoutMs
     : DEFAULT_PROXY_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * Resolve the throttle settings, merged over `DEFAULT_THROTTLE` and normalized.
+ * Absent config yields a disabled throttle with the documented defaults, so the
+ * proxy's behavior is unchanged until an operator opts in. config.json is
+ * hand-editable, so every field is coerced: a stray string/null must not become
+ * NaN, an instant timeout, or an unbounded wait.
+ */
+export function getThrottleConfig(): ThrottleConfig {
+  const raw = readConfig().throttle ?? {};
+  const num = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  const clamped = (value: unknown, fallback: number, min: number, max: number): number =>
+    Math.min(Math.max(num(value, fallback), min), max);
+
+  const startUtil = clamped(raw.startUtil, DEFAULT_THROTTLE.startUtil, 0, 1);
+  const hardUtil = clamped(raw.hardUtil, DEFAULT_THROTTLE.hardUtil, 0, 1);
+  // A degenerate range would make the ramp divide by zero; treat it as an
+  // operator error and fall back to the pair of documented defaults.
+  const rampValid = hardUtil > startUtil;
+  return {
+    enabled: raw.enabled === true,
+    perAccountMaxInFlight: Math.max(0, num(raw.perAccountMaxInFlight, DEFAULT_THROTTLE.perAccountMaxInFlight)),
+    startUtil: rampValid ? startUtil : DEFAULT_THROTTLE.startUtil,
+    hardUtil: rampValid ? hardUtil : DEFAULT_THROTTLE.hardUtil,
+    maxWaitMs: Math.max(0, num(raw.maxWaitMs, DEFAULT_THROTTLE.maxWaitMs)),
+    pollMaxDelayMs: Math.max(0, num(raw.pollMaxDelayMs, DEFAULT_THROTTLE.pollMaxDelayMs)),
+    minIntervalMs: Math.max(0, num(raw.minIntervalMs, DEFAULT_THROTTLE.minIntervalMs)),
+    logSaturation: raw.logSaturation === false ? false : DEFAULT_THROTTLE.logSaturation,
+  };
 }
 
 function normalizeProxyConfig(cfg: ProxyConfig): ProxyConfig {

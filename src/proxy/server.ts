@@ -10,8 +10,10 @@ import { recordRateLimitCooldown } from "./model-cooldown.js";
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
+import { createThrottleGate } from "./throttle.js";
+import type { ThrottleGate } from "./throttle.js";
 import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
 import { loadTelemetryState } from "../config/telemetry.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction } from "./logger.js";
@@ -389,6 +391,37 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits;
     if (!limits) return 0;
     return Math.max(limits.fiveHourUtil, limits.sevenDayUtil);
+  };
+
+  // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
+  // Paces upstream sends and caps per-account concurrency as an account's quota
+  // utilization rises. This is scheduling, not token reduction: it trades a
+  // short wait for the burst that would produce a 429 — and a 429 makes Claude
+  // Code retry, which burns more tokens than the wait it avoided. Caps and this
+  // gate are orthogonal layers; nothing here touches pin/cap predicates.
+  const throttleCfg = getThrottleConfig();
+  const throttleGate: ThrottleGate = createThrottleGate(throttleCfg);
+
+  /** Worst of an account's two quota windows — the tighter window is what
+   *  actually stops it, so the maximum is the honest read on headroom. */
+  const accountUtil = (a: Account): number =>
+    Math.max(a.rateLimits.fiveHourUtil, a.rateLimits.sevenDayUtil);
+
+  // Make saturation visible in the dashboard instead of being silent: one log
+  // when every enabled+healthy Anthropic account is at/above hardUtil, one when
+  // it recovers. Transitions only — never per request.
+  let throttledSaturated = false;
+  const reportSaturation = (a: Account): void => {
+    if (!throttleCfg.enabled || !throttleCfg.logSaturation) return;
+    const candidates = pool.getAll().filter(x => x.enabled && x.healthy);
+    const saturated = candidates.length > 0 && candidates.every(x => accountUtil(x) >= throttleCfg.hardUtil);
+    if (saturated === throttledSaturated) return;
+    throttledSaturated = saturated;
+    const msg = saturated
+      ? `all accounts saturated — pacing sends (>= ${Math.round(throttleCfg.hardUtil * 100)}% quota)`
+      : `${a.id} recovered below saturation — pacing at normal rate again`;
+    logError(a.id, 0, msg);
+    stats.addLog({ ts: Date.now(), accountId: a.id, model: "-", type: saturated ? "error" : "route", details: msg });
   };
 
   /**
@@ -1213,6 +1246,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         return;
       }
     }
+
+    // Admission throttle: pace this send and hold it below the account's
+    // concurrency limit when its quota is running hot. `admit` never rejects —
+    // on expiry it fails open, so the client always has a working account.
+    // Both calls are no-ops while the throttle is disabled (the default).
+    await throttleGate.admit(account.id, accountUtil(account));
+    throttleGate.acquire(account.id);
+    res.once("close", () => throttleGate.release(account.id));
+    reportSaturation(account);
 
     req._ccAccount = account;
     req._startTime = Date.now();
