@@ -12,13 +12,35 @@ export interface SessionSnapshotEntry {
   lastSeen: number;
 }
 
+/**
+ * What a target's quota looks like right now. A bare number is accepted
+ * wherever this is, meaning utilization only, with no reset time known.
+ */
+export interface TargetMetrics {
+  /** Fraction of the binding quota window already spent (0–1). */
+  util: number;
+  /** When that window resets, epoch seconds. Absent or 0 means no window is
+   *  open (or none is known). */
+  resetAtSec?: number;
+}
+
+/** Why an existing session left its target. */
+export type ReassignReason = "unservable" | "soft-cap";
+
 export interface SessionRouterOptions {
   /** How long an unused assignment survives. Default 1 hour. */
   ttlMs?: number;
   /** Injectable clock for tests. */
   now?: () => number;
+  /**
+   * Utilization (0–1) above which a target stops taking new sessions and its
+   * pinned sessions move elsewhere — but only while some other target is still
+   * below it. Disabled unless strictly between 0 and 1, which keeps placement
+   * exactly as it was. See `resolve` for why this is a preference, not a ban.
+   */
+  softCapUtil?: number;
   /** Fired when an existing session is moved to a different target. */
-  onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget }) => void;
+  onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget; reason: ReassignReason }) => void;
   /** Fired whenever the assignment set changes, so it can be persisted. */
   onAssignmentsChanged?: () => void;
 }
@@ -29,6 +51,12 @@ interface Assignment {
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
+/** Assumed time-to-reset for a target with no open window: a fresh window is
+ *  taken to start on first use and last five hours. */
+const UNOPENED_WINDOW_MIN = 5 * 60;
+/** Floor on time-to-reset, so a window seconds from rolling over does not
+ *  score as unbounded capacity. */
+const MIN_TTR_MIN = 5;
 /** Safety valve: a router that never forgets would grow without bound. */
 const MAX_TRACKED_SESSIONS = 10_000;
 
@@ -59,12 +87,15 @@ export class SessionRouter {
   private cursor = 0;
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly softCapUtil: number | null;
   private readonly onReassign?: SessionRouterOptions["onReassign"];
   private readonly onAssignmentsChanged?: SessionRouterOptions["onAssignmentsChanged"];
 
   constructor(opts: SessionRouterOptions = {}) {
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
     this.now = opts.now ?? (() => Date.now());
+    const cap = opts.softCapUtil;
+    this.softCapUtil = typeof cap === "number" && cap > 0 && cap < 1 ? cap : null;
     this.onReassign = opts.onReassign;
     this.onAssignmentsChanged = opts.onAssignmentsChanged;
   }
@@ -82,10 +113,10 @@ export class SessionRouter {
     sessionId: string,
     candidates: SessionTarget[],
     isUsable: (target: SessionTarget) => boolean,
-    /** Fraction of the binding quota window already spent (0–1). Used to break
-     *  ties between equally-loaded targets so a nearly-exhausted account does
-     *  not keep taking new work. Absent means "unknown", treated as 0. */
-    utilOf?: (target: SessionTarget) => number,
+    /** The target's quota: utilization, optionally with its reset time.
+     *  Absent means "unknown", treated as 0 — an unmeasured target has to take
+     *  work before it can produce a reading. */
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
     /** Whether an EXISTING pin may be kept. Defaults to `isUsable`. Separated
      *  because holding a pin tolerates transient states that would rightly
      *  disqualify a target for a new session. */
@@ -94,22 +125,32 @@ export class SessionRouter {
     this.sweep();
 
     const existing = this.assignments.get(sessionId);
+    let reason: ReassignReason = "unservable";
     if (existing && (isRetainable ?? isUsable)(existing.target)) {
-      existing.lastSeen = this.now();
-      // Refreshing the timestamp is itself a change worth persisting: a busy
-      // long-lived session never re-assigns, so without this its snapshot keeps
-      // the timestamp of its first request and restores as expired.
-      this.onAssignmentsChanged?.();
-      return existing.target;
+      // A pin past the soft cap is given up only when another target has room
+      // below it. Otherwise it stays: once every target is hot, moving buys
+      // nothing but a cache rewrite, and the last stretch of each window should
+      // still be spent here rather than declared unusable — which would also
+      // tip the caller into cross-provider fallback.
+      if (!this.overSoftCap(existing.target, utilOf)
+        || !candidates.some(c => !sameTarget(c, existing.target) && isUsable(c) && !this.overSoftCap(c, utilOf))) {
+        existing.lastSeen = this.now();
+        // Refreshing the timestamp is itself a change worth persisting: a busy
+        // long-lived session never re-assigns, so without this its snapshot
+        // keeps the timestamp of its first request and restores as expired.
+        this.onAssignmentsChanged?.();
+        return existing.target;
+      }
+      reason = "soft-cap";
     }
 
     const usable = candidates.filter(isUsable);
     if (usable.length === 0) return null;
 
-    const target = this.leastLoaded(usable, utilOf);
+    const target = this.place(usable, utilOf);
 
     if (existing && !sameTarget(existing.target, target)) {
-      this.onReassign?.({ sessionId, from: existing.target, to: target });
+      this.onReassign?.({ sessionId, from: existing.target, to: target, reason });
     }
 
     this.assignments.set(sessionId, { target, lastSeen: this.now() });
@@ -130,7 +171,7 @@ export class SessionRouter {
     sessionId: string,
     candidates: SessionTarget[],
     isUsable: (target: SessionTarget) => boolean,
-    utilOf?: (target: SessionTarget) => number,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
     isRetainable?: (target: SessionTarget) => boolean,
   ): SessionTarget | null {
     // Sweep first, exactly as `resolve` does. Reading the map directly would
@@ -217,6 +258,84 @@ export class SessionRouter {
     this.onAssignmentsChanged?.();
   }
 
+  /** Live sessions pinned to each of `targets`. */
+  private loadOf(targets: SessionTarget[]): Map<string, number> {
+    const load = new Map<string, number>();
+    for (const target of targets) load.set(targetKey(target), 0);
+    for (const assignment of this.assignments.values()) {
+      const key = targetKey(assignment.target);
+      const current = load.get(key);
+      if (current !== undefined) load.set(key, current + 1);
+    }
+    return load;
+  }
+
+  private metricsOf(
+    target: SessionTarget,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): TargetMetrics {
+    const m = utilOf?.(target);
+    if (m === undefined) return { util: 0 };
+    return typeof m === "number" ? { util: m } : m;
+  }
+
+  private overSoftCap(
+    target: SessionTarget,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): boolean {
+    return this.softCapUtil !== null && this.metricsOf(target, utilOf).util >= this.softCapUtil;
+  }
+
+  /**
+   * Choose a target for a new or displaced session from `usable`.
+   *
+   * With no soft cap configured this is `leastLoaded`, unchanged. With one,
+   * targets below the cap are ranked by how fast they could absorb new work:
+   *
+   *     (softCap - util) / minutesToReset / (1 + liveSessions)
+   *
+   * Headroom alone is the wrong measure, because unspent quota is lost at the
+   * reset: 60% left in a window closing in five minutes is worth more right
+   * now than 80% left in one closing in three hours. A target with no open
+   * window is assumed to open a full one on first use, so it ranks low and is
+   * held in reserve; that keeps the accounts' windows staggered instead of
+   * starting together and running out together. Dividing by live sessions
+   * stands in for the load a reading cannot show yet — utilization only moves
+   * once responses come back, so without it a burst of new sessions would all
+   * land on one target.
+   *
+   * When every usable target is past the cap, placement falls back to
+   * `leastLoaded`: there is no headroom left to rank by.
+   */
+  private place(
+    usable: SessionTarget[],
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): SessionTarget {
+    const cap = this.softCapUtil;
+    const utilOnly = (t: SessionTarget) => this.metricsOf(t, utilOf).util;
+    if (cap === null) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);
+
+    const preferred = usable.filter(t => !this.overSoftCap(t, utilOf));
+    if (preferred.length === 0) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);
+
+    const load = this.loadOf(preferred);
+    const nowSec = this.now() / 1000;
+    const score = (t: SessionTarget): number => {
+      const { util, resetAtSec } = this.metricsOf(t, utilOf);
+      const ttrMin = resetAtSec && resetAtSec > nowSec ? (resetAtSec - nowSec) / 60 : UNOPENED_WINDOW_MIN;
+      return (cap - util) / Math.max(ttrMin, MIN_TTR_MIN) / (1 + (load.get(targetKey(t)) ?? 0));
+    };
+
+    const scores = preferred.map(score);
+    const best = Math.max(...scores);
+    // Relative tolerance: identical inputs must tie, and float noise must not
+    // break the rotation between them.
+    const tied = preferred.filter((_, i) => best - scores[i] <= Math.abs(best) * 1e-9);
+    const chosen = tied[this.cursor % tied.length];
+    this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
+    return chosen;
+  }
+
   /**
    * Pick the target carrying the fewest live sessions, breaking ties by
    * round-robin so equal candidates still rotate.
@@ -232,13 +351,7 @@ export class SessionRouter {
     usable: SessionTarget[],
     utilOf?: (target: SessionTarget) => number,
   ): SessionTarget {
-    const load = new Map<string, number>();
-    for (const target of usable) load.set(targetKey(target), 0);
-    for (const assignment of this.assignments.values()) {
-      const key = targetKey(assignment.target);
-      const current = load.get(key);
-      if (current !== undefined) load.set(key, current + 1);
-    }
+    const load = this.loadOf(usable);
 
     let lightest = Infinity;
     for (const target of usable) lightest = Math.min(lightest, load.get(targetKey(target)) ?? 0);

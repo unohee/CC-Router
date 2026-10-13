@@ -256,6 +256,13 @@ export interface ProxyConfig {
     holdOnCooldown?: boolean;
     askClientToCompact?: boolean;
   };
+  /** Session placement tuning. */
+  routing?: {
+    /** Utilization (0–1) at which an account stops taking new sessions and
+     *  hands its pinned ones to an account with room — only while one exists.
+     *  Opt-in: absent, or outside (0, 1), keeps placement as it was. */
+    softCapUtil?: number;
+  };
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
   /** Run preferences — asked once on first start, reused on subsequent starts */
@@ -315,6 +322,17 @@ export function getThrottleConfig(): ThrottleConfig {
     minIntervalMs: Math.max(0, num(raw.minIntervalMs, DEFAULT_THROTTLE.minIntervalMs)),
     logSaturation: raw.logSaturation === false ? false : DEFAULT_THROTTLE.logSaturation,
   };
+}
+
+/**
+ * The session soft cap, or undefined when it is off. config.json is
+ * hand-editable, so anything that is not a number strictly between 0 and 1 —
+ * including a percent like 90 — reads as off rather than as a cap that would
+ * evict every account.
+ */
+export function getSoftCapUtil(): number | undefined {
+  const v = readConfig().routing?.softCapUtil;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 && v < 1 ? v : undefined;
 }
 
 function normalizeProxyConfig(cfg: ProxyConfig): ProxyConfig {

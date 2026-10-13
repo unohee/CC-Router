@@ -34,11 +34,10 @@ export interface Account {
   tokens: OAuthTokens;
   healthy: boolean;
   busy: boolean;
-  /** When a 429/529 cooldown ends, as epoch ms. Distinct from `busy`, which
-   *  only marks a request in flight — the two were one flag, making "wait your
-   *  turn" indistinguishable from "upstream told us to stop". A deadline rather
-   *  than a boolean so overlapping failures extend the wait instead of the
-   *  earliest timer clearing it for all of them. */
+  /** When a 429/529 cooldown ends, as epoch ms. A deadline rather than a
+   *  boolean so overlapping failures extend the wait instead of the earliest
+   *  timer clearing it for all of them. `busy` is not set anywhere — despite
+   *  its name it never marked a request in flight. */
   coolingUntil?: number;
   /** Runtime-only deadlines per model family; independent of global cooldown. */
   modelCooldowns?: Record<string, number>;

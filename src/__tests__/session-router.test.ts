@@ -34,7 +34,7 @@ describe("SessionRouter", () => {
     const moved = router.resolve("s1", ALL, t => t.accountId !== first.accountId)!;
 
     expect(moved.accountId).not.toBe(first.accountId);
-    expect(onReassign).toHaveBeenCalledWith({ sessionId: "s1", from: first, to: moved });
+    expect(onReassign).toHaveBeenCalledWith({ sessionId: "s1", from: first, to: moved, reason: "unservable" });
     // The move sticks — the session does not bounce back on the next request.
     expect(router.resolve("s1", ALL, always)).toEqual(moved);
   });
@@ -359,5 +359,91 @@ describe("repin durability and idempotence", () => {
     const moved = router.repinOnto("s", anthropicOnly, usable, undefined, usable);
 
     expect(moved?.provider).toBe("anthropic");
+  });
+});
+
+describe("SessionRouter soft cap", () => {
+  // The four-seat pool as measured on 2026-10-13: quota spent and minutes
+  // until each 5-hour window resets. vega was cooling down after a 429.
+  const NOW_SEC = 1_791_894_900;
+  const T = (id: string): SessionTarget => ({ provider: "anthropic", accountId: id });
+  const POOL = ["lyra", "vega", "heewon", "rigel"].map(T);
+  const measured: Record<string, { util: number; resetMin: number }> = {
+    lyra: { util: 0.99, resetMin: 105 },
+    vega: { util: 1.0, resetMin: 25 },
+    heewon: { util: 0.27, resetMin: 5 },
+    rigel: { util: 0.12, resetMin: 165 },
+  };
+  const metrics = (t: SessionTarget) => {
+    const m = measured[t.accountId];
+    return m ? { util: m.util, resetAtSec: NOW_SEC + m.resetMin * 60 } : { util: 0 };
+  };
+  const notVega = (t: SessionTarget) => t.accountId !== "vega";
+  const router = (opts: { softCapUtil?: number; onReassign?: () => void } = {}) =>
+    new SessionRouter({ softCapUtil: 0.9, now: () => NOW_SEC * 1000, ...opts });
+
+  it("spends the window that is about to reset before a roomier one", () => {
+    // heewon has less left than rigel, but it loses all of it in five minutes.
+    expect(router().resolve("new", POOL, notVega, metrics)!.accountId).toBe("heewon");
+  });
+
+  it("moves a pinned session off an account past the cap", () => {
+    const onReassign = vi.fn();
+    const r = router({ onReassign });
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "lyra", lastSeen: NOW_SEC * 1000 }]);
+
+    const moved = r.resolve("s", POOL, notVega, metrics)!;
+
+    expect(["heewon", "rigel"]).toContain(moved.accountId);
+    expect(onReassign).toHaveBeenCalledWith(expect.objectContaining({ reason: "soft-cap" }));
+    // The move sticks; lyra stays over the cap for the rest of its window.
+    expect(r.resolve("s", POOL, notVega, metrics)).toEqual(moved);
+  });
+
+  it("keeps the pin when every account is past the cap", () => {
+    const r = router();
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "lyra", lastSeen: NOW_SEC * 1000 }]);
+    const allHot = (t: SessionTarget) => ({ util: 0.95, resetAtSec: NOW_SEC + 600 + t.accountId.length });
+
+    expect(r.resolve("s", POOL, notVega, allHot)!.accountId).toBe("lyra");
+  });
+
+  it("still places a new session when every account is past the cap", () => {
+    expect(router().resolve("new", POOL, notVega, () => 0.95)).not.toBeNull();
+  });
+
+  it("does not count an unusable account as room elsewhere", () => {
+    // vega has the most headroom on paper but is cooling down.
+    const r = router();
+    r.restore([{ sessionId: "s", provider: "anthropic", accountId: "lyra", lastSeen: NOW_SEC * 1000 }]);
+    const onlyVegaCool = (t: SessionTarget) =>
+      ({ lyra: { util: 0.95 }, vega: { util: 0.1 }, heewon: { util: 0.95 }, rigel: { util: 0.95 } }[t.accountId]!);
+
+    expect(r.resolve("s", POOL, notVega, onlyVegaCool)!.accountId).toBe("lyra");
+  });
+
+  it("holds an account with no open window in reserve", () => {
+    // rigel has never been used this window; heewon is half spent but open.
+    const openOrNot = (t: SessionTarget) =>
+      t.accountId === "heewon" ? { util: 0.5, resetAtSec: NOW_SEC + 60 * 60 } : { util: 0 };
+
+    expect(router().resolve("new", [T("heewon"), T("rigel")], always, openOrNot)!.accountId).toBe("heewon");
+  });
+
+  it("spreads a burst of new sessions instead of stacking them", () => {
+    const r = router();
+    const even = () => ({ util: 0.2, resetAtSec: NOW_SEC + 60 * 60 });
+    const placed = ["s1", "s2", "s3", "s4"].map(id => r.resolve(id, [T("a"), T("b")], always, even)!.accountId);
+
+    expect(placed.filter(id => id === "a").length).toBe(2);
+  });
+
+  it("leaves placement unchanged when the cap is off", () => {
+    for (const softCapUtil of [undefined, 0, 1, 90]) {
+      const r = new SessionRouter({ softCapUtil, now: () => NOW_SEC * 1000 });
+      r.restore([{ sessionId: "s", provider: "anthropic", accountId: "lyra", lastSeen: NOW_SEC * 1000 }]);
+
+      expect(r.resolve("s", POOL, notVega, metrics)!.accountId).toBe("lyra");
+    }
   });
 });

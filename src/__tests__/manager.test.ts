@@ -33,6 +33,7 @@ import {
   readAccountsFromPath,
   writeConfig,
   getProxyRequestTimeoutMs,
+  getSoftCapUtil,
 } from "../config/manager.js";
 
 const accountsPath = () => `${MOCK_DIR}/accounts.json`;
@@ -512,5 +513,24 @@ describe("getProxyRequestTimeoutMs", () => {
       anthropicAliases: { "claude/sonnet": "claude-sonnet-4-6" },
       openAIAliases: { codex: "gpt-5-codex" },
     });
+  });
+});
+
+describe("getSoftCapUtil", () => {
+  it("is off when config.json does not set it", () => {
+    expect(getSoftCapUtil()).toBeUndefined();
+  });
+
+  it("reads a fraction strictly between 0 and 1", () => {
+    writeConfig({ routing: { softCapUtil: 0.9 } });
+
+    expect(getSoftCapUtil()).toBe(0.9);
+  });
+
+  it("reads a percent or an out-of-range value as off, not as a cap", () => {
+    for (const softCapUtil of [90, 1, 0, -0.5, Number.NaN]) {
+      writeConfig({ routing: { softCapUtil } });
+      expect(getSoftCapUtil()).toBeUndefined();
+    }
   });
 });

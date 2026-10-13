@@ -10,7 +10,7 @@ import { recordRateLimitCooldown } from "./model-cooldown.js";
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -29,7 +29,7 @@ import type { OpenAISubscriptionAccount } from "../providers/openai/token-refres
 import { mountResponsesRoutes } from "./responses-server.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
-import type { SessionTarget } from "./session-router.js";
+import type { SessionTarget, TargetMetrics } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
@@ -310,9 +310,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // router reassigns often, and the snapshot only has to be recent enough that
   // a restart lands sessions back on their own accounts.
   let sessionFlush: NodeJS.Timeout | null = null;
+  const softCapUtil = getSoftCapUtil();
   const sessionRouter = new SessionRouter({
-    onReassign: ({ sessionId, from, to }) => {
-      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId}`;
+    softCapUtil,
+    onReassign: ({ sessionId, from, to, reason }) => {
+      const why = reason === "soft-cap" ? ` (soft cap ${Math.round((softCapUtil ?? 0) * 100)}%)` : "";
+      const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId}${why}`;
       stats.addLog({ ts: Date.now(), accountId: to.accountId, model: "-", type: "route", details: msg });
     },
     onAssignmentsChanged: () => {
@@ -379,18 +382,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
 
   /**
-   * How full a target's quota is, as the worst of its two windows. The tighter
-   * window is what actually stops the account, so the maximum — not the
-   * currently-claimed one — is the honest measure of remaining headroom.
-   * Unknown quota reads as empty, which lets an unmeasured account take work
-   * and thereby produce the reading.
+   * How full a target's quota is, as the worst of its two windows, and when
+   * that window resets. The tighter window is what actually stops the
+   * account, so the maximum — not the currently-claimed one — is the honest
+   * measure of remaining headroom. Unknown quota reads as empty, which lets an
+   * unmeasured account take work and thereby produce the reading.
    */
-  const sessionTargetUtil = (t: SessionTarget): number => {
+  const sessionTargetUtil = (t: SessionTarget): TargetMetrics => {
     const limits = t.provider === "anthropic"
       ? pool.getById(t.accountId)?.rateLimits
       : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits;
-    if (!limits) return 0;
-    return Math.max(limits.fiveHourUtil, limits.sevenDayUtil);
+    if (!limits) return { util: 0 };
+    return limits.sevenDayUtil > limits.fiveHourUtil
+      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset }
+      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
   };
 
   // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
