@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { openAIResponseToAnthropicMessage } from "../protocol/openai-response-to-anthropic.js";
+import { OpenAIProtocolError } from "../protocol/openai-function-call.js";
 
 describe("openAIResponseToAnthropicMessage", () => {
   it("maps a completed OpenAI Responses JSON body to an Anthropic message JSON body", () => {
@@ -88,14 +89,36 @@ describe("openAIResponseToAnthropicMessage", () => {
     expect(result.stop_reason).toBe("tool_use");
   });
 
-  it("degrades unparseable arguments to an empty object instead of throwing", () => {
+  it("refuses unparseable arguments rather than inventing an empty object", () => {
     // A response truncated by max_output_tokens can cut the JSON mid-object.
-    const result = openAIResponseToAnthropicMessage({
+    // This used to degrade to `input: {}`, which is worse than failing: the
+    // client runs the tool with arguments the model never produced — a search
+    // with no query, a delete with no filter. Throwing here reaches the
+    // cross-route catch, which marks the attempt failed and degrades to
+    // Anthropic, so the caller still gets a real answer.
+    expect(() => openAIResponseToAnthropicMessage({
       id: "resp_4",
       output: [{ type: "function_call", call_id: "call_1", name: "search", arguments: "{\"q\":\"unter" }],
       usage: {},
+    })).toThrow(OpenAIProtocolError);
+  });
+
+  it("refuses a function call that names no tool", () => {
+    expect(() => openAIResponseToAnthropicMessage({
+      id: "resp_5",
+      output: [{ type: "function_call", call_id: "call_1", name: "", arguments: "{}" }],
+      usage: {},
+    })).toThrow(OpenAIProtocolError);
+  });
+
+  it("reports a refusal as a refusal, not as a completed turn", () => {
+    const result = openAIResponseToAnthropicMessage({
+      id: "resp_6",
+      output: [{ type: "message", content: [{ type: "refusal", refusal: "I can't help with that." }] }],
+      usage: {},
     });
 
-    expect(result.content).toEqual([{ type: "tool_use", id: "call_1", name: "search", input: {} }]);
+    expect(result.content).toEqual([{ type: "text", text: "I can't help with that." }]);
+    expect(result.stop_reason).toBe("refusal");
   });
 });

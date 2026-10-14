@@ -24,11 +24,17 @@ export interface OpenAIFunctionCallOutput {
   output: string;
 }
 
-export type OpenAIInputContent =
-  | OpenAIInputText
-  | OpenAIOutputText
-  | OpenAIFunctionCall
-  | OpenAIFunctionCallOutput;
+export interface OpenAIRefusal {
+  type: "refusal";
+  refusal: string;
+}
+
+/**
+ * What may appear inside a message's `content`: text only. Function calls and
+ * their outputs are top-level input items (see `OpenAIInputItem`), never
+ * nested here, so they are deliberately absent from this union.
+ */
+export type OpenAIInputContent = OpenAIInputText | OpenAIOutputText;
 
 export interface OpenAIInputMessage {
   role: OpenAIInputRole;
@@ -71,7 +77,12 @@ export interface OpenAIResponsesRequest {
 export interface OpenAIResponseOutputMessage {
   type: "message";
   role?: "assistant";
-  content: OpenAIOutputText[];
+  /**
+   * A refusal is a first-class part here, not an error: the model answers with
+   * `refusal` in place of `output_text`. Treating it as text would report the
+   * turn as a normal completion.
+   */
+  content: Array<OpenAIOutputText | OpenAIRefusal>;
 }
 
 /**

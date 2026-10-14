@@ -5,7 +5,14 @@ import type {
   AnthropicToolResultBlock,
   AnthropicToolUseBlock,
 } from "./anthropic-types.js";
-import type { OpenAIFunctionCall, OpenAIFunctionCallOutput, OpenAIInputContent, OpenAIInputItem, OpenAIInputMessage, OpenAIResponsesRequest } from "./openai-responses-types.js";
+import type {
+  OpenAIFunctionCall,
+  OpenAIFunctionCallOutput,
+  OpenAIInputContent,
+  OpenAIInputItem,
+  OpenAIInputMessage,
+  OpenAIResponsesRequest,
+} from "./openai-responses-types.js";
 import { parseModelRef } from "./model-ref.js";
 
 function parseArguments(args: string): unknown {
@@ -16,36 +23,38 @@ function parseArguments(args: string): unknown {
   }
 }
 
-function textFromOpenAI(block: OpenAIInputContent): string | null {
-  if (block.type === "input_text" || block.type === "output_text") return block.text;
-  return null;
-}
+/**
+ * A content block as it may actually arrive on the wire. The canonical shape
+ * puts function calls and their outputs at the top level of `input` — that is
+ * what `OpenAIInputContent` encodes and what we emit — but this is an inbound
+ * endpoint, and a client is free to send the nested form anyway. Reading
+ * `block.text` off such a block yields undefined and takes the whole request
+ * down with a TypeError, so the nested form is decoded here rather than
+ * trusted to be absent.
+ */
+type InboundContentBlock = OpenAIInputContent | OpenAIFunctionCall | OpenAIFunctionCallOutput;
 
 function messageContentToAnthropic(message: OpenAIInputMessage): AnthropicContent {
-  const blocks = message.content.map((block): AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock | null => {
-    const text = textFromOpenAI(block);
-    if (text !== null) return { type: "text", text };
+  const blocks: AnthropicBlock[] = [];
 
+  for (const block of message.content as InboundContentBlock[]) {
     if (block.type === "function_call") {
-      return {
+      blocks.push({
         type: "tool_use",
         id: block.call_id,
         name: block.name,
         input: parseArguments(block.arguments),
-      };
+      });
+      continue;
     }
-
     if (block.type === "function_call_output") {
-      return {
-        type: "tool_result",
-        tool_use_id: block.call_id,
-        content: block.output,
-      };
+      blocks.push({ type: "tool_result", tool_use_id: block.call_id, content: block.output });
+      continue;
     }
+    blocks.push({ type: "text", text: block.text });
+  }
 
-    return null;
-  }).filter((block): block is AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock => block !== null);
-
+  // A lone text block round-trips back to the plain-string form Anthropic uses.
   if (blocks.length === 1 && blocks[0].type === "text") return blocks[0].text;
   return blocks;
 }
@@ -57,7 +66,6 @@ function normalizeRole(role: OpenAIInputMessage["role"]): "user" | "assistant" {
 type AnthropicMessage = AnthropicMessagesRequest["messages"][number];
 type AnthropicBlock = AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock;
 
-// Messages carry no discriminant `type`, so the union is narrowed by its presence.
 function isFunctionCall(item: OpenAIInputItem): item is OpenAIFunctionCall {
   return "type" in item && item.type === "function_call";
 }
@@ -66,21 +74,12 @@ function isFunctionCallOutput(item: OpenAIInputItem): item is OpenAIFunctionCall
   return "type" in item && item.type === "function_call_output";
 }
 
-/**
- * Fold Responses `input` items into Anthropic messages.
- *
- * Function calls and their outputs arrive as top-level items with no `role`, so
- * each is attributed to the role Anthropic expects (calls to the assistant,
- * results to the user) and merged into the neighbouring message — Anthropic
- * rejects consecutive messages sharing a role.
- */
 function inputItemsToAnthropicMessages(input: OpenAIInputItem[]): AnthropicMessage[] {
   const messages: AnthropicMessage[] = [];
-
   const append = (role: "user" | "assistant", blocks: AnthropicBlock[]) => {
     if (blocks.length === 0) return;
-    const last = messages[messages.length - 1];
-    if (last && last.role === role) {
+    const last = messages.at(-1);
+    if (last?.role === role) {
       const existing = typeof last.content === "string"
         ? [{ type: "text" as const, text: last.content }]
         : last.content;
@@ -98,21 +97,16 @@ function inputItemsToAnthropicMessages(input: OpenAIInputItem[]): AnthropicMessa
         name: item.name,
         input: parseArguments(item.arguments),
       }]);
-      continue;
-    }
-
-    if (isFunctionCallOutput(item)) {
+    } else if (isFunctionCallOutput(item)) {
       append("user", [{ type: "tool_result", tool_use_id: item.call_id, content: item.output }]);
-      continue;
+    } else {
+      const content = messageContentToAnthropic(item);
+      append(normalizeRole(item.role), typeof content === "string"
+        ? [{ type: "text", text: content }]
+        : content);
     }
-
-    const content = messageContentToAnthropic(item);
-    append(normalizeRole(item.role), typeof content === "string"
-      ? [{ type: "text", text: content }]
-      : content);
   }
 
-  // A lone text block round-trips back to the plain-string form Anthropic uses.
   return messages.map(message => {
     if (Array.isArray(message.content) && message.content.length === 1 && message.content[0].type === "text") {
       return { ...message, content: message.content[0].text };
