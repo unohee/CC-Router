@@ -704,6 +704,145 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  it("degrades to Anthropic when a tool stream is invalid before the first byte", async () => {
+    // The fail-closed guards raise OpenAIProtocolError. Nothing had been
+    // written yet, so the request is still salvageable: it must reach
+    // Anthropic, not end as an empty 200 the client cannot distinguish from a
+    // real answer.
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+    const nextSpy = vi.fn();
+    const app = express();
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "codex", provider: "openai_subscription", accessToken: "a",
+        refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+      }),
+      modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+      crossProviderFallback: true,
+      hasAvailableAnthropicAccount: () => false,
+      forwardOpenAI: async () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+            // A function call announced with no name: unrunnable.
+            controller.enqueue(encoder.encode(sse({
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { type: "function_call", call_id: "c1", name: "" },
+            })));
+            controller.close();
+          },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+    app.use((_req, _res, next) => { nextSpy(); next(); });
+    app.use((_req, res) => res.status(200).json({ servedBy: "anthropic" }));
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-5", max_tokens: 8,
+          messages: [{ role: "user", content: "hi" }], stream: true,
+        }),
+      });
+
+      expect(await res.json()).toEqual({ servedBy: "anthropic" });
+      expect(nextSpy).toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+  });
+
+  it("ends an already-started stream with an error event when the tool call turns out invalid", async () => {
+    // Past the first byte nothing can be retried. The stream must still carry
+    // a terminal error: stopping silently leaves the client unable to tell a
+    // refused response from a complete one.
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+    const app = express();
+
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => ({
+        id: "codex", provider: "openai_subscription", accessToken: "a",
+        refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+      }),
+      modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+      forwardOpenAI: async () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+            // Real text goes out first, committing the response...
+            controller.enqueue(encoder.encode(sse({ type: "response.output_text.delta", output_index: 0, delta: "Checking" })));
+            // ...then a tool call whose arguments never parse.
+            controller.enqueue(encoder.encode(sse({
+              type: "response.output_item.added",
+              output_index: 1,
+              item: { type: "function_call", call_id: "c1", name: "search" },
+            })));
+            controller.enqueue(encoder.encode(sse({
+              type: "response.function_call_arguments.delta", output_index: 1, delta: "{\"q\":\"unter",
+            })));
+            controller.enqueue(encoder.encode(sse({
+              type: "response.output_item.done", output_index: 1, item: { type: "function_call" },
+            })));
+            controller.close();
+          },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-5.6-terra", max_tokens: 8,
+          messages: [{ role: "user", content: "hi" }], stream: true,
+        }),
+      });
+
+      const body = await res.text();
+      expect(body).toContain("Checking");
+      expect(body).toContain('"type":"error"');
+      expect(body).toContain("Invalid or incomplete response from OpenAI");
+
+      // Arguments stream out as they arrive, so the partial JSON has already
+      // gone — that cannot be undone once the response is committed. What the
+      // guard buys is that the tool call is never *completed*: the block is
+      // never stopped and no message_delta/message_stop arrives, so a client
+      // reading to the end sees a terminated response rather than a tool call
+      // it should run. The error event is the last thing on the wire.
+      expect(body).not.toContain("content_block_stop");
+      expect(body).not.toContain("message_delta");
+      expect(body).not.toContain("message_stop");
+      expect(body.trimEnd().endsWith(
+        'data: {"type":"error","error":{"type":"api_error","message":"Invalid or incomplete response from OpenAI"}}',
+      )).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => err ? reject(err) : resolve());
+      });
+    }
+  });
+
   describe("session affinity", () => {
     const openAIAccount = {
       id: "openai-victor",

@@ -4,6 +4,7 @@ import { selectRoute } from "../providers/route-selector.js";
 import { openAIModelForClaudeModel } from "../protocol/model-ref.js";
 import { anthropicToOpenAIResponses } from "../protocol/anthropic-to-openai.js";
 import { openAIResponseToAnthropicMessage } from "../protocol/openai-response-to-anthropic.js";
+import { OpenAIProtocolError } from "../protocol/openai-function-call.js";
 import { createOpenAIStreamToAnthropicNormalizer, openAIStreamFailure } from "../protocol/openai-stream-to-anthropic.js";
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
@@ -464,8 +465,23 @@ async function sendOpenAIStreamAsAnthropic(
     flushPending();
   } catch (err) {
     // A pre-first-byte failure leaves the response untouched so the caller can
-    // still fall through to Anthropic; anything else ends the stream as before.
-    if (err instanceof UpstreamStreamFailure && !wroteAnything) throw err;
+    // still fall through to Anthropic. An invalid tool stream counts: the
+    // normalizer raises it rather than forward a tool call built from a
+    // truncated or malformed stream, and degrading to Anthropic answers the
+    // request properly. Without this it would fall to the res.end() below and
+    // the client would receive an empty 200 — the exact silence this route
+    // already raises UpstreamStreamFailure to avoid.
+    const salvageable = err instanceof UpstreamStreamFailure || err instanceof OpenAIProtocolError;
+    if (salvageable && !wroteAnything) throw err;
+    // Past the first byte nothing can be retried, but the stream must not just
+    // stop: without a terminal event the client cannot tell a refused response
+    // from a complete one.
+    if (err instanceof OpenAIProtocolError) {
+      res.write(encodeSseEvent({
+        type: "error",
+        error: { type: "api_error", message: "Invalid or incomplete response from OpenAI" },
+      }));
+    }
     res.end();
     return;
   }
