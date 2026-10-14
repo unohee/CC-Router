@@ -1,3 +1,5 @@
+import { OpenAIProtocolError, parseOpenAIFunctionArguments } from "./openai-function-call.js";
+
 interface OpenAIStreamEventItem {
   id?: string;
   type?: string;
@@ -68,6 +70,13 @@ interface OpenBlock {
   kind: "text" | "tool_use";
   /** Whether any input_json_delta has been emitted for this tool_use block. */
   sentArgumentDelta: boolean;
+  /**
+   * Every argument fragment forwarded so far, concatenated. Kept so the whole
+   * JSON can be validated once the item closes: the client is about to run
+   * this tool, and arguments that do not parse mean it would run with
+   * something the model never produced.
+   */
+  argumentsJson: string;
 }
 
 export function createOpenAIStreamToAnthropicNormalizer(
@@ -82,16 +91,18 @@ export function createOpenAIStreamToAnthropicNormalizer(
   let blocks = new Map<number, OpenBlock>();
   let nextIndex = 0;
   let sawToolUse = false;
+  let sawRefusal = false;
 
   const reset = () => {
     blocks = new Map();
     nextIndex = 0;
     sawToolUse = false;
+    sawRefusal = false;
   };
 
   const openTextBlock = (outputIndex: number): AnthropicStreamEvent[] => {
     if (blocks.has(outputIndex)) return [];
-    const block: OpenBlock = { index: nextIndex++, kind: "text", sentArgumentDelta: false };
+    const block: OpenBlock = { index: nextIndex++, kind: "text", sentArgumentDelta: false, argumentsJson: "" };
     blocks.set(outputIndex, block);
     return [{
       type: "content_block_start",
@@ -138,7 +149,12 @@ export function createOpenAIStreamToAnthropicNormalizer(
       if (event.type === "response.output_item.added") {
         if (event.item?.type !== "function_call") return [];
         if (blocks.has(outputIndex)) return [];
-        const block: OpenBlock = { index: nextIndex++, kind: "tool_use", sentArgumentDelta: false };
+        if (!event.item.call_id?.trim() || !event.item.name?.trim()) {
+          throw new OpenAIProtocolError("Invalid OpenAI function call metadata");
+        }
+        const block: OpenBlock = {
+          index: nextIndex++, kind: "tool_use", sentArgumentDelta: false, argumentsJson: "",
+        };
         blocks.set(outputIndex, block);
         sawToolUse = true;
         return [{
@@ -146,8 +162,8 @@ export function createOpenAIStreamToAnthropicNormalizer(
           index: block.index,
           content_block: {
             type: "tool_use",
-            id: event.item.call_id ?? event.item.id ?? "",
-            name: event.item.name ?? "",
+            id: event.item.call_id,
+            name: event.item.name,
             input: {},
           },
         }];
@@ -166,10 +182,24 @@ export function createOpenAIStreamToAnthropicNormalizer(
         ];
       }
 
+      // A refusal streams as text but is not an ordinary completion — it has to
+      // reach the client as stop_reason "refusal", not "end_turn".
+      if (event.type === "response.refusal.delta") {
+        sawRefusal = true;
+        const prefix = openTextBlock(outputIndex);
+        const block = blocks.get(outputIndex);
+        return [...prefix, {
+          type: "content_block_delta",
+          index: block?.index ?? 0,
+          delta: { type: "text_delta", text: event.delta ?? "" },
+        }];
+      }
+
       if (event.type === "response.function_call_arguments.delta") {
         const block = blocks.get(outputIndex);
         if (!block || block.kind !== "tool_use") return [];
         block.sentArgumentDelta = true;
+        block.argumentsJson += event.delta ?? "";
         return [{
           type: "content_block_delta",
           index: block.index,
@@ -186,6 +216,7 @@ export function createOpenAIStreamToAnthropicNormalizer(
         if (!block || block.kind !== "tool_use") return [];
         if (block.sentArgumentDelta || !event.arguments) return [];
         block.sentArgumentDelta = true;
+        block.argumentsJson = event.arguments;
         return [{
           type: "content_block_delta",
           index: block.index,
@@ -199,22 +230,38 @@ export function createOpenAIStreamToAnthropicNormalizer(
       // the branch above already supplied them.
       if (event.type === "response.output_item.done") {
         const block = blocks.get(outputIndex);
-        const argumentEvent = block?.kind === "tool_use" && !block.sentArgumentDelta && event.item?.arguments
+        const atomicArguments = block?.kind === "tool_use" && !block.sentArgumentDelta
+          ? event.item?.arguments ?? ""
+          : "";
+        if (block?.kind === "tool_use") {
+          if (atomicArguments) block.argumentsJson = atomicArguments;
+          // Throws if the accumulated JSON is unparseable. The item is closing,
+          // so this is the last moment the whole argument string is known and
+          // the attempt can still be failed instead of handed to the client.
+          parseOpenAIFunctionArguments(block.argumentsJson);
+        }
+        const argumentEvent = block?.kind === "tool_use" && atomicArguments
           ? [{
               type: "content_block_delta",
               index: block.index,
-              delta: { type: "input_json_delta", partial_json: event.item.arguments },
+              delta: { type: "input_json_delta", partial_json: atomicArguments },
             }]
           : [];
         return [...argumentEvent, ...closeBlock(outputIndex)];
       }
 
       if (event.type === "response.completed") {
+        // A tool_use block still open at completion means the stream ended
+        // mid-call: its arguments were never validated and may be truncated.
+        // Closing it quietly would hand the client a tool call to run.
+        if ([...blocks.values()].some(block => block.kind === "tool_use")) {
+          throw new OpenAIProtocolError("OpenAI function call ended before completion");
+        }
         const usage = event.response?.usage ?? {};
         // Anything still open (a stream that ended without per-item `done`
         // events) is closed here, in the order the blocks were opened.
         const prefix = [...blocks.keys()].flatMap(closeBlock);
-        const stopReason = sawToolUse ? "tool_use" : "end_turn";
+        const stopReason = sawToolUse ? "tool_use" : sawRefusal ? "refusal" : "end_turn";
         const inputTokens = usage.input_tokens ?? 0;
         const outputTokens = usage.output_tokens ?? 0;
         opts.onUsage?.({ input_tokens: inputTokens, output_tokens: outputTokens });
