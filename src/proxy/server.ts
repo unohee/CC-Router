@@ -10,7 +10,7 @@ import { recordRateLimitCooldown } from "./model-cooldown.js";
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -1307,6 +1307,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // ─── Graceful shutdown ────────────────────────────────────────────────────
   const shutdown = () => {
     console.log(chalk.yellow("\nShutting down — saving tokens..."));
+    // This save replaces every Anthropic record on disk with the pool. Anything
+    // added to accounts.json while the server ran — by an older CLI, or by hand —
+    // is about to be destroyed, so copy it aside first and say where it went.
+    // The tokens themselves are unrecoverable once overwritten.
+    try {
+      const setAside = setAsideUnloadedAnthropicAccounts(pool.getAll().map(a => a.id));
+      if (setAside) {
+        console.log(chalk.yellow(
+          `  ${setAside.ids.join(", ")} were on disk but not in the pool — copied to ${setAside.file}`,
+        ));
+      }
+    } catch (err) {
+      console.log(chalk.red(`  Could not check for unloaded accounts: ${(err as Error).message}`));
+    }
     saveAccounts(pool.getAll());
     // Flush now: the debounce timer will not fire after exit, and losing the
     // final assignments is what makes a restart rewrite every prompt cache.

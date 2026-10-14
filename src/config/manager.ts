@@ -87,6 +87,33 @@ export function writeAnthropicAccountsPreservingOtherProviders(data: AccountReco
   writeAccountsAtomicToPath(ACCOUNTS_PATH, [...data, ...nonAnthropic]);
 }
 
+/**
+ * Copy off the Anthropic records on disk that the running pool does not hold.
+ *
+ * The server's saves replace every Anthropic record with its in-memory pool, so
+ * a record that reached disk by another route (a hand edit, an older CLI) is
+ * destroyed by the next save with no trace. Calling this just before such a
+ * save makes that loss recoverable: the records go to a sibling file, 0600 like
+ * accounts.json itself. Returns where they went, or null if there was nothing
+ * to keep.
+ */
+export function setAsideUnloadedAnthropicAccounts(
+  loadedIds: readonly string[],
+  path: string = ACCOUNTS_PATH,
+): { file: string; ids: string[] } | null {
+  const raw = readRawFromPath(path);
+  if (!Array.isArray(raw)) return null;
+  const loaded = new Set(loadedIds);
+  const orphans = (raw as AccountRecord[]).filter(a =>
+    (a.provider === undefined || a.provider === "anthropic_subscription") && !loaded.has(a.id),
+  );
+  if (orphans.length === 0) return null;
+
+  const file = `${path}.unloaded-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  writeFileSync(file, JSON.stringify(orphans, null, 2), { encoding: "utf-8", mode: 0o600 });
+  return { file, ids: orphans.map(a => a.id) };
+}
+
 export function upsertAccountRecord(record: AccountRecord): void {
   ensureConfigDir();
   const existing = readAccountsRaw() as AccountRecord[];

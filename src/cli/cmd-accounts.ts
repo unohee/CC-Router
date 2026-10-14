@@ -4,6 +4,7 @@ import { loadAccounts, loadOpenAIAccounts, accountsFileExists, upsertAccountReco
 import { saveAccounts } from "../proxy/token-refresher.js";
 import { formatExpiry, redactToken } from "../utils/token-extractor.js";
 import { PROXY_PORT } from "../config/paths.js";
+import { probeRouter, addAccountToRouter, removeAccountFromRouter, listLiveAccounts } from "./live-router.js";
 import { createOpenAIAccountRecord } from "../providers/openai/account-record.js";
 import { loginOpenAIWithDeviceCode } from "../providers/openai/device-oauth.js";
 import type { Account } from "../proxy/types.js";
@@ -101,11 +102,40 @@ export function registerAccounts(program: Command): void {
     .action(async () => {
       const { setupSingleAccount } = await import("./cmd-setup.js");
 
+      // A running router owns accounts.json: it rewrites every Anthropic record
+      // from its in-memory pool on each refresh and on shutdown. Writing the file
+      // here would hand the new account to the next such save to delete, so when
+      // a router is up the account goes in through its API instead.
+      const probe = await probeRouter(PROXY_PORT);
+      if (probe.state === "unreachable") {
+        console.error(chalk.red(`\n✗ A router seems to be running but its API did not answer.`));
+        console.error(chalk.gray(`  ${probe.reason}`));
+        console.error(chalk.gray("  Adding to accounts.json now would be undone when it next saves."));
+        console.error(chalk.gray("  Stop it (cc-router stop) and re-run, or fix the API first.\n"));
+        process.exitCode = 1;
+        return;
+      }
+
       const existing = accountsFileExists() ? loadAccounts() : [];
       const account = await setupSingleAccount(existing.length + 1);
 
       if (!account) {
         console.log(chalk.yellow("\nNo account added.\n"));
+        return;
+      }
+
+      if (probe.state === "live") {
+        const result = await addAccountToRouter(probe.router, account);
+        if (!result.ok) {
+          console.error(chalk.red(`\n✗ The running router rejected "${account.id}": HTTP ${result.status}`));
+          console.error(chalk.gray(`  ${result.message}`));
+          console.error(chalk.gray("  Nothing was written — the account was not added.\n"));
+          process.exitCode = 1;
+          return;
+        }
+        const total = (await listLiveAccounts(probe.router).catch(() => [])).length;
+        console.log(chalk.green(`\n✓ Account "${account.id}" added to the running router${total ? ` (${total} total)` : ""}.\n`));
+        console.log(chalk.gray("  It is in the pool and on disk. No restart needed.\n"));
         return;
       }
 
@@ -117,7 +147,7 @@ export function registerAccounts(program: Command): void {
 
       saveAccounts(merged);
       console.log(chalk.green(`\n✓ Account "${account.id}" added (${merged.length} total).\n`));
-      console.log(chalk.gray("  Restart the proxy to load the new account: cc-router start\n"));
+      console.log(chalk.gray("  Start the proxy to load it: cc-router start\n"));
     });
 
   // ── accounts add-openai ──────────────────────────────────────────────────
@@ -227,6 +257,27 @@ export function registerAccounts(program: Command): void {
         default: false,
       });
       if (!sure) { console.log(chalk.gray("Cancelled.")); return; }
+
+      // Same ownership rule as `add`: deleting the record from disk under a
+      // running router only lasts until its next save rewrites the file from
+      // the pool, which still holds the account.
+      const probe = await probeRouter(PROXY_PORT);
+      if (probe.state === "unreachable") {
+        console.error(chalk.red(`✗ A router seems to be running but its API did not answer.`));
+        console.error(chalk.gray(`  ${probe.reason}`));
+        console.error(chalk.gray("  Removing from accounts.json now would be undone when it next saves.\n"));
+        process.exit(1);
+      }
+      if (probe.state === "live") {
+        const result = await removeAccountFromRouter(probe.router, id);
+        if (!result.ok) {
+          console.error(chalk.red(`✗ The running router refused to remove "${id}": HTTP ${result.status}`));
+          console.error(chalk.gray(`  ${result.message}\n`));
+          process.exit(1);
+        }
+        console.log(chalk.green(`✓ Removed "${id}" from the running router. No restart needed.`));
+        return;
+      }
 
       const removed = removeAccountRecordById(id);
       if (!removed) {
