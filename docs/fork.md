@@ -30,6 +30,14 @@ with their tests and their original authorship:
 | `08c69cb` | Tool arguments delivered whole, with no preceding delta | `a9e004d` |
 | `0c91943` | Fail closed on an invalid tool stream | `febc7f8`, `c7966a7` |
 
+One more change came from this fork's own history rather than upstream: fork PR #2
+(`3209acb`, now `d0b0f68`), which separates "is the response finished?" from "did the account
+serve the session?" so a mid-stream failure re-pins the session. It had merged on the fork's
+`main` but never reached this trunk; it composes with the fail-closed work above, so an
+invalid tool call after the first byte both ends the stream with an error event and moves the
+session. Fork PRs #3 and #4 (build-info, linked-install guard) were dropped — both sat on the
+self-update code that no longer exists.
+
 The fail-closed behaviour changed a decision of ours. Unparseable tool arguments used to
 degrade to `input: {}`; a response truncated mid-JSON then reached the client as a
 well-formed tool call carrying arguments the model never produced. It now raises, and
