@@ -3,7 +3,10 @@
 **Local multi-account router for Claude Max and OpenAI ChatGPT/Codex subscriptions.**  
 Distribute Claude Code requests across Claude subscriptions, and expose an OpenAI Responses-compatible route for Codex CLI through the same proxy.
 
-[![npm](https://img.shields.io/npm/v/ai-cc-router)](https://www.npmjs.com/package/ai-cc-router)
+> A fork of [VictorMinemu/CC-Router](https://github.com/VictorMinemu/CC-Router), maintained
+> independently since October 2026. It is not published to npm and does not update itself;
+> see [docs/fork.md](docs/fork.md) for what diverged and why.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ![CC-Router Dashboard](assets/dashboard.png)
@@ -26,7 +29,6 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 - **Guided setup wizard** — interactive `cc-router setup` extracts tokens from Keychain or credentials file, configures everything
 - **Live dashboard** — real-time terminal UI showing account health, request counts, token usage, recent activity
 - **Proxy authentication** — optional Bearer / x-api-key secret for internet-exposed deployments
-- **Auto-update** — patch/minor releases install automatically (opt-out available)
 - **Multiple deployment modes** — background daemon, native OS auto-start (launchd/systemd), foreground, Docker Compose
 - **Cross-platform** — macOS, Linux, Windows; Node.js 20+
 
@@ -122,7 +124,8 @@ Run cc-router on a machine everyone on the team can reach — a home server, a V
 #### On the server
 
 ```bash
-npm install -g ai-cc-router
+git clone https://github.com/unohee/CC-Router.git && cd CC-Router
+npm install && npm run build && npm link
 cc-router setup          # configure the 3 shared accounts
 cc-router start          # first run asks: background/boot/server mode — choose "server mode"
 ```
@@ -194,8 +197,9 @@ Each developer then points to:
 ## Quickstart
 
 ```bash
-# 1. Install
-npm install -g ai-cc-router
+# 1. Install (from source — this fork is not on npm)
+git clone https://github.com/unohee/CC-Router.git && cd CC-Router
+npm install && npm run build && npm link
 
 # 2. Wizard: extract tokens + configure Claude Code automatically
 cc-router setup
@@ -220,8 +224,15 @@ cc-router start --reconfigure
 
 **Requirements:** Node.js 20 or 22.
 
+This fork installs from source. `npm link` puts `cc-router` on your PATH pointing at the
+checkout, so `git pull && npm run build` is the whole upgrade path.
+
 ```bash
-npm install -g ai-cc-router
+git clone https://github.com/unohee/CC-Router.git
+cd CC-Router
+npm install
+npm run build
+npm link
 ```
 
 Verify:
@@ -323,7 +334,6 @@ cc-router configure --throttle-max-inflight 4   Max concurrent in-flight request
 cc-router configure --throttle-min-interval 250 Spacing (ms) between sends at full saturation
 cc-router configure --throttle-start-util 0.75  Utilization below which no pacing applies
 cc-router configure --throttle-hard-util 0.95   Utilization at which concurrency is 1, spacing max
-cc-router configure --disable-auto-update       Never self-install newer npm releases
 
 cc-router client connect <url>       Connect Claude Code to a remote CC-Router
 cc-router client connect --desktop   Also configure Claude Desktop interception
@@ -843,44 +853,9 @@ When the proxy is running, `models set` updates the live router and persists the
 - The file is excluded by `.gitignore`
 - Writes are atomic (write to `.tmp`, then rename) — no corruption on crash
 - Keychain reads use `execFile` with a fixed argument array — no shell injection
-- Anonymous opt-out telemetry via [Aptabase](https://aptabase.com) (see [Telemetry](#telemetry) below)
+- No telemetry and no self-update: this fork makes no outbound call except to Anthropic and OpenAI
 
 See [docs/security.md](docs/security.md) for details.
-
----
-
-## Telemetry
-
-CC-Router sends a handful of anonymous lifecycle events to [Aptabase](https://aptabase.com) (privacy-first, open source, EU-hosted). The goal is simple: know how many people use the project, which versions are live, and roughly how many instances are running — so we can prioritize fixes and features.
-
-**What we send** — the entire payload lives in [`src/utils/telemetry.ts`](src/utils/telemetry.ts), audit it yourself:
-
-| Event                | When                                            | Custom props                             |
-| -------------------- | ------------------------------------------------ | ---------------------------------------- |
-| `app_started`        | First proxy start after install                 | `first_run: true`                        |
-| `setup_completed`    | Setup wizard finishes successfully               | `account_count`                          |
-| `proxy_started`      | Each `cc-router start`                           | `account_count`, `mode`                  |
-| `proxy_heartbeat`    | Every hour while the proxy is running              | `uptime_minutes`, `account_count`        |
-| `telemetry_disabled` | When you run `cc-router telemetry off`           | —                                        |
-
-Plus anonymous system props with every event: `appVersion`, `osName` (macOS/Linux/Windows), `osVersion`, `locale`, `engineVersion` (Node), and an anonymous `installId` (random UUID generated on first run, stored in `~/.cc-router/telemetry.json`).
-
-**What we never send**: IPs, OAuth tokens, account names, request content, prompts, responses, URLs, hostnames, usernames, file paths — nothing that could identify you or your usage patterns.
-
-**Disable it** — three ways, any one works:
-
-```bash
-# 1. Persistent opt-out (recommended)
-cc-router telemetry off
-
-# 2. Respect the de-facto standard (honored by many OSS tools)
-export DO_NOT_TRACK=1
-
-# 3. Project-specific override
-export CC_ROUTER_TELEMETRY=0
-```
-
-Check status anytime: `cc-router telemetry status`.
 
 ---
 
@@ -899,7 +874,7 @@ Check status anytime: `cc-router telemetry status`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Bug reports → [GitHub Issues](https://github.com/VictorMinemu/CC-Router/issues)
+Bug reports → [GitHub Issues](https://github.com/unohee/CC-Router/issues)
 
 ---
 

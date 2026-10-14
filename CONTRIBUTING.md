@@ -12,8 +12,8 @@ Open an issue using the [feature request template](.github/ISSUE_TEMPLATE/featur
 ## Development setup
 
 ```bash
-git clone https://github.com/VictorMinemu/cc-router.git
-cd cc-router
+git clone https://github.com/unohee/CC-Router.git
+cd CC-Router
 npm install
 
 # Run in dev mode (tsx, no build step)
