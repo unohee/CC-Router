@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "fs";
+import { spawnSync } from "child_process";
 
 const MOCK_DIR = vi.hoisted(() => {
   const tmp = process.env["TMPDIR"] ?? "/tmp";
@@ -70,8 +71,10 @@ describe("probeRouter", () => {
 
   it("reports stopped when the pid file names a process that is gone", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
-    // A pid that cannot be running: kill(0) throws ESRCH.
-    fs.writeFileSync(PID_FILE, "999999");
+    // Spawn and reap a child rather than picking a high number: Linux allows
+    // pid_max in the millions, so any constant can name a live process there.
+    const child = spawnSync(process.execPath, ["-e", ""]);
+    fs.writeFileSync(PID_FILE, String(child.pid));
 
     expect((await probeRouter(3456)).state).toBe("stopped");
   });
