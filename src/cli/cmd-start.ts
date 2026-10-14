@@ -10,7 +10,6 @@ import {
   type RunPreferences,
 } from "../config/manager.js";
 import { writeClaudeSettings } from "../utils/claude-config.js";
-import { checkForUpdate, performUpdate } from "../utils/self-update.js";
 import { launchDaemon } from "../daemon/launcher.js";
 import { isProxyRunning } from "../daemon/pid.js";
 import { installService } from "../daemon/service.js";
@@ -32,9 +31,6 @@ export function registerStart(program: Command): void {
       accounts: string;
       reconfigure?: boolean;
     }) => {
-      // ── Step 0: Check for updates ──────────────────────────────────────────
-      await maybeUpdate();
-
       // ── Step 1: Ensure accounts exist ──────────────────────────────────────
       if (!accountsFileExists(opts.accounts !== ACCOUNTS_PATH ? opts.accounts : undefined)) {
         console.log(chalk.yellow("\n  No accounts configured yet.\n"));
@@ -217,59 +213,6 @@ async function ensureClaudeCodeConfigured(
   } catch (err) {
     console.warn(chalk.yellow(`  ⚠ Could not configure Claude Code: ${(err as Error).message}`));
     console.warn(chalk.gray(`    Configure manually: cc-router configure`));
-  }
-}
-
-// ─── Update check ────────────────────────────────────────────────────────────
-
-async function maybeUpdate(): Promise<void> {
-  // `cc-router configure --disable-auto-update` must silence this path too.
-  // It previously governed only the server's 6-hour loop, so start kept
-  // offering (and with the confirm defaulting to yes, performing) installs
-  // the operator had explicitly turned off.
-  if (readConfig().autoUpdate === false || process.env["CC_ROUTER_NO_AUTO_UPDATE"] === "1") return;
-
-  let check;
-  try {
-    check = await checkForUpdate(true);  // force fresh check, skip disk cache
-    if (!check.updateAvailable) return;
-  } catch {
-    return; // network check is non-critical
-  }
-
-  // From here, errors should be visible
-  if (check.diff === "major") {
-    console.log(chalk.yellow(`\n  New major version available: v${check.current} → v${check.latest}`));
-    console.log(chalk.gray(`  Update manually: npm i -g ai-cc-router@${check.latest}\n`));
-    return;
-  }
-
-  console.log(chalk.cyan(`\n  Update available: v${check.current} → v${check.latest} (${check.diff})`));
-  const doUpdate = await confirm({
-    message: "Update now?",
-    default: true,
-  });
-  if (!doUpdate) return;
-
-  try {
-    const ok = await performUpdate(check.latest);
-    if (ok) {
-      console.log(chalk.green("  ✓ Updated. Restarting with new version...\n"));
-      const { spawn } = await import("child_process");
-      const child = spawn(process.execPath, process.argv.slice(1), {
-        stdio: "inherit",
-        env: process.env,
-      });
-      child.on("exit", (code) => process.exit(code ?? 0));
-      child.on("error", (err) => {
-        console.error(chalk.red(`  Failed to restart after update: ${err.message}`));
-        process.exit(1);
-      });
-      await new Promise(() => {});
-    }
-  } catch (err) {
-    console.error(chalk.yellow(`  ⚠ Update failed: ${(err as Error).message}`));
-    console.log(chalk.gray("  Continuing with current version.\n"));
   }
 }
 

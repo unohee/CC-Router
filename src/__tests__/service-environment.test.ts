@@ -16,23 +16,14 @@ describe("managed service environment", () => {
   beforeEach(() => readConfig.mockReset());
 
   describe.each(PLATFORMS)("%s", (_name, build) => {
-    it("pins the auto-update kill switch when config has it turned off", () => {
-      // The config flag alone is lost the moment anything rewrites config.json,
-      // and the service manager would then restart with updates re-armed —
-      // replacing a linked development checkout with the published build.
-      readConfig.mockReturnValue({ autoUpdate: false });
+    it("carries no self-update switch, because there is no self-update", () => {
+      // This fork installs by git checkout, not npm, so nothing in the service
+      // ever reaches for the registry. The kill switch that used to be pinned
+      // here guarded an unattended `npm i -g` that no longer exists.
+      readConfig.mockReturnValue({});
 
-      expect(build(false)).toContain("CC_ROUTER_NO_AUTO_UPDATE");
+      expect(build(false)).not.toContain("AUTO_UPDATE");
     });
-
-    it.each([{ autoUpdate: true }, { autoUpdate: undefined }, {}])(
-      "leaves the switch out for config %j",
-      (config) => {
-        readConfig.mockReturnValue(config);
-
-        expect(build(false)).not.toContain("CC_ROUTER_NO_AUTO_UPDATE");
-      },
-    );
 
     it("binds all interfaces only in server mode", () => {
       readConfig.mockReturnValue({});

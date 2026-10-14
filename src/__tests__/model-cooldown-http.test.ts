@@ -37,13 +37,12 @@ it("isolates Fable 429 across the actual proxy, session routing and health endpo
     id: "fixture", accessToken: "fixture", refreshToken: "fixture",
     expiresAt: Date.now() + 86400000, scopes: [], enabled: true,
   }]));
-  writeFileSync(join(dir, "config.json"), JSON.stringify({autoUpdate: false}));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({}));
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
     `import {startServer} from './src/proxy/server.ts'; await startServer({port:${port},litellmUrl:'http://127.0.0.1:${upstreamPort}'});`], {
     env: {...process.env, HOST: "127.0.0.1", CC_ROUTER_DAEMON: "0",
-      CC_ROUTER_NO_AUTO_UPDATE: "1", DO_NOT_TRACK: "1",
       ACCOUNTS_PATH: join(dir, "accounts.json"), CONFIG_PATH: join(dir, "config.json"),
-      SESSIONS_PATH: join(dir, "sessions.json"), TELEMETRY_PATH: join(dir, "telemetry.json")},
+      SESSIONS_PATH: join(dir, "sessions.json")},
     stdio: ["ignore", "pipe", "pipe"],
   });
   let logs = "";

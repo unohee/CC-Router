@@ -11,11 +11,8 @@ import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
-import { checkForUpdate, performUpdate, restartSelf } from "../utils/self-update.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
-import { trackEvent, startHeartbeat } from "../utils/telemetry.js";
-import { loadTelemetryState } from "../config/telemetry.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
@@ -1333,32 +1330,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  // ─── Auto-update (opt-in via config or CC_ROUTER_AUTO_UPDATE=1) ───────────
-  // Auto-update enabled by default — users can disable via config or env var
-  const cfg = readConfig();
-  const autoUpdate = cfg.autoUpdate !== false && process.env["CC_ROUTER_NO_AUTO_UPDATE"] !== "1";
-  if (autoUpdate) {
-    const AUTO_UPDATE_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
-    const runAutoUpdate = async () => {
-      try {
-        const check = await checkForUpdate();
-        if (!check.updateAvailable || check.diff === "major") return;
-        console.log(chalk.cyan(`[auto-update] v${check.current} → v${check.latest} (${check.diff})`));
-        const ok = await performUpdate(check.latest);
-        if (ok) {
-          console.log(chalk.green("[auto-update] Restarting with new version..."));
-          saveAccounts(pool.getAll());
-          restartSelf();
-        }
-      } catch (err) {
-        console.error(chalk.gray(`[auto-update] Check failed: ${(err as Error).message}`));
-      }
-    };
-    // First check 60s after startup, then every 6h
-    setTimeout(runAutoUpdate, 60_000).unref();
-    setInterval(runAutoUpdate, AUTO_UPDATE_INTERVAL).unref();
-  }
-
   // ─── Start ────────────────────────────────────────────────────────────────
   // HOST env var lets teams bind to 0.0.0.0 for LAN/VPS shared access.
   // Defaults to 127.0.0.1 (localhost-only) for single-user safety.
@@ -1369,28 +1340,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       writePid(process.pid);
     }
 
-    const totalAccountCount = accounts.length + openAIAccounts.length;
     logStartup(port, host, mode, target, {
       anthropic: accounts.length,
       openai: openAIAccounts.length,
     });
-    if (autoUpdate) console.log(chalk.gray("  Auto-update: enabled (patch/minor)"));
-
-    // Anonymous telemetry — fire-and-forget, never blocks proxy startup.
-    try {
-      const telemetryState = loadTelemetryState();
-      // First-run detection: if the install is brand new, emit app_started too
-      const firstRunAge = Date.now() - new Date(telemetryState.firstRunAt).getTime();
-      if (firstRunAge < 5 * 60 * 1000) {
-        void trackEvent("app_started", { first_run: true });
-      }
-      void trackEvent("proxy_started", {
-        account_count: totalAccountCount,
-        mode,
-      });
-      startHeartbeat(totalAccountCount);
-    } catch {
-      // never let telemetry break the proxy
-    }
   });
 }

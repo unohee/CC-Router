@@ -7,12 +7,10 @@ import { registerStatus } from "./cmd-status.js";
 import { registerAccounts } from "./cmd-accounts.js";
 import { registerConfigure } from "./cmd-configure.js";
 import { registerDocker } from "./cmd-docker.js";
-import { registerUpdate } from "./cmd-update.js";
 import { registerClient } from "./cmd-client.js";
-import { registerTelemetry } from "./cmd-telemetry.js";
 import { registerLogs } from "./cmd-logs.js";
 import { registerModels } from "./cmd-models.js";
-import { getCurrentVersion, checkForUpdate, printUpdateBanner } from "../utils/self-update.js";
+import { getCurrentVersion } from "../utils/version.js";
 
 const program = new Command();
 
@@ -48,19 +46,7 @@ registerModels(program);
 registerAccounts(program);
 registerConfigure(program);
 registerDocker(program);
-registerUpdate(program);
 registerClient(program);
-registerTelemetry(program);
 registerLogs(program);
-
-// Background update check — fires on every CLI invocation, uses 6h disk cache
-// so it's essentially free after the first check. Notify on process exit.
-if (!process.env["NO_UPDATE_NOTIFIER"] && !process.env["CI"]) {
-  checkForUpdate().then((check) => {
-    if (check.updateAvailable) {
-      process.on("exit", () => printUpdateBanner(check));
-    }
-  }).catch(() => { /* silent */ });
-}
 
 program.parse();

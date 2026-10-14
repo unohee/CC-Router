@@ -244,7 +244,6 @@ export interface ProxyConfig {
   /** Deprecated typo-compatible alias for proxyRequestTimeoutMs. */
   proxyRequesTime?: number;
   /** Auto-update on patch/minor releases. Default: true (enabled). Set to false to disable. */
-  autoUpdate?: boolean;
   /** Default and alias model routing for Claude and OpenAI subscription providers. */
   modelRouting?: ModelRoutingConfig;
   /** Opt-in automatic fallback: when every Anthropic account is exhausted, reroute

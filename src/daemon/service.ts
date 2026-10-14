@@ -55,16 +55,7 @@ export function isServiceInstalled(): boolean {
 
 // ─── macOS LaunchAgent ───────────────────────────────────────────────────────
 
-/**
- * Environment for the managed process, as plist <key>/<string> pairs.
- *
- * `CC_ROUTER_NO_AUTO_UPDATE` is written whenever auto-update is off in config.
- * The config flag alone already silences both update paths, but the service
- * outlives the config: anything that rewrites `config.json` (a re-run of the
- * setup wizard, `cc-router configure`) silently re-arms an unattended
- * `npm i -g`, which replaces a linked development checkout with the published
- * build. Pinning the intent into the plist keeps the switch off across that.
- */
+/** Environment for the managed process, as plist <key>/<string> pairs. */
 function escapeXml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -78,7 +69,6 @@ function managedEnvEntries(serverMode: boolean): Array<[string, string]> {
     ["CC_ROUTER_SERVICE", "1"],
   ];
   if (serverMode) entries.push(["HOST", "0.0.0.0"]);
-  if (readConfig().autoUpdate === false) entries.push(["CC_ROUTER_NO_AUTO_UPDATE", "1"]);
   return entries;
 }
 

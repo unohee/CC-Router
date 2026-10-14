@@ -48,8 +48,6 @@ export function registerConfigure(program: Command): void {
       generatePassword?: boolean;
       setPassword?: string;
       removePassword?: boolean;
-      enableAutoUpdate?: boolean;
-      disableAutoUpdate?: boolean;
       enableFallback?: boolean;
       disableFallback?: boolean;
       enableSessionPoolOpenai?: boolean;
@@ -116,12 +114,9 @@ export function registerConfigure(program: Command): void {
         }
         const cfg = readConfig();
         const pwStatus = cfg.proxySecret ? chalk.green("yes") : chalk.gray("no");
-        const autoUpdateEnabled = cfg.autoUpdate !== false;
-        const auStatus = autoUpdateEnabled ? chalk.green("enabled") : chalk.gray("disabled");
         const fallbackEnabled = cfg.crossProviderFallback === true;
         const fbStatus = fallbackEnabled ? chalk.green("enabled") : chalk.gray("disabled");
         console.log(`    Password protected:  ${pwStatus}`);
-        console.log(`    Auto-update:         ${auStatus}`);
         console.log(`    Cross-provider fallback: ${fbStatus}`);
         const affinity = cfg.sessionAffinity !== false;
         console.log(`    Session affinity:    ${affinity ? chalk.green("enabled") : chalk.gray("disabled")}`);
@@ -142,22 +137,6 @@ export function registerConfigure(program: Command): void {
         } else {
           console.log(`    Model tier routing:  ${chalk.gray("disabled")}`);
         }
-        return;
-      }
-
-      if (opts.enableAutoUpdate) {
-        writeConfig({ ...readConfig(), autoUpdate: true });
-        console.log(chalk.green("✓ Auto-update enabled."));
-        console.log(chalk.gray("  The proxy will check for updates every 6h and install patch/minor releases."));
-        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
-        return;
-      }
-
-      if (opts.disableAutoUpdate) {
-        writeConfig({ ...readConfig(), autoUpdate: false });
-        console.log(chalk.green("✓ Auto-update disabled."));
-        console.log(chalk.gray("  Use `cc-router update` to update manually."));
-        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }
 
