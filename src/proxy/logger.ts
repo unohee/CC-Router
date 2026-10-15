@@ -212,3 +212,19 @@ export function logStartup(port: number, host: string, mode: string, target: str
 ╚══════════════════════════════════════════════╝
 `));
 }
+
+/**
+ * A request refused because its client is on `blockedUserAgents`.
+ *
+ * Says which pattern matched and what the client called itself, so an operator
+ * who sees a client suddenly stop working can tell the router did it on
+ * purpose. The user-agent is client-controlled: cut it to one bounded,
+ * printable line before it reaches the log.
+ */
+export function logBlockedClient(pattern: string, userAgent: string | undefined, suppressed: number): void {
+  const ua = (userAgent ?? "none").replace(/[^\x20-\x7e]/g, "?").slice(0, 80);
+  console.log(
+    chalk.yellow(`[${ts()}] [BLOCKED] ${pattern}: refused a request from "${ua}"`)
+    + (suppressed > 0 ? chalk.gray(` (+${suppressed} more since the last line)`) : "")
+  );
+}

@@ -16,7 +16,7 @@ import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } fro
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -32,6 +32,7 @@ import { SessionRouter } from "./session-router.js";
 import type { SessionTarget, TargetMetrics } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import { mountWebDashboard } from "./web-dashboard.js";
+import { normalizeBlockedUserAgents, matchBlockedUserAgent, blockedClientError, createBlockLogGate } from "./client-block.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
 
@@ -558,6 +559,30 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         return;
       }
       next();
+    });
+  }
+
+  // ─── Blocked clients ───────────────────────────────────────────────────────
+  // Opt-in (`blockedUserAgents`). Runs after authentication so an anonymous
+  // caller cannot probe the list, and before every /v1 handler so a refused
+  // client never reaches account selection, the throttle or upstream.
+  const blockedUserAgents = normalizeBlockedUserAgents(initialConfig.blockedUserAgents);
+  if (blockedUserAgents.length > 0) {
+    const shouldLogBlock = createBlockLogGate();
+    app.use("/v1", (req, res, next) => {
+      const userAgent = req.headers["user-agent"];
+      const pattern = matchBlockedUserAgent(userAgent, blockedUserAgents);
+      if (pattern === null) return next();
+
+      const gate = shouldLogBlock(pattern);
+      if (gate.log) {
+        logBlockedClient(pattern, userAgent, gate.suppressed);
+        stats.addLog({
+          ts: Date.now(), accountId: "router", model: "-", type: "error", statusCode: 403,
+          details: `blocked client ${pattern} — refused before any account was chosen`,
+        });
+      }
+      res.status(403).json(blockedClientError(pattern));
     });
   }
 

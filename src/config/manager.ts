@@ -244,6 +244,12 @@ export interface ProxyConfig {
   /** Deprecated typo-compatible alias for proxyRequestTimeoutMs. */
   proxyRequesTime?: number;
   /** Auto-update on patch/minor releases. Default: true (enabled). Set to false to disable. */
+  /** Opt-in: refuse /v1 requests whose User-Agent starts with any of these
+   *  (case-insensitive prefixes, e.g. "omp/") with a 403 that says why, before an
+   *  account is chosen. For clients upstream rejects on subscription tokens: left
+   *  alone, each one gets a header-less 429 that cools the account it landed on.
+   *  Default: none blocked. */
+  blockedUserAgents?: string[];
   /** Default and alias model routing for Claude and OpenAI subscription providers. */
   modelRouting?: ModelRoutingConfig;
   /** Opt-in automatic fallback: when every Anthropic account is exhausted, reroute
