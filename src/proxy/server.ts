@@ -6,14 +6,17 @@ import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Request } from "express";
 import { TokenPool, EmptyPoolError, NoAvailableAccountError } from "./token-pool.js";
-import { recordRateLimitCooldown } from "./model-cooldown.js";
+import {
+  recordRateLimitCooldown, parseRetryAfterSeconds, isBare429, bare429CooldownSeconds,
+  resetBare429Streak, DEFAULT_429_COOLDOWN_SECONDS,
+} from "./model-cooldown.js";
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
@@ -1048,6 +1051,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
         if (rl) account.rateLimits = rl;
 
+        // A served request ends a bare-429 streak: the "consecutive" in the
+        // escalating cooldown means refused again with nothing served between.
+        if (status < 400) resetBare429Streak(account);
+
         if (status === 401) {
           // Token invalid or expired mid-request.
           // Forward the 401 to the client (Claude Code will retry on 401).
@@ -1065,12 +1072,28 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // Rate limited — put account on cooldown for Retry-After seconds.
           stats.totalErrors++;
           account.errorCount++;
-          const rawRetryAfter = String(proxyRes.headers["retry-after"] ?? "60");
-          const numericRetry = Number(rawRetryAfter);
-          const parsedRetry = Number.isFinite(numericRetry) ? numericRetry
-            : (Date.parse(rawRetryAfter) - Date.now()) / 1000;
-          const retryAfter = Number.isFinite(parsedRetry) && parsedRetry > 0 ? Math.ceil(parsedRetry) : 60;
+          const rawRetryAfterHeader = proxyRes.headers["retry-after"];
+          const rawRetryAfter = Array.isArray(rawRetryAfterHeader) ? rawRetryAfterHeader[0] : rawRetryAfterHeader;
+          const statedRetry = parseRetryAfterSeconds(rawRetryAfter);
+          // A 429 that names no window, sends no Retry-After and reports the
+          // account as still allowed says nothing about this account's quota,
+          // so it gets a short, escalating cooldown instead of a flat minute.
+          const bare = isBare429(statedRetry, rl, req._ccAnthropicModel);
+          const retryAfter = statedRetry
+            ?? (bare ? bare429CooldownSeconds(account) : DEFAULT_429_COOLDOWN_SECONDS);
           const scoped = recordRateLimitCooldown(account, req._ccAnthropicModel, rl?.claim ?? "", retryAfter);
+          log429Diagnostic({
+            accountId: account.id,
+            bare,
+            cooldownSeconds: retryAfter,
+            streak: bare ? account.bare429Streak ?? 0 : 0,
+            retryAfter: rawRetryAfter,
+            limitStatus: rl?.status ?? "none",
+            claim: rl?.claim ?? "",
+            userAgent: (req as Request).headers["user-agent"],
+            sessionId: String((req as Request).headers["x-claude-code-session-id"] ?? "").trim() || undefined,
+            model: req._ccAnthropicModel,
+          });
           const windowLabel = rl?.claim === "five_hour" ? "5-hour limit"
             : rl?.claim === "seven_day" ? "weekly limit"
             : null;
@@ -1175,7 +1198,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
                 // `entry` is the object stats is holding, so this reaches the
                 // dashboard the same way the usage above does.
                 const reason = body.error?.message?.trim();
-                if (status >= 400 && reason) {
+                if (status === 429 && reason) {
+                  // Append rather than replace: the cooldown the router chose
+                  // is what an operator reads this line for, and the old
+                  // replacement dropped it.
+                  entry.details = `${entry.details ?? "rate limited"} — upstream said: ${reason.slice(0, 200)}`;
+                  logError(account.id, 429, `upstream said: ${reason.slice(0, 200)}`);
+                } else if (status >= 400 && reason) {
                   entry.details = `upstream refused (${status}): ${reason.slice(0, 200)}`;
                 }
               } catch { /* ignore */ }

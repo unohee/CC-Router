@@ -41,6 +41,12 @@ export interface Account {
   coolingUntil?: number;
   /** Runtime-only deadlines per model family; independent of global cooldown. */
   modelCooldowns?: Record<string, number>;
+  /** Runtime-only: consecutive "bare" 429s (no stated reason) since the last
+   *  success. Drives the escalating cooldown in model-cooldown.ts; never
+   *  persisted — `serialize` picks fields explicitly. */
+  bare429Streak?: number;
+  /** Runtime-only: when the last bare 429 landed, so a stale streak expires. */
+  lastBare429At?: number;
   requestCount: number;
   errorCount: number;
   lastUsed: number;      // Unix timestamp in ms

@@ -140,6 +140,55 @@ export function logError(accountId: string, status: number, message: string): vo
   console.log(chalk.red(`[${ts()}] [ERROR] ${accountId}:${statusStr} ${message}`));
 }
 
+/** What the router knew about one upstream 429, gathered at header time. */
+export interface Refusal429Diagnostic {
+  accountId: string;
+  /** No stated reason for the refusal — see `isBare429`. */
+  bare: boolean;
+  cooldownSeconds: number;
+  /** Position in the bare-429 schedule; 0 when the refusal was not bare. */
+  streak: number;
+  /** Raw Retry-After header, undefined when upstream sent none. */
+  retryAfter: string | undefined;
+  /** Unified rate-limit status header, "none" when the response carried none. */
+  limitStatus: string;
+  claim: string;
+  userAgent: string | undefined;
+  sessionId: string | undefined;
+  model: string | undefined;
+}
+
+/**
+ * One line per upstream 429 saying who asked and what upstream said.
+ *
+ * The plain "rate limited — cooldown 60s" line cannot tell a quota that is
+ * really gone from a request upstream simply refused, and it names no client.
+ * When a non-Claude-Code client shares the pool its refusals look exactly like
+ * the account's own, and the only way to tell them apart was to catch the
+ * activity log before its 50 entries rolled over. The user-agent and the raw
+ * Retry-After are what separate the cases; neither is a secret, and no auth
+ * header is ever read here.
+ */
+export function format429Diagnostic(d: Refusal429Diagnostic): string {
+  // Header values are client-controlled: keep this to one printable line.
+  const ua = d.userAgent === undefined ? "none"
+    : JSON.stringify(d.userAgent.replace(/[^\x20-\x7e]/g, "?").slice(0, 80));
+  return [
+    `429 ${d.bare ? `bare#${d.streak}` : "stated"}`,
+    `cooldown=${d.cooldownSeconds}s`,
+    `retry-after=${d.retryAfter === undefined ? "absent" : JSON.stringify(d.retryAfter.slice(0, 40))}`,
+    `limit=${d.limitStatus}`,
+    `claim=${d.claim === "" ? "none" : d.claim}`,
+    `model=${d.model ?? "-"}`,
+    `session=${d.sessionId ? d.sessionId.slice(0, 8) : "none"}`,
+    `ua=${ua}`,
+  ].join(" ");
+}
+
+export function log429Diagnostic(d: Refusal429Diagnostic): void {
+  console.log(chalk.red(`[${ts()}] [429] ${d.accountId}: ${format429Diagnostic(d)}`));
+}
+
 export interface StartupAccountCounts {
   anthropic: number;
   openai: number;
