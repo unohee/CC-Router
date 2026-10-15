@@ -28,6 +28,7 @@ import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
 import type { SessionTarget, TargetMetrics } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
+import { mountWebDashboard } from "./web-dashboard.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import chalk from "chalk";
 
@@ -520,6 +521,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   const app = express();
   const proxyRequestTimeoutMs = getProxyRequestTimeoutMs();
+
+  // The usage page is mounted ahead of the secret check on purpose; see
+  // mountWebDashboard for why that is not an exposure.
+  mountWebDashboard(app);
 
   // ─── Proxy auth middleware ─────────────────────────────────────────────────
   // If a proxySecret is configured, all requests must present it as EITHER

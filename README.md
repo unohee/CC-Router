@@ -28,6 +28,7 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 - **Claude Desktop support** — route Cowork / Agent-mode traffic through CC-Router via mitmproxy interception (macOS, Windows, Linux)
 - **Guided setup wizard** — interactive `cc-router setup` extracts tokens from Keychain or credentials file, configures everything
 - **Live dashboard** — real-time terminal UI showing account health, request counts, token usage, recent activity
+- **Web usage page** — the same numbers in a browser at `/cc-router/dashboard`: per-account 5-hour and 7-day meters, totals, recent activity; light and dark, phone-friendly
 - **Proxy authentication** — optional Bearer / x-api-key secret for internet-exposed deployments
 - **Multiple deployment modes** — background daemon, native OS auto-start (launchd/systemd), foreground, Docker Compose
 - **Cross-platform** — macOS, Linux, Windows; Node.js 20+
@@ -856,6 +857,17 @@ When the proxy is running, `models set` updates the live router and persists the
 - No telemetry and no self-update: this fork makes no outbound call except to Anthropic and OpenAI
 
 See [docs/security.md](docs/security.md) for details.
+
+---
+
+## Web usage page
+
+Open `http://<router-host>:3456/cc-router/dashboard` (or just `/cc-router`) in any browser. It is read-only and refreshes every few seconds from `/cc-router/health`, the same data the terminal dashboard shows.
+
+- **A meter shows nothing rather than a guess.** Usage comes from upstream response headers, so an account that has not served a request since the router started reads *not measured yet*. A window with no figure and no reset time reads *no reading*: either upstream never sent one, or the window reset and a new one has not opened. Neither is drawn as 0%.
+- **Colour is never the only signal.** Meters turn amber from 75% and red from 90%, and say so in words (`hot`, `near limit`, `at limit`). A short notch on a meter marks a routing cap set below 100%.
+- **It is not behind the proxy secret.** A browser navigation cannot carry an `Authorization` header, and the page holds no data of its own — what it shows comes from `/cc-router/health`, which is already open for monitoring. Everything that has a side effect or a token behind it (`/v1/*`, `/cc-router/accounts`) still requires the secret. If the router is reachable beyond a network you trust, that means account names and utilisation are readable there; put it behind a reverse proxy or bind it to a private interface.
+- Upstream error text appears in the activity list. The page renders it as text only and ships a CSP that allows nothing but its own inline script and style, so it cannot be turned into markup.
 
 ---
 
