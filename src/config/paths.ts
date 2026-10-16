@@ -17,6 +17,20 @@ export const SESSIONS_PATH =
   process.env["SESSIONS_PATH"] ??
   path.join(CONFIG_DIR, "sessions.json");
 
+/**
+ * Hourly token usage history, so the dashboard can show more than the current
+ * process's totals. Defaults to sit beside accounts.json rather than at a fixed
+ * ~/.cc-router path: anything that already points ACCOUNTS_PATH somewhere
+ * disposable (a container volume, a test's temp directory) then gets its usage
+ * file there too, instead of writing into the real config directory.
+ */
+export const USAGE_PATH =
+  // `||`, not `??`: an empty USAGE_PATH (an ENV line with no value) would
+  // otherwise be taken as the path "", and the save would then write ".tmp"
+  // into whatever directory the process happens to be in.
+  process.env["USAGE_PATH"] ||
+  path.join(path.dirname(ACCOUNTS_PATH), "usage.json");
+
 export const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), ".claude", "settings.json");
 
 export const PROXY_PORT = parseInt(process.env["PORT"] ?? "3456", 10);

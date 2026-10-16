@@ -36,6 +36,12 @@ OpenAI subscription records use the same file but are tagged with a provider:
 
 On Linux, the file is created with mode `0600` (owner read/write only). On macOS, standard user-directory permissions apply.
 
+### Usage history
+
+The router also keeps hourly token usage in `usage.json` beside `accounts.json` (override with `USAGE_PATH`) so the dashboard can show history across restarts. It holds counts per hour and model, never credentials, account ids or session ids. It is written with mode `0600`. A copy that cannot be read is moved to `usage.json.corrupt` instead of being overwritten.
+
+`GET /cc-router/usage-history` serves a summary of that file and, like `/cc-router/health` and the dashboard page, is **not** behind the proxy secret, because a browser page cannot send one. It returns aggregates only (totals per window, day and model); anyone who can reach the port can read when the router is busy and which models it serves.
+
 ### Never commit tokens
 
 `accounts.json` is in `.gitignore`. Double-check before any commit:
@@ -91,6 +97,7 @@ In Docker mode, `accounts.json` is mounted from the host into the container. The
 | Threat | Mitigation |
 |--------|-----------|
 | accounts.json leaked | `.gitignore`, `0600` permissions, stored outside repo |
+| Usage history exposes who or what | `/cc-router/usage-history` is open by design and carries aggregates only; no account or session ids |
 | Process killed mid-refresh | Atomic write (tmp + rename) |
 | Concurrent refresh calls | Per-account lock (`Map<id, Promise>`) |
 | Shell injection in Keychain read | `execFile` with fixed arg array |

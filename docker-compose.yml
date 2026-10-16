@@ -14,6 +14,12 @@ services:
       # (`touch ~/.cc-router/sessions.json`): Docker turns a missing bind-mount
       # source into a directory, which the router then silently cannot use.
       - ${HOME}/.cc-router/sessions.json:/app/sessions.json
+      # Hourly token usage behind the dashboard's history. Without this mount it
+      # is written inside the container and lost when the container is replaced.
+      # Same warning as above: `touch ~/.cc-router/usage.json` first. (The router
+      # copes with a bind-mounted file, which cannot be replaced by rename, by
+      # writing it in place.)
+      - ${HOME}/.cc-router/usage.json:/app/usage.json
     environment:
       - PORT=3456
       - LITELLM_URL=http://litellm:4000

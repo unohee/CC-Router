@@ -19,7 +19,10 @@ import type { ThrottleGate } from "./throttle.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
-import { PROXY_PORT, LITELLM_URL } from "../config/paths.js";
+import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
+import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
+import { usageHistory, openAISample } from "./usage-history.js";
+import { createUsageSummaryProvider } from "./usage-summary.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
@@ -50,6 +53,8 @@ export interface ServerOptions {
   /** Forward to LiteLLM. If not set, goes directly to Anthropic. */
   litellmUrl?: string;
   accountsPath?: string;
+  /** Where hourly usage history is kept. Defaults to usage.json beside accounts.json. */
+  usagePath?: string;
 }
 
 export interface HealthAccountView {
@@ -239,11 +244,21 @@ function applyInputUsage(entry: LogEntry, usage: Record<string, number>): void {
   stats.totalCacheReadTokens += entry.cacheReadTokens;
   stats.totalCacheCreationTokens += entry.cacheCreationTokens;
   stats.totalInputTokens += entry.inputTokens;
+
+  // The request is counted here, on the input half, and not again on the output
+  // half: the two arrive at different moments but are one request. entry.ts is
+  // when the request began, so both halves land in the same hourly bucket.
+  usageHistory.record({
+    ts: entry.ts, provider: "anthropic", model: entry.model,
+    input: entry.inputTokens, cacheRead: entry.cacheReadTokens, cacheCreation: entry.cacheCreationTokens,
+    request: true,
+  });
 }
 
 function applyOutputUsage(entry: LogEntry, usage: Record<string, number>): void {
   entry.outputTokens = usage["output_tokens"] ?? 0;
   stats.totalOutputTokens += entry.outputTokens;
+  usageHistory.record({ ts: entry.ts, provider: "anthropic", model: entry.model, output: entry.outputTokens });
 }
 
 // ─── Rate limit header extraction ──────────────────────────────────────────
@@ -361,6 +376,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   process.on("exit", () => {
     writeSessionAssignments(sessionRouter.snapshot());
   });
+
+  // Hourly usage history. Restore before serving so a restart adds to the past
+  // instead of starting a new one. A file that is not JSON was already moved
+  // aside by the reader; one that is JSON but not a usage file is moved here.
+  // Either way the history starts empty rather than the next save overwriting
+  // what could not be read.
+  const usagePath = opts.usagePath ?? USAGE_PATH;
+  const usageRead = readUsageFile(usagePath);
+  if (usageRead.status === "corrupt") {
+    console.log(chalk.yellow(`  usage history at ${usagePath} could not be read${usageRead.movedTo ? ` — kept as ${usageRead.movedTo}` : ""}; starting empty`));
+  } else if (usageRead.status === "ok" && !usageHistory.restore(usageRead.data)) {
+    const moved = quarantineUsageFile(usagePath);
+    console.log(chalk.yellow(`  usage history at ${usagePath} is not a usage file${moved ? ` — kept as ${moved}` : ""}; starting empty`));
+  }
+  // A fixed interval rather than a debounce: usage changes on every request, and
+  // a debounce that restarts on each change never fires under steady traffic.
+  // Only a dirty history is written, so an idle router writes nothing.
+  const flushUsage = createUsageFlusher(usageHistory, usagePath, msg => console.log(chalk.yellow(`  ${msg}`)));
+  setInterval(flushUsage, 30_000).unref();
+  process.on("exit", flushUsage);
   // One ask per session per window, held for the life of the process: the
   // client answers the ask by compacting and retrying, and a retry that is
   // still large must not be asked again or the session compacts in a loop.
@@ -528,7 +563,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // The usage page is mounted ahead of the secret check on purpose; see
   // mountWebDashboard for why that is not an exposure.
-  mountWebDashboard(app);
+  mountWebDashboard(app, { usage: createUsageSummaryProvider(usageHistory) });
 
   // ─── Proxy auth middleware ─────────────────────────────────────────────────
   // If a proxySecret is configured, all requests must present it as EITHER
@@ -858,10 +893,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // OpenAI responses never pass the Anthropic proxy middleware, so their
   // usage has to be folded into the aggregates here or the totals only ever
   // count one provider.
-  const recordOpenAIUsage = (usage?: { input_tokens: number; output_tokens: number }): void => {
+  const recordOpenAIUsage = (usage: { input_tokens: number; output_tokens: number } | undefined, model: string): void => {
     if (!usage) return;
     stats.totalInputTokens += usage.input_tokens;
     stats.totalOutputTokens += usage.output_tokens;
+    const sample = openAISample(usage, model, Date.now());
+    if (sample) usageHistory.record(sample);
   };
 
   mountMessagesCrossProviderRoute(app, {
@@ -949,7 +986,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     },
     onSessionRoute: ({ sessionId, openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel, `pin=${sessionId.slice(0, 8)}`);
-      recordOpenAIUsage(usage);
+      recordOpenAIUsage(usage, upstreamModel);
       // Usage is still recorded — those tokens were spent — but a response that
       // died mid-generation is logged as an error, or the dashboard reports a
       // truncated answer as a clean route.
@@ -966,7 +1003,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     },
     onExplicitRoute: ({ openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       logOpenAIRoute(openAIAccountId, upstreamModel);
-      recordOpenAIUsage(usage);
+      recordOpenAIUsage(usage, upstreamModel);
       if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
@@ -981,7 +1018,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     onFallback: ({ openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
-      recordOpenAIUsage(usage);
+      recordOpenAIUsage(usage, upstreamModel);
       if (failedAfterStart) stats.totalErrors++;
       stats.addLog({
         ts: Date.now(), accountId: openAIAccountId, model: upstreamModel,
@@ -1395,6 +1432,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // Flush now: the debounce timer will not fire after exit, and losing the
     // final assignments is what makes a restart rewrite every prompt cache.
     writeSessionAssignments(sessionRouter.snapshot());
+    flushUsage();
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();
     }

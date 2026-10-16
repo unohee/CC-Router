@@ -18,6 +18,7 @@ ENV NODE_ENV=production
 ENV PORT=3456
 ENV ACCOUNTS_PATH=/app/accounts.json
 ENV SESSIONS_PATH=/app/sessions.json
+ENV USAGE_PATH=/app/usage.json
 
 # Install only production deps
 COPY package*.json ./

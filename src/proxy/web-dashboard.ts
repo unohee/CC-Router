@@ -5,10 +5,13 @@ import type { Express, Request, Response } from "express";
  * A read-only usage page for the router, served from the router itself.
  *
  * It is one static document that polls `/cc-router/health` — the same JSON the
- * terminal dashboard reads — so it adds no data of its own and no new endpoint
- * that returns any. Everything is inlined (no build step reaches non-TS files,
- * and nothing is fetched from a CDN), and the CSP pins that: the only script and
- * style allowed are these two exact blocks, by hash.
+ * terminal dashboard reads — and, once a minute, `/cc-router/usage-history`, the
+ * token history the router keeps (see usage-history.ts). The second is an
+ * endpoint of its own, so what it returns is held to the same rule as health: it
+ * is readable without the proxy secret, which is why it carries aggregates only.
+ * Everything is inlined (no build step reaches non-TS files, and nothing is
+ * fetched from a CDN), and the CSP pins that: the only script and style allowed
+ * are these two exact blocks, by hash.
  *
  * Upstream error text lands in the activity log, so it is attacker-influenced.
  * The client therefore builds every node with `textContent` and never parses
@@ -16,6 +19,8 @@ import type { Express, Request, Response } from "express";
  */
 
 export const DASHBOARD_PATH = "/cc-router/dashboard";
+/** The page's script hard-codes this string; a test keeps the two in step. */
+export const USAGE_HISTORY_PATH = "/cc-router/usage-history";
 
 const STYLE = String.raw`
 :root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
@@ -85,6 +90,53 @@ td:empty{display:none}
 .clip{max-width:none;white-space:normal;overflow:visible}
 }
 @media (forced-colors:active){.meter{background:Canvas;border:1px solid CanvasText}.fill{background:Highlight}.tick{background:CanvasText}}
+:root{--h0:rgba(11,11,11,.07);--h1:#b6d4f7;--h2:#78b0ec;--h3:#2a78d6;--h4:#14498f;--cell:22px;--gap:4px}
+@media (prefers-color-scheme:dark){:root{--h0:rgba(255,255,255,.08);--h1:#0d366b;--h2:#1b5aa8;--h3:#3987e5;--h4:#9cc8f7}}
+.usehead{margin-top:24px;margin-bottom:0}
+#usestate{margin-top:8px;padding:8px 12px;border:1px solid var(--hair);border-left:3px solid var(--warn);border-radius:6px;background:var(--surface);font-size:13px}
+.hmbody{display:flex;flex-wrap:wrap;gap:16px 32px;align-items:flex-start}
+.hmmain{flex:0 1 auto;min-width:0;max-width:100%}
+/* Only the squares scroll. The weekday labels stay put at the left edge and the note and legend stay outside. */
+.hmscroll{max-width:100%;overflow-x:auto;padding-bottom:2px}
+.hm{display:grid;grid-template-columns:auto auto;gap:6px 8px;align-items:start}
+.hmmonths,.hmcols{display:grid;grid-auto-flow:column;grid-auto-columns:var(--cell);gap:var(--gap)}
+.hmmonths{grid-template-rows:14px}
+.hmcols{grid-template-rows:repeat(7,var(--cell))}
+.hmdays{position:sticky;left:0;z-index:1;background:var(--surface);display:grid;grid-template-rows:repeat(7,var(--cell));gap:var(--gap);font-size:11px;color:var(--ink2);text-align:right}
+.hmdays div{align-self:center}
+.hmm{font-size:11px;color:var(--ink2);white-space:nowrap;align-self:end}
+.hx{width:var(--cell);height:var(--cell);border-radius:3px;background:var(--h0)}
+.hx.hp{visibility:hidden}
+.hx.hn{background:transparent;border:1px dashed var(--muted)}
+.hx.h1{background:var(--h1)}.hx.h2{background:var(--h2)}.hx.h3{background:var(--h3)}.hx.h4{background:var(--h4)}
+.hx.sel{outline:2px solid var(--ink);outline-offset:1px}
+.hmfoot{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin-top:10px;font-size:12px}
+.legend{display:inline-flex;align-items:center;gap:4px;color:var(--ink2)}
+.legend .hx{display:inline-block;width:14px;height:14px}
+.hmside{flex:1 1 220px;min-width:200px}
+dl.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
+dl.kv dt{color:var(--ink2)}
+dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.usegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:16px;align-items:start}
+.usegrid .card{margin-top:0}
+.mlist{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.mrow{display:grid;grid-template-columns:minmax(0,1fr) 120px 9em;gap:4px 12px;align-items:center}
+.mname{min-width:0}
+.mval{font-size:12px;color:var(--ink2);text-align:right;white-space:nowrap}
+.subhead{margin:16px 0 8px;font-size:12px;font-weight:600;color:var(--ink2)}
+@media (max-width:720px){
+:root{--cell:18px;--gap:3px}
+.mrow{grid-template-columns:minmax(0,1fr) auto}
+.mrow .meter{grid-column:1 / -1;order:3}
+}
+@media (forced-colors:active){
+.hx{forced-color-adjust:none;border:1px solid CanvasText}
+.hx.h0{background:Canvas}
+.hx.h1{background:Highlight;opacity:.35}.hx.h2{background:Highlight;opacity:.6}.hx.h3{background:Highlight;opacity:.8}.hx.h4{background:Highlight}
+.hx.hn{background:Canvas;border-style:dashed}
+.hx.hp{border:0}
+.hx.sel{outline-color:Highlight}
+}
 `;
 
 const BODY = String.raw`
@@ -100,6 +152,44 @@ const BODY = String.raw`
   <noscript><p class="banner">This page reads live data and needs JavaScript.</p></noscript>
   <main id="main" aria-busy="true">
     <section id="tiles" class="tiles" aria-label="Totals since the router started"></section>
+    <section id="usage" aria-labelledby="use-h">
+      <div class="cardhead usehead"><h2 id="use-h">Token usage</h2><span id="usesum" class="sum"></span></div>
+      <div id="usestate" role="status" hidden></div>
+      <div id="wintiles" class="tiles" aria-label="Rolling token totals"></div>
+      <section class="card" aria-labelledby="hm-h">
+        <div class="cardhead"><h2 id="hm-h">Daily tokens</h2><span id="hmsum" class="sum"></span></div>
+        <div class="hmbody">
+          <div class="hmmain">
+            <div id="hmscroll" class="hmscroll">
+              <div class="hm">
+                <div></div>
+                <div id="hmmonths" class="hmmonths" aria-hidden="true"></div>
+                <div id="hmdays" class="hmdays" aria-hidden="true"></div>
+                <div id="hmgrid" class="hmcols" role="group" aria-label="Daily token usage, one square per day, oldest first"></div>
+              </div>
+            </div>
+            <div class="hmfoot">
+              <span id="hminfo" class="note" aria-live="polite">Hover or tap a day for its breakdown.</span>
+              <span class="legend" aria-hidden="true"><i class="hx hn"></i> no data <i class="hx h0"></i> none &nbsp; Less <i class="hx h1"></i><i class="hx h2"></i><i class="hx h3"></i><i class="hx h4"></i> More</span>
+            </div>
+          </div>
+          <dl id="hmfacts" class="kv hmside"></dl>
+        </div>
+      </section>
+      <div class="usegrid">
+        <section class="card" aria-labelledby="mod-h">
+          <div class="cardhead"><h2 id="mod-h">Models</h2><span class="sum">last 30 days, by tokens</span></div>
+          <ul id="mlist" class="mlist"></ul>
+        </section>
+        <section class="card" aria-labelledby="det-h">
+          <div class="cardhead"><h2 id="det-h">Details</h2><span class="sum">last 30 days</span></div>
+          <dl id="detlist" class="kv"></dl>
+          <h3 class="subhead">Token mix</h3>
+          <ul id="mixlist" class="mlist"></ul>
+        </section>
+      </div>
+      <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI input counts include cached tokens, so the cache ratio covers Claude accounts only.</p>
+    </section>
     <section class="card" aria-labelledby="acc-h">
       <div class="cardhead"><h2 id="acc-h">Accounts</h2><span id="accsum" class="sum"></span></div>
       <div class="scroll">
@@ -128,7 +218,7 @@ const BODY = String.raw`
       <button id="more" class="more" type="button" hidden></button>
     </section>
   </main>
-  <p class="foot">Read-only. Refreshes every few seconds from <code>/cc-router/health</code>. Usage is read from upstream response headers, so a window shows no reading until that account has served a request since the router started. This page and the health endpoint are not behind the proxy secret.</p>
+  <p class="foot">Read-only. Refreshes every few seconds from <code>/cc-router/health</code>, and token history every minute from <code>/cc-router/usage-history</code>. Usage is read from upstream response headers, so a window shows no reading until that account has served a request since the router started. This page and both of those endpoints are not behind the proxy secret.</p>
 </div>
 `;
 
@@ -397,6 +487,285 @@ const SCRIPT = String.raw`
     $("main").className = msg && S.okAt ? "stale" : "";
   }
 
+  // ── token history ─────────────────────────────────────────────────────────
+  // Read from /cc-router/usage-history as a request of its own, with its own
+  // failure state. The live view above must not turn into "can't reach the
+  // router" because the history is slow or missing, and the reverse holds too.
+  // Everything is computed server-side; this only draws it.
+  var USAGE_MS = 60000;
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var WINDOWS = [["1d", "Last 24 hours"], ["7d", "Last 7 days"], ["14d", "Last 14 days"], ["30d", "Last 30 days"]];
+  var U = { data: null, okAt: 0, inflight: false, picked: "", pickedNode: null, scrolled: false };
+
+  function isNum(n) { return typeof n === "number" && isFinite(n); }
+  function validTotals(t) {
+    return !!t && isNum(t.total) && isNum(t.input) && isNum(t.output) && isNum(t.cacheRead) && isNum(t.cacheCreation) && isNum(t.requests);
+  }
+  // The response is checked before any of it is drawn: a reply of the wrong shape
+  // (a proxy error page, an older router) must land in the history's own error
+  // state, not half-render or throw into the main view.
+  function validUsage(d) {
+    if (!d || typeof d !== "object" || typeof d.tz !== "string") return false;
+    if (d.since !== null && !isNum(d.since)) return false;
+    var w = d.windows;
+    if (!w) return false;
+    for (var i = 0; i < WINDOWS.length; i++) if (!validTotals(w[WINDOWS[i][0]])) return false;
+    if (!Array.isArray(d.cells)) return false;
+    for (var j = 0; j < d.cells.length; j++) {
+      var c = d.cells[j];
+      if (!c || typeof c !== "object") return false;
+      if (c.pad) continue;
+      if (typeof c.date !== "string" || !validTotals(c)) return false;
+      if (c.level !== null && !(isNum(c.level) && c.level >= 0 && c.level <= 4)) return false;
+    }
+    var m = d.models;
+    if (!m || !Array.isArray(m.rows) || !isNum(m.windowDays)) return false;
+    for (var k = 0; k < m.rows.length; k++) {
+      var r = m.rows[k];
+      if (!r || typeof r.model !== "string" || typeof r.provider !== "string" || !isNum(r.total) || !isNum(r.share)) return false;
+    }
+    if (m.others !== null && !(m.others && isNum(m.others.count) && isNum(m.others.total) && isNum(m.others.share))) return false;
+    var x = d.details;
+    if (!x || typeof x !== "object" || !isNum(x.displayDays) || !isNum(x.activeDays) || !isNum(x.recordedDays)) return false;
+    return true;
+  }
+
+  function pct(x) { return Math.round(x * 100) + "%"; }
+  function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+  function breakdown(t) {
+    return "input " + num(t.input) + " · output " + num(t.output) + " · cache read " + num(t.cacheRead) + " · cache write " + num(t.cacheCreation);
+  }
+  // Dates arrive as YYYY-MM-DD already resolved in the viewer's zone, so they are
+  // formatted from their parts, never parsed as an instant that could shift a day.
+  function dayLabel(date) {
+    var p = date.split("-");
+    var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    return DAYS[d.getUTCDay()] + ", " + MONTHS[+p[1] - 1] + " " + (+p[2]);
+  }
+  function sinceLabel(d) {
+    try { return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: d.tz }).format(d.since); }
+    catch (e) { return new Date(d.since).toDateString(); }
+  }
+  function viewerZone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; }
+  }
+
+  function kv(dl, rows) {
+    var kids = [];
+    rows.forEach(function (r) {
+      var dt = el("dt", "", r[0]);
+      var dd = el("dd", "", r[1]);
+      if (r[2]) { dt.title = r[2]; dd.title = r[2]; }
+      kids.push(dt, dd);
+    });
+    dl.replaceChildren.apply(dl, kids);
+  }
+  function bar(share, label) {
+    var meter = el("div", "meter");
+    var fill = el("div", "fill");
+    var w = Math.min(100, Math.round(share * 100));
+    fill.style.width = (share > 0 && w < 2 ? 2 : w) + "%";
+    meter.appendChild(fill);
+    meter.setAttribute("role", "meter");
+    meter.setAttribute("aria-label", label);
+    meter.setAttribute("aria-valuemin", "0");
+    meter.setAttribute("aria-valuemax", "100");
+    meter.setAttribute("aria-valuenow", String(w));
+    return meter;
+  }
+  function shareRow(name, share, value, tip) {
+    var li = el("li", "mrow");
+    var n = el("div", "mname clip", name);
+    if (tip) n.title = tip;
+    li.appendChild(n);
+    li.appendChild(bar(share, name));
+    li.appendChild(el("div", "mval", value));
+    return li;
+  }
+
+  function renderWindows(d, none) {
+    var box = $("wintiles");
+    var tiles = WINDOWS.map(function (w) {
+      var t = d.windows[w[0]];
+      var parts = [];
+      if (none) parts.push("nothing recorded yet");
+      else {
+        parts.push(plural(t.requests, "request"));
+        if (t.total > 0) parts.push("cache read " + pct(t.cacheRead / t.total));
+      }
+      var node = tile(w[1], none ? "–" : num(t.total), parts.join(" · "));
+      node.title = breakdown(t) + ". A rolling window ending now, counted by the hour.";
+      if (!none && t.partial) node.appendChild(el("div", "sub", "recording since " + sinceLabel(d)));
+      return node;
+    });
+    box.replaceChildren.apply(box, tiles);
+  }
+
+  function dayText(c) {
+    var label = dayLabel(c.date);
+    if (c.level === null) return label + " — no data: recording had not started";
+    if (c.total === 0) return label + " — nothing recorded";
+    return label + " — " + num(c.total) + " tokens (" + breakdown(c) + "), " + plural(c.requests, "request");
+  }
+  function pick(node, c) {
+    if (U.pickedNode) U.pickedNode.className = U.pickedNode.className.replace(" sel", "");
+    U.picked = c.date;
+    U.pickedNode = node;
+    node.className += " sel";
+    $("hminfo").textContent = dayText(c);
+  }
+
+  function renderHeatmap(d) {
+    var cells = d.cells, nodes = [], shown = 0;
+    U.pickedNode = null;
+    cells.forEach(function (c) {
+      if (c.pad) {
+        var gap = el("div", "hx hp");
+        gap.setAttribute("aria-hidden", "true");
+        nodes.push(gap);
+        return;
+      }
+      shown += c.total;
+      var n = el("div", "hx " + (c.level === null ? "hn" : "h" + c.level));
+      var text = dayText(c);
+      n.title = text;
+      n.setAttribute("role", "img");
+      n.setAttribute("aria-label", text);
+      n.addEventListener("click", function () { pick(n, c); });
+      if (c.date === U.picked) pick(n, c);
+      nodes.push(n);
+    });
+    var grid = $("hmgrid");
+    grid.replaceChildren.apply(grid, nodes);
+
+    // Month names sit over the column where a new month first appears, and are
+    // skipped when they would collide with the previous one.
+    var weeks = Math.ceil(cells.length / 7), labels = [], lastCol = -3, lastMonth = -1;
+    for (var col = 0; col < weeks; col++) {
+      var first = null;
+      for (var r = 0; r < 7 && !first; r++) {
+        var cc = cells[col * 7 + r];
+        if (cc && !cc.pad) first = cc;
+      }
+      if (!first) continue;
+      var mo = +first.date.split("-")[1] - 1;
+      if (mo !== lastMonth && col - lastCol >= 2) {
+        var lb = el("div", "hmm", MONTHS[mo]);
+        lb.style.gridColumnStart = String(col + 1);
+        lb.style.gridRowStart = "1";
+        labels.push(lb);
+        lastCol = col;
+        lastMonth = mo;
+      }
+    }
+    var months = $("hmmonths");
+    months.replaceChildren.apply(months, labels);
+
+    var names = [[2, "Mon"], [4, "Wed"], [6, "Fri"]].map(function (p) {
+      var l = el("div", "", p[1]);
+      l.style.gridRowStart = String(p[0]);
+      return l;
+    });
+    var days = $("hmdays");
+    days.replaceChildren.apply(days, names);
+
+    // Where the grid is wider than the card (a phone), start at the newest week:
+    // the recent days are the ones wanted. Only the first time, so a refresh never
+    // drags the view back while someone is scrolling through the past.
+    if (!U.scrolled) {
+      var sc = $("hmscroll");
+      sc.scrollLeft = sc.scrollWidth;
+      U.scrolled = true;
+    }
+
+    var x = d.details;
+    $("hmsum").textContent = "last " + x.displayDays + " days, calendar days in " + d.tz;
+    kv($("hmfacts"), [
+      ["Total shown", num(shown) + " tokens"],
+      ["Busiest day", x.busiest ? dayLabel(x.busiest.date) + " · " + num(x.busiest.total) : "no reading",
+        x.busiest ? "" : "No tokens have been recorded on any displayed day."],
+      ["Active days", x.recordedDays > 0 ? x.activeDays + " of " + x.recordedDays + " recorded" : "no reading",
+        "Days with any usage, out of the days recording was running."]
+    ]);
+  }
+
+  function renderModels(d) {
+    var m = d.models, kids = [];
+    if (m.rows.length === 0) kids.push(el("li", "note", "No usage in the last " + m.windowDays + " days."));
+    m.rows.forEach(function (r) {
+      var name = r.provider === "openai" ? r.model + " (OpenAI)" : r.model;
+      kids.push(shareRow(name, r.share, num(r.total) + " · " + pct(r.share), r.model + " · " + plural(r.requests, "request")));
+    });
+    if (m.others) kids.push(shareRow(plural(m.others.count, "other model"), m.others.share, num(m.others.total) + " · " + pct(m.others.share), ""));
+    var list = $("mlist");
+    list.replaceChildren.apply(list, kids);
+  }
+
+  function renderDetails(d) {
+    var x = d.details, t = d.windows["30d"];
+    kv($("detlist"), [
+      ["Cache hit ratio", x.cacheHitRatio === null ? "no reading" : pct(x.cacheHitRatio),
+        "Cache read ÷ (cache read + cache write + uncached input), Claude accounts only. No reading means there is nothing recorded to divide."],
+      ["Avg tokens / request", x.avgTokensPerRequest === null ? "no reading" : num(x.avgTokensPerRequest),
+        "All tokens divided by metered requests, over the last " + x.windowDays + " days."],
+      ["Requests", num(t.requests), "Responses the router could read usage from."]
+    ]);
+    var mixKids = [];
+    if (t.total <= 0) mixKids.push(el("li", "note", "No usage in the last " + x.windowDays + " days."));
+    else {
+      [["Cache read", t.cacheRead], ["Cache write", t.cacheCreation], ["Input (uncached)", t.input], ["Output", t.output]].forEach(function (p) {
+        mixKids.push(shareRow(p[0], p[1] / t.total, num(p[1]) + " · " + pct(p[1] / t.total), ""));
+      });
+    }
+    var mix = $("mixlist");
+    mix.replaceChildren.apply(mix, mixKids);
+  }
+
+  function renderUsage(d) {
+    var none = d.since === null;
+    $("usesum").textContent = none
+      ? "nothing recorded yet"
+      : "recording since " + sinceLabel(d) + (d.tzFallback ? " · your time zone was not recognised, showing UTC" : "");
+    renderWindows(d, none);
+    renderHeatmap(d);
+    renderModels(d);
+    renderDetails(d);
+  }
+
+  function usageState(msg) {
+    var b = $("usestate");
+    b.hidden = !msg;
+    if (msg) b.textContent = msg;
+  }
+
+  function fetchUsage() {
+    if (U.inflight) return;
+    U.inflight = true;
+    var ctrl = new AbortController();
+    var to = setTimeout(function () { ctrl.abort(); }, 8000);
+    var zone = viewerZone();
+    fetch("/cc-router/usage-history" + (zone ? "?tz=" + encodeURIComponent(zone) : ""), { cache: "no-store", signal: ctrl.signal })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (!validUsage(data)) throw new Error("unexpected response");
+        U.data = data;
+        U.okAt = Date.now();
+        usageState(null);
+        renderUsage(data);
+      })
+      .catch(function (err) {
+        usageState("Token history is unavailable (" + err.message + ")." + (U.okAt ? " Showing data from " + dur(Date.now() - U.okAt) + " ago." : ""));
+      })
+      .then(function () {
+        clearTimeout(to);
+        U.inflight = false;
+      });
+  }
+
   // ── polling ───────────────────────────────────────────────────────────────
   function schedule() {
     clearTimeout(S.timer);
@@ -436,9 +805,15 @@ const SCRIPT = String.raw`
     S.showAll = !S.showAll;
     if (S.data) renderLogs(S.data);
   });
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) return;
+    poll();
+    if (Date.now() - U.okAt > 30000) fetchUsage();
+  });
   setInterval(tickUpdated, 1000);
+  setInterval(function () { if (!document.hidden) fetchUsage(); }, USAGE_MS);
   poll();
+  fetchUsage();
 })();
 `;
 
@@ -446,8 +821,9 @@ const sha256 = (s: string): string => `'sha256-${createHash("sha256").update(s).
 
 /**
  * Only these two inline blocks may run or style anything, and nothing may be
- * fetched except the router's own health JSON. `img-src data:` is for the empty
- * favicon, which stops the browser asking the proxy for /favicon.ico.
+ * fetched except from the router itself (its health and usage-history JSON).
+ * `img-src data:` is for the empty favicon, which stops the browser asking the
+ * proxy for /favicon.ico.
  */
 export const DASHBOARD_CSP = [
   "default-src 'none'",
@@ -480,15 +856,43 @@ export function renderDashboardHtml(): string {
 `;
 }
 
+export interface WebDashboardOptions {
+  /** Summary of recorded token usage for a viewer's time zone. Omit to leave the endpoint unmounted. */
+  usage?: (tz: string | undefined) => unknown;
+}
+
 /**
  * Mount the page. Call this BEFORE the proxy-secret middleware: a browser
  * navigation cannot carry an Authorization header, and the page holds no data —
  * what it shows comes from `/cc-router/health`, which is already exempt from the
- * secret for monitoring. Mounting it later would not protect anything that health
- * does not already expose; it would only make the page unusable.
+ * secret for monitoring, and from `/cc-router/usage-history`, mounted here for
+ * the same reason. Mounting them later would not protect anything: it would only
+ * make the page unusable.
+ *
+ * That makes the usage-history response public on the router's port, exactly as
+ * health is. It is therefore aggregates only — totals per window, day and model —
+ * with no account ids, session ids or credentials in it.
  */
-export function mountWebDashboard(app: Express): void {
+export function mountWebDashboard(app: Express, opts: WebDashboardOptions = {}): void {
   const html = renderDashboardHtml();
+  const { usage } = opts;
+  if (usage) {
+    app.get(USAGE_HISTORY_PATH, (req: Request, res: Response) => {
+      // `?tz=a&tz=b` parses to an array; only a single string is a zone name.
+      const tz = typeof req.query["tz"] === "string" ? req.query["tz"] : undefined;
+      res.set({
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      try {
+        res.send(JSON.stringify(usage(tz)));
+      } catch {
+        // Say nothing about why: the caller is unauthenticated.
+        res.status(500).send(JSON.stringify({ error: "usage history is unavailable" }));
+      }
+    });
+  }
   app.get(DASHBOARD_PATH, (_req: Request, res: Response) => {
     res.set({
       "content-type": "text/html; charset=utf-8",
