@@ -2,7 +2,7 @@
 
 CC-Router here is a fork of [VictorMinemu/CC-Router](https://github.com/VictorMinemu/CC-Router).
 It diverged at `d770488` (v0.6.2, 2026-06-06) and stopped tracking upstream on 2026-10-14.
-On 2026-10-16 it also left GitHub's fork network and became private, so the two repositories
+On 2026-10-16 it also left GitHub's fork network (it stays public), so the two repositories
 are no longer linked there — pull requests open against this tree, not upstream's.
 
 Upstream is now a read-only source: a place to cherry-pick from, not a branch to merge.

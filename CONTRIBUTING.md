@@ -2,7 +2,7 @@
 
 ## Reporting bugs
 
-This repository is private and has no issue tracker. Record a defect where the work is
+This repository has its issue tracker disabled. Record a defect where the work is
 tracked instead, with the output of `cc-router status --json` and the OS/Node version.
 The templates under `.github/ISSUE_TEMPLATE/` are kept for the shape of that record.
 
@@ -13,7 +13,7 @@ Write the case down before writing code, following the [feature request template
 ## Development setup
 
 ```bash
-git clone git@github.com:unohee/CC-Router.git
+git clone https://github.com/unohee/CC-Router.git
 cd CC-Router
 npm install
 

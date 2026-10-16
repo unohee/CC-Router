@@ -5,8 +5,8 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 
 > An independent repository that began as a fork of
 > [VictorMinemu/CC-Router](https://github.com/VictorMinemu/CC-Router) and has been maintained
-> separately since October 2026. It is private, is not published to npm, and does not update
-> itself; see [docs/fork.md](docs/fork.md) for what diverged and why.
+> separately since October 2026. It is not published to npm and does not update itself;
+> see [docs/fork.md](docs/fork.md) for what diverged and why.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -126,7 +126,7 @@ Run cc-router on a machine everyone on the team can reach — a home server, a V
 #### On the server
 
 ```bash
-git clone git@github.com:unohee/CC-Router.git && cd CC-Router
+git clone https://github.com/unohee/CC-Router.git && cd CC-Router
 npm install && npm run build && npm link
 cc-router setup          # configure the 3 shared accounts
 cc-router start          # first run asks: background/boot/server mode — choose "server mode"
@@ -200,7 +200,7 @@ Each developer then points to:
 
 ```bash
 # 1. Install (from source — this fork is not on npm)
-git clone git@github.com:unohee/CC-Router.git && cd CC-Router
+git clone https://github.com/unohee/CC-Router.git && cd CC-Router
 npm install && npm run build && npm link
 
 # 2. Wizard: extract tokens + configure Claude Code automatically
@@ -230,7 +230,7 @@ This fork installs from source. `npm link` puts `cc-router` on your PATH pointin
 checkout, so `git pull && npm run build` is the whole upgrade path.
 
 ```bash
-git clone git@github.com:unohee/CC-Router.git
+git clone https://github.com/unohee/CC-Router.git
 cd CC-Router
 npm install
 npm run build
@@ -885,9 +885,9 @@ Open `http://<router-host>:3456/cc-router/dashboard` (or just `/cc-router`) in a
 
 ## Contributing
 
-This is a private, single-maintainer repository: it has no issue tracker and takes no outside
-pull requests. [CONTRIBUTING.md](CONTRIBUTING.md) describes the development setup and the
-checks a change is expected to pass.
+This repository is maintained by one person and has its issue tracker disabled.
+[CONTRIBUTING.md](CONTRIBUTING.md) describes the development setup and the checks a change
+is expected to pass.
 
 ---
 
