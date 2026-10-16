@@ -2,17 +2,18 @@
 
 ## Reporting bugs
 
-Open an issue using the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md).  
-Include the output of `cc-router status --json` and your OS/Node version.
+This repository is private and has no issue tracker. Record a defect where the work is
+tracked instead, with the output of `cc-router status --json` and the OS/Node version.
+The templates under `.github/ISSUE_TEMPLATE/` are kept for the shape of that record.
 
 ## Proposing features
 
-Open an issue using the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md) before writing code — this avoids duplicate work.
+Write the case down before writing code, following the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md) — this avoids duplicate work.
 
 ## Development setup
 
 ```bash
-git clone https://github.com/unohee/CC-Router.git
+git clone git@github.com:unohee/CC-Router.git
 cd CC-Router
 npm install
 

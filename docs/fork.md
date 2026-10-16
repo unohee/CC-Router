@@ -2,8 +2,12 @@
 
 CC-Router here is a fork of [VictorMinemu/CC-Router](https://github.com/VictorMinemu/CC-Router).
 It diverged at `d770488` (v0.6.2, 2026-06-06) and stopped tracking upstream on 2026-10-14.
+On 2026-10-16 it also left GitHub's fork network and became private, so the two repositories
+are no longer linked there — pull requests open against this tree, not upstream's.
 
 Upstream is now a read-only source: a place to cherry-pick from, not a branch to merge.
+The remotes say so: `origin` is this repository and `upstream` is VictorMinemu's, with its
+push URL disabled.
 
 ## Why it forked
 
@@ -62,8 +66,8 @@ in this tree and still theirs.
 ## Taking something from upstream later
 
 ```bash
-git fetch origin                      # origin is still VictorMinemu/CC-Router
-git log --oneline 555980d..origin/main
+git fetch upstream                    # VictorMinemu/CC-Router, fetch-only
+git log --oneline 555980d..upstream/main
 git cherry-pick -x <sha>              # -x records where it came from
 ```
 
