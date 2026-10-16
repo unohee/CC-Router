@@ -12,6 +12,7 @@ import {
   mountWebDashboard,
   renderDashboardHtml,
 } from "../proxy/web-dashboard.js";
+import { computeSeverity, windowReading } from "../proxy/severity.js";
 
 // ─── A just-enough DOM ────────────────────────────────────────────────────────
 // The script is what can be wrong about this page, not the markup, so it is run
@@ -116,12 +117,15 @@ function account(over: Record<string, unknown> = {}) {
   };
 }
 function health(accounts: unknown[], over: Record<string, unknown> = {}) {
-  return {
+  const doc = {
     status: "ok", mode: "standalone", target: "https://api.anthropic.com", uptime: 7200,
     totalRequests: 200, totalErrors: 5, totalRefreshes: 3, totalCacheReadTokens: 451_000,
     totalCacheCreationTokens: 0, totalInputTokens: 93, totalOutputTokens: 12_345,
     accounts, recentLogs: [], ...over,
   };
+  // The router sends its own verdict with health; the fixture asks the real module for it, so the
+  // page is exercised against what a router would really send.
+  return { severity: computeSeverity(doc.accounts as never, doc.recentLogs as never, Date.now()), ...doc };
 }
 // ─── Token-history fixtures ───────────────────────────────────────────────────
 
@@ -331,11 +335,14 @@ describe("dashboard script", () => {
     expect(find(page.el("logbody"), e => e.tag === "img")).toHaveLength(0);
   });
 
-  it("reports the error rate against requests, and says so when there are none", async () => {
+  it("keeps the counters since start to one line, with the error rate when there are requests", async () => {
     const busy = await boot(ok(health([account()])));
-    expect(busy.rows("tiles").join("|")).toContain("2.5% of requests");
-    const idle = await boot(ok(health([account()], { totalRequests: 0, totalErrors: 0 })));
-    expect(idle.rows("tiles").join("|")).toContain("no requests yet");
+    expect(busy.el("since").textContent).toBe(
+      "Since the router started: 200 requests · 5 errors (2.5%) · input 93 · output 12.3K · cache read 451K · 3 token refreshes");
+    const idle = await boot(ok(health([account()], { totalRequests: 0, totalErrors: 0, totalRefreshes: 1 })));
+    expect(idle.el("since").textContent).toContain("0 requests · 0 errors ·");
+    expect(idle.el("since").textContent).not.toContain("%");
+    expect(idle.el("since").textContent).toMatch(/1 token refresh$/);
   });
 
   it("shows the newest 20 events and expands on request", async () => {
@@ -584,7 +591,7 @@ describe("dashboard token history", () => {
       const page = await failing(async () => { throw new Error("socket hang up"); });
       expect(page.el("banner").hidden).toBe(true);
       expect(page.rows("accbody")).toHaveLength(1);
-      expect(page.rows("tiles").length).toBeGreaterThan(0);
+      expect(page.el("since").textContent).toContain("Since the router started");
       expect(page.el("usestate").hidden).toBe(false);
       expect(page.el("usestate").textContent).toContain("Token history is unavailable");
       expect(page.el("usestate").textContent).toContain("socket hang up");
@@ -672,5 +679,117 @@ describe("usage-history route", () => {
   it("is not mounted when there is no history to serve", async () => {
     const base = await serve();
     expect((await fetch(base + USAGE_HISTORY_PATH)).status).toBe(404);
+  });
+});
+
+// ─── The verdict: the strip, the order, and the one definition of "wrong" ────
+
+describe("the status strip", () => {
+  const strip = (page: Booted) => ({
+    hidden: page.el("strip").hidden,
+    level: page.el("strip").attrs["data-level"],
+    glyph: page.el("stripglyph").textContent,
+    verdict: page.el("stripverdict").textContent,
+    reasons: page.el("stripreasons").textContent,
+    glyphClass: page.el("stripglyph").className,
+  });
+
+  it("is quiet when the pool is healthy: a tick and one sentence", async () => {
+    const page = await boot(ok(health([account({ id: "a" }), account({ id: "b" })])));
+    expect(strip(page)).toEqual({
+      hidden: false, level: "ok", glyph: "✓", verdict: "All 2 accounts healthy", reasons: "", glyphClass: "glyph g-good",
+    });
+  });
+
+  it("says Watch, with the reasons, when an account runs hot", async () => {
+    const page = await boot(ok(health([account({ id: "a" }), account({
+      id: "heewon", rateLimits: { ...NO_LIMITS, fiveHourUtil: 0.84, fiveHourReset: inMin(30), lastUpdated: Date.now() },
+    })])));
+    expect(strip(page)).toMatchObject({ level: "watch", glyph: "▲", verdict: "Watch", reasons: "heewon 5h 84%", glyphClass: "glyph g-warn" });
+  });
+
+  it("says Problem, worst first, when an account is cooling, and counts the 429s", async () => {
+    const rejected = Array.from({ length: 3 }, (_, i) => ({ ts: Date.now() - i * 1000, accountId: "rigel", model: "-", type: "error", statusCode: 429 }));
+    const page = await boot(ok(health([
+      account({ id: "rigel", coolingUntil: Date.now() + 240_000 }),
+      account({ id: "lyra", rateLimits: { ...NO_LIMITS, fiveHourUtil: 0.96, fiveHourReset: inMin(30), lastUpdated: Date.now() } }),
+    ], { recentLogs: rejected })));
+    const s = strip(page);
+    expect(s).toMatchObject({ level: "problem", glyph: "■", verdict: "Problem", glyphClass: "glyph g-crit" });
+    expect(s.reasons).toMatch(/^rigel cooling \d+m · lyra 5h 96% · 429 ×3 in 5m$/);
+  });
+
+  it("is hidden until there is data, and steps aside for the banner when the router cannot be reached", async () => {
+    const down = await boot(async () => { throw new Error("socket hang up"); });
+    expect(down.el("strip").hidden).toBe(true);
+    expect(down.el("banner").hidden).toBe(false);
+  });
+
+  it("does not claim health it was not told of: a missing or malformed verdict reads as unknown", async () => {
+    for (const severity of [undefined, null, "ok", { pool: "fine" }, { pool: "ok", headline: "x", reasons: [], accounts: [{ id: "a", rung: "__proto__", state: "ok" }], thresholds: { watch: 0.8, problem: 0.95 } }]) {
+      const page = await boot(ok({ ...health([account()]), severity }));
+      expect(strip(page), JSON.stringify(severity)).toMatchObject({ hidden: false, level: "unknown", glyph: "?", verdict: "Status unknown" });
+      expect(page.el("banner").hidden).toBe(true);
+      expect(page.rows("accbody")[0]).toContain("no verdict");
+    }
+  });
+
+  it("is the first thing on the page, with the accounts straight after it and the history below", () => {
+    const html = renderDashboardHtml();
+    const at = (needle: string) => html.indexOf(needle);
+    const order = ['id="banner"', 'id="strip"', 'aria-labelledby="acc-h"', 'id="since"', 'id="usage"', 'aria-labelledby="log-h"'].map(at);
+    expect(order.every(i => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The six since-start tiles are gone from the top of the page.
+    expect(html).not.toContain('id="tiles"');
+  });
+
+  it("reads each account's state from the verdict, with the time left on a cooldown", async () => {
+    const page = await boot(ok(health([
+      account({ id: "off", enabled: false, healthy: false }),
+      account({ id: "all", coolingUntil: Date.now() + 600_000 }),
+      account({ id: "fam", modelCooldowns: { opus: Date.now() + 300_000 } }),
+      account({ id: "gone", expiresInMs: -5 }),
+      account({ id: "near", rateLimits: { ...NO_LIMITS, fiveHourUtil: 0.96, fiveHourReset: inMin(30), lastUpdated: Date.now() } }),
+      account({ id: "full", rateLimits: { ...NO_LIMITS, fiveHourUtil: 1.01, fiveHourReset: inMin(30), lastUpdated: Date.now() } }),
+    ])));
+    const rows = page.rows("accbody");
+    expect(rows[0]).toContain("disabled");
+    expect(rows[1]).toMatch(/cooling 10m/);
+    expect(rows[2]).toMatch(/opus cooling 5m/);
+    expect(rows[3]).toContain("token expired");
+    expect(rows[4]).toContain("near limit");
+    expect(rows[5]).toContain("at limit");
+  });
+
+  it("colours a meter by the cut-offs the router sent, not by numbers of its own", async () => {
+    const reading = { ...NO_LIMITS, fiveHourUtil: 0.55, fiveHourReset: inMin(30), lastUpdated: Date.now() };
+    const strict = { ...health([account({ rateLimits: reading })]) };
+    strict.severity = { ...strict.severity, thresholds: { watch: 0.5, problem: 0.6 } };
+    const hot = await boot(ok(strict));
+    expect(find(hot.el("accbody"), e => e.className.startsWith("fill"))[0].className).toBe("fill warn");
+    const plain = await boot(ok(health([account({ rateLimits: reading })])));
+    expect(find(plain.el("accbody"), e => e.className.startsWith("fill"))[0].className).toBe("fill ");
+  });
+
+  it("reads a window as a reading exactly when the router's verdict does", async () => {
+    // Two implementations of "is this figure a reading?" would drift; this pins them together.
+    const cases: Record<string, unknown>[] = [
+      { ...NO_LIMITS, fiveHourUtil: 0.99, lastUpdated: 0 },                                           // never measured
+      { ...NO_LIMITS, status: "allowed", lastUpdated: Date.now() },                                   // no figure, no reset
+      { ...NO_LIMITS, fiveHourUtil: 0.99, fiveHourReset: inMin(-5), lastUpdated: Date.now() },        // already reset
+      { ...NO_LIMITS, fiveHourUtil: 0.85, fiveHourReset: inMin(30), lastUpdated: Date.now() },        // hot
+      { ...NO_LIMITS, fiveHourUtil: 0.97, fiveHourReset: inMin(30), lastUpdated: Date.now() },        // near
+      { ...NO_LIMITS, fiveHourUtil: 0.9, fiveHourReset: 0, lastUpdated: Date.now() },                 // figure, reset unknown
+    ];
+    for (const rateLimits of cases) {
+      const acct = account({ rateLimits });
+      const page = await boot(ok(health([acct])));
+      const server = windowReading(rateLimits as never, "fiveHour", Date.now());
+      const shown = /\b\d+%/.test(page.rows("accbody")[0] ?? "");
+      expect(shown, JSON.stringify(rateLimits)).toBe(server.ok);
+      const rung = computeSeverity([acct] as never, [], Date.now()).accounts[0].rung;
+      expect(rung === "ok", JSON.stringify(rateLimits)).toBe(!(server.ok && server.util >= 0.8));
+    }
   });
 });

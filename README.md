@@ -28,8 +28,8 @@ Distribute Claude Code requests across Claude subscriptions, and expose an OpenA
 - **Client mode** — connect to a remote CC-Router from any machine with one command (`cc-router client connect <url>`)
 - **Claude Desktop support** — route Cowork / Agent-mode traffic through CC-Router via mitmproxy interception (macOS, Windows, Linux)
 - **Guided setup wizard** — interactive `cc-router setup` extracts tokens from Keychain or credentials file, configures everything
-- **Live dashboard** — real-time terminal UI showing account health, request counts, token usage, recent activity
-- **Web usage page** — the same numbers in a browser at `/cc-router/dashboard`: per-account 5-hour and 7-day meters, totals, recent activity; light and dark, phone-friendly
+- **Live dashboard** — real-time terminal UI that leads with one line saying whether anything is wrong, then one line per account (state, 5-hour and 7-day quota) and recent activity; it fits itself to the tmux pane it is in
+- **Web usage page** — the same verdict in a browser at `/cc-router/dashboard`: a status strip first, then per-account 5-hour and 7-day meters, 90 days of token history, recent activity; light and dark, phone-friendly
 - **Proxy authentication** — optional Bearer / x-api-key secret for internet-exposed deployments
 - **Multiple deployment modes** — background daemon, native OS auto-start (launchd/systemd), foreground, Docker Compose
 - **Cross-platform** — macOS, Linux, Windows; Node.js 20+
@@ -796,31 +796,31 @@ cc-router status
 ```
 
 ```text
- CC-Router  ·  standalone → api.anthropic.com  ·  up 2h 14m  ·  [q] quit
-
- OPERATIONS  base http://localhost:3456  ·  auth protected  ·  models dynamic
-  Claude 2/2 healthy  OpenAI 1/1 healthy  ·  cross-route ready
-  endpoints /v1/messages /v1/responses /v1/models /cc-router/accounts
-  routing claude=claude-sonnet-4-6 aliases[sonnet]  openai=gpt-5-codex aliases[codex]
-  models [m] list/select  change [c] Claude [o] OpenAI
-
- MODELS  [m/r] refresh  [↑/↓] select  [c] Claude default  [o] OpenAI default
-  current claude=claude-sonnet-4-6  openai=gpt-5-codex
-  ▶ anthropic/claude-sonnet-4-6 Claude
-    openai/gpt-5-codex OpenAI
-
- ACCOUNTS  2/2 healthy
-
-  ● max-account-1    ok      req   142  err   0  expires  6h 48m  last  2s ago
-  ● max-account-2    ok      req   139  err   0  expires  6h 51m  last  5s ago
-
- TOTALS  requests 281  ·  errors 0  ·  refreshes 2
-
+ CC-Router ■ Problem — lyra 5h 96% · rigel cooling 4m · 429 ×3 in 5m      up 2h 14m · 2s ago
+ ■ lyra         NEAR      5h ████████  96% ↻2h36m  7d ███░░░░░  40% ↻1d3h
+ ▲ heewon       hot       5h ███████░  84% ↻2h36m  7d ██░░░░░░  30% ↻1d3h
+ ■ rigel        COOL 4m   5h ███░░░░░  41% ↻2h36m  7d ██░░░░░░  20% ↻1d3h
+ – kyte         off       5h ███░░░░░  41% ↻2h36m  7d ██░░░░░░  20% ↻1d3h
+ ✓ vega         ok        5h not measured yet      7d not measured yet
  RECENT ACTIVITY
-  14:23:01  → max-account-1    route
-  14:22:58  → max-account-2    route
-  14:22:45  ↻ max-account-1    refresh
+▶ 14:23:01  ✗ cli pool           error        429  no account available — retry in 214s
+  14:22:58  ✗ cli rigel          /messages    429  rate limited (5-hour limit) — cooldown 18000s
+  14:22:45  → cli vega           /messages    200 1205ms ↑99% 507.3k↑ 125↓
+ q quit · Tab focus · ↑↓ select · Enter details · m models · n add account
 ```
+
+The first line is the verdict. When everything is fine it reads `✓ All 5 accounts healthy` and nothing else on the screen is trying to get your attention.
+Otherwise it names what is wrong, worst first. The same words and the same cut-offs are used by the [web page](#web-usage-page):
+
+| Verdict | When |
+|---------|------|
+| `Problem` | an account is cooling down (the whole account or one model family), rate limited, unhealthy or has an expired token; a window is at 95% or more; or three or more upstream 429s in the last five minutes |
+| `Watch` | a window is at 80% or more |
+| healthy | none of the above. An account you switched off is not a problem; it is shown as `off` |
+
+A window that has no reading (never measured, no figure, or reset since the last response) is shown as such and is never counted as a percentage.
+
+The dashboard draws into whatever pane it is in and is meant for tmux splits. It never draws more lines than the pane has, and when space runs out it keeps things in this order: the verdict line, one line per account, the activity log, then everything else. In a wide pane an account row also shows plan, request and error counts and token expiry; totals and the operations block appear only when there is room to spare. Press `Enter` on a log row to open its details (they need a taller pane); resizing the pane re-fits the layout immediately. Below about 24 columns it shows the verdict alone.
 
 Press `q` to quit. Run with `--json` for non-interactive output; the JSON includes an `operational` block with capabilities, endpoints, provider readiness, auth status, and model routing. Secrets and account tokens are never included.
 
@@ -829,6 +829,7 @@ The dashboard is also a control surface. In local mode it controls the local pro
 | Key | Action |
 |-----|--------|
 | `Tab` | Switch focus between logs, accounts, and models |
+| `Enter` | Open or close the details of the selected log row |
 | `n` | Add a Claude account |
 | `e` | Enable/disable selected Claude account |
 | `w` / `s` | Change selected Claude account weekly/session cap |
@@ -866,7 +867,8 @@ See [docs/security.md](docs/security.md) for details.
 Open `http://<router-host>:3456/cc-router/dashboard` (or just `/cc-router`) in any browser. It is read-only and refreshes every few seconds from `/cc-router/health`, the same data the terminal dashboard shows.
 
 - **A meter shows nothing rather than a guess.** Usage comes from upstream response headers, so an account that has not served a request since the router started reads *not measured yet*. A window with no figure and no reset time reads *no reading*: either upstream never sent one, or the window reset and a new one has not opened. Neither is drawn as 0%.
-- **Colour is never the only signal.** Meters turn amber from 75% and red from 90%, and say so in words (`hot`, `near limit`, `at limit`). A short notch on a meter marks a routing cap set below 100%.
+- **The strip comes first.** The page opens with one line saying whether anything is wrong (`All 5 accounts healthy`, `Watch`, or `Problem` with the reasons), then the accounts, then token history. The router decides this once and sends it with `/cc-router/health` as `severity`; the terminal dashboard reads the same field, so the two cannot disagree. While the router cannot be reached the strip steps aside for a banner rather than repeating an old "healthy".
+- **Colour is never the only signal.** Meters turn amber from 80% and red from 95%, and say so in words (`hot`, `near limit`, `at limit`); every state carries a symbol and a word. A short notch on a meter marks a routing cap set below 100%.
 - **It is not behind the proxy secret.** A browser navigation cannot carry an `Authorization` header, and the page holds no data of its own — what it shows comes from `/cc-router/health`, which is already open for monitoring. Everything that has a side effect or a token behind it (`/v1/*`, `/cc-router/accounts`) still requires the secret. If the router is reachable beyond a network you trust, that means account names and utilisation are readable there; put it behind a reverse proxy or bind it to a private interface.
 - Upstream error text appears in the activity list. The page renders it as text only and ships a CSP that allows nothing but its own inline script and style, so it cannot be turned into markup.
 

@@ -78,6 +78,15 @@ export class ProxyStats {
     return selected.sort((a, b) => b.ts - a.ts).slice(0, n);
   }
 
+  /**
+   * Every buffered entry at or after `ts`, oldest first. Unlike `getRecentLogs`
+   * this is neither capped nor reordered, so a count over a time window is not
+   * changed by how busy the pool happened to be.
+   */
+  getLogsSince(ts: number): LogEntry[] {
+    return this.logs.filter(entry => entry.ts >= ts);
+  }
+
   getUptimeSeconds(): number {
     return Math.round((Date.now() - this.startTime) / 1000);
   }

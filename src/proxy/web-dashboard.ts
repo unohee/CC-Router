@@ -24,9 +24,9 @@ export const USAGE_HISTORY_PATH = "/cc-router/usage-history";
 
 const STYLE = String.raw`
 :root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
---hair:rgba(11,11,11,.10);--accent:#2a78d6;--track:#cde2fb;--good:#006300;--warn:#fab219;--crit:#d03b3b}
+--hair:rgba(11,11,11,.10);--accent:#2a78d6;--track:#cde2fb;--good:#006300;--warn:#fab219;--warn-ink:#946a00;--crit:#d03b3b}
 @media (prefers-color-scheme:dark){:root{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
---hair:rgba(255,255,255,.10);--accent:#3987e5;--track:#0d366b;--good:#0ca30c}}
+--hair:rgba(255,255,255,.10);--accent:#3987e5;--track:#0d366b;--good:#0ca30c;--warn-ink:#fab219}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:1120px;margin:0 auto;padding:24px 16px 48px}
@@ -36,7 +36,15 @@ h2{margin:0;font-size:14px;font-weight:600}
 .meta,.sum,.note,.foot,.sub,.label{color:var(--ink2)}
 .meta{margin:2px 0 0;font-size:13px}
 .updated{font-size:12px;color:var(--ink2)}
-.banner{margin-top:16px;padding:10px 12px;border:1px solid var(--hair);border-left:3px solid var(--crit);border-radius:6px;background:var(--surface);font-size:13px}
+.banner{margin-top:16px;padding:10px 12px;border:1px solid var(--crit);border-radius:6px;background:var(--surface);font-size:13px}
+.strip{display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline;margin-top:16px;padding:10px 14px;border:1px solid var(--hair);border-radius:8px;background:var(--surface)}
+.strip .glyph{font-weight:700}
+.strip .verdict{font-weight:600}
+.strip .reasons{color:var(--ink2)}
+.strip[data-level="watch"]{border-color:var(--warn)}
+.strip[data-level="problem"]{border-color:var(--crit);background:var(--surface);background:color-mix(in srgb,var(--crit) 7%,var(--surface))}
+.strip[data-level="problem"] .reasons{color:var(--ink)}
+.since{margin:12px 0 0;font-size:12px;color:var(--ink2)}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
 .tile,.card{background:var(--surface);border:1px solid var(--hair);border-radius:8px}
 .tile{padding:12px 14px}
@@ -64,7 +72,7 @@ th:last-child,td:last-child{padding-right:0}
 .tick{position:absolute;top:0;bottom:0;width:2px;background:var(--surface)}
 .wtext{margin-top:6px;font-size:12px;display:flex;flex-wrap:wrap;gap:0 8px;align-items:baseline}
 .pct{font-size:13px;font-weight:600}
-.g-good{color:var(--good)}.g-warn{color:var(--warn)}.g-crit{color:var(--crit)}.g-muted{color:var(--muted)}
+.g-good{color:var(--good)}.g-warn{color:var(--warn-ink)}.g-crit{color:var(--crit)}.g-muted{color:var(--muted)}
 .glyph{display:inline-block;width:1.1em}
 .dim{color:var(--ink2)}
 .clip{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -89,11 +97,11 @@ td:empty{display:none}
 .win{min-width:0}
 .clip{max-width:none;white-space:normal;overflow:visible}
 }
-@media (forced-colors:active){.meter{background:Canvas;border:1px solid CanvasText}.fill{background:Highlight}.tick{background:CanvasText}}
+@media (forced-colors:active){.strip[data-level="problem"]{border:2px solid CanvasText}.strip[data-level="watch"]{border:2px dashed CanvasText}.meter{background:Canvas;border:1px solid CanvasText}.fill{background:Highlight}.tick{background:CanvasText}}
 :root{--h0:rgba(11,11,11,.07);--h1:#b6d4f7;--h2:#78b0ec;--h3:#2a78d6;--h4:#14498f;--cell:22px;--gap:4px}
 @media (prefers-color-scheme:dark){:root{--h0:rgba(255,255,255,.08);--h1:#0d366b;--h2:#1b5aa8;--h3:#3987e5;--h4:#9cc8f7}}
 .usehead{margin-top:24px;margin-bottom:0}
-#usestate{margin-top:8px;padding:8px 12px;border:1px solid var(--hair);border-left:3px solid var(--warn);border-radius:6px;background:var(--surface);font-size:13px}
+#usestate{margin-top:8px;padding:8px 12px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);font-size:13px}
 .hmbody{display:flex;flex-wrap:wrap;gap:16px 32px;align-items:flex-start}
 .hmmain{flex:0 1 auto;min-width:0;max-width:100%}
 /* Only the squares scroll. The weekday labels stay put at the left edge and the note and legend stay outside. */
@@ -149,9 +157,28 @@ const BODY = String.raw`
     <div id="updated" class="updated" aria-live="off"></div>
   </header>
   <div id="banner" class="banner" role="status" hidden></div>
+  <section id="strip" class="strip" data-level="unknown" aria-label="Pool status" hidden>
+    <span id="stripglyph" class="glyph" aria-hidden="true"></span>
+    <span id="stripverdict" class="verdict" role="status"></span>
+    <span id="stripreasons" class="reasons"></span>
+  </section>
   <noscript><p class="banner">This page reads live data and needs JavaScript.</p></noscript>
   <main id="main" aria-busy="true">
-    <section id="tiles" class="tiles" aria-label="Totals since the router started"></section>
+    <section class="card" aria-labelledby="acc-h">
+      <div class="cardhead"><h2 id="acc-h">Accounts</h2><span id="accsum" class="sum"></span></div>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th scope="col">Account</th><th scope="col">Status</th>
+            <th scope="col">5-hour window</th><th scope="col">7-day window</th>
+            <th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
+            <th scope="col">Last used</th><th scope="col">Token</th>
+          </tr></thead>
+          <tbody id="accbody"></tbody>
+        </table>
+      </div>
+    </section>
+    <p id="since" class="since"></p>
     <section id="usage" aria-labelledby="use-h">
       <div class="cardhead usehead"><h2 id="use-h">Token usage</h2><span id="usesum" class="sum"></span></div>
       <div id="usestate" role="status" hidden></div>
@@ -190,20 +217,6 @@ const BODY = String.raw`
       </div>
       <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI input counts include cached tokens, so the cache ratio covers Claude accounts only.</p>
     </section>
-    <section class="card" aria-labelledby="acc-h">
-      <div class="cardhead"><h2 id="acc-h">Accounts</h2><span id="accsum" class="sum"></span></div>
-      <div class="scroll">
-        <table>
-          <thead><tr>
-            <th scope="col">Account</th><th scope="col">Status</th>
-            <th scope="col">5-hour window</th><th scope="col">7-day window</th>
-            <th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
-            <th scope="col">Last used</th><th scope="col">Token</th>
-          </tr></thead>
-          <tbody id="accbody"></tbody>
-        </table>
-      </div>
-    </section>
     <section class="card" aria-labelledby="log-h">
       <div class="cardhead"><h2 id="log-h">Recent activity</h2><span id="logsum" class="sum"></span></div>
       <div class="scroll">
@@ -227,8 +240,8 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 (function () {
   "use strict";
-  var POLL_MS = 3000, WARN = 0.75, CRIT = 0.9, LOG_ROWS = 20;
-  var S = { skew: 0, okAt: 0, data: null, showAll: false, timer: 0, inflight: false, failing: false };
+  var POLL_MS = 3000, LOG_ROWS = 20;
+  var S = { skew: 0, okAt: 0, data: null, sev: null, verdictText: "", showAll: false, timer: 0, inflight: false, failing: false };
   var nf = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 
   function $(id) { return document.getElementById(id); }
@@ -258,18 +271,56 @@ const SCRIPT = String.raw`
     return td;
   }
 
-  // ── status ────────────────────────────────────────────────────────────────
+  // ── the verdict ───────────────────────────────────────────────────────────
+  // Decided by the router (severity.ts) and only drawn here, never re-derived:
+  // the terminal dashboard reads the same field, so the two cannot disagree about
+  // the same pool, and the cut-offs live in one place.
+  var RUNGS = { ok: 1, watch: 1, problem: 1, off: 1 };
+  var TONE = { ok: "good", watch: "warn", problem: "crit", off: "muted" };
+  var MARK = { ok: "✓", watch: "▲", problem: "■", off: "–" };
+  var STATE_TEXT = { off: "disabled", expired: "token expired", limited: "rate limited", unhealthy: "unhealthy", hot: "hot", ok: "ok" };
+
+  function isNum(n) { return typeof n === "number" && isFinite(n); }
+  function validSeverity(v) {
+    if (!v || typeof v !== "object") return false;
+    if (v.pool !== "ok" && v.pool !== "watch" && v.pool !== "problem") return false;
+    if (typeof v.headline !== "string" || !Array.isArray(v.reasons) || !Array.isArray(v.accounts)) return false;
+    if (!v.thresholds || !isNum(v.thresholds.watch) || !isNum(v.thresholds.problem)) return false;
+    for (var i = 0; i < v.reasons.length; i++) if (typeof v.reasons[i] !== "string") return false;
+    for (var j = 0; j < v.accounts.length; j++) {
+      var a = v.accounts[j];
+      if (!a || typeof a.id !== "string" || typeof a.state !== "string" || !Object.prototype.hasOwnProperty.call(RUNGS, a.rung)) return false;
+      if ((a.until !== undefined && !isNum(a.until)) || (a.util !== undefined && !isNum(a.util))) return false;
+    }
+    return true;
+  }
+  function accountSeverity(a) {
+    var list = S.sev ? S.sev.accounts : [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === a.id) return list[i];
+    return null;
+  }
   function accountStatus(a) {
-    var t = now(), rl = a.rateLimits || {};
-    if (a.enabled === false) return { tone: "muted", glyph: "–", text: "disabled" };
-    if (a.expiresInMs <= 0) return { tone: "crit", glyph: "■", text: "token expired" };
-    if (a.coolingUntil && a.coolingUntil > t) return { tone: "warn", glyph: "▲", text: "cooling " + dur(a.coolingUntil - t) };
-    if (rl.status === "rate_limited") return { tone: "crit", glyph: "■", text: "rate limited" };
-    if (!a.healthy) return { tone: "crit", glyph: "■", text: "unhealthy" };
-    var cd = a.modelCooldowns || {};
-    var fams = Object.keys(cd).filter(function (k) { return cd[k] > t; });
-    if (fams.length) return { tone: "warn", glyph: "▲", text: fams.join(", ") + " cooling" };
-    return { tone: "good", glyph: "✓", text: "ok" };
+    var s = accountSeverity(a);
+    if (!s) return { tone: "muted", glyph: "?", text: "no verdict" };
+    var text = STATE_TEXT[s.state] || s.state;
+    if (s.state === "cooling") text = (s.scope ? s.scope + " " : "") + "cooling" + (isNum(s.until) ? " " + dur(s.until - now()) : "");
+    else if (s.state === "near") text = (s.util || 0) >= 1 ? "at limit" : "near limit";
+    return { tone: TONE[s.rung], glyph: MARK[s.rung], text: text };
+  }
+
+  // The strip answers "is anything wrong right now?" before anything else on the page.
+  function renderStrip() {
+    var v = S.sev;
+    var box = $("strip");
+    box.hidden = false;
+    box.setAttribute("data-level", v ? v.pool : "unknown");
+    var mark = $("stripglyph");
+    mark.className = "glyph g-" + (v ? TONE[v.pool] : "muted");
+    mark.textContent = v ? MARK[v.pool] : "?";
+    var head = v ? v.headline : "Status unknown";
+    // The verdict is a live region: write it only when it changes, or every poll is read aloud.
+    if (S.verdictText !== head) { $("stripverdict").textContent = head; S.verdictText = head; }
+    $("stripreasons").textContent = v ? (v.reasons.join(" · ")) : "The router sent no status verdict.";
   }
 
   // ── usage windows ─────────────────────────────────────────────────────────
@@ -296,12 +347,18 @@ const SCRIPT = String.raw`
     }
     return { ok: true, util: util, reset: reset };
   }
-  function severity(u) { return u >= CRIT ? "crit" : u >= WARN ? "warn" : ""; }
+  // The cut-offs come with the verdict, so a meter turns colour where the strip says it should.
+  function severity(u) {
+    var t = S.sev && S.sev.thresholds;
+    if (!t) return "";
+    return u >= t.problem ? "crit" : u >= t.watch ? "warn" : "";
+  }
   function sevMark(u) {
+    var t = S.sev && S.sev.thresholds;
+    if (!t || u < t.watch) return null;
     if (u >= 1) return { tone: "crit", glyph: "■", text: "at limit" };
-    if (u >= CRIT) return { tone: "crit", glyph: "■", text: "near limit" };
-    if (u >= WARN) return { tone: "warn", glyph: "▲", text: "hot" };
-    return null;
+    if (u >= t.problem) return { tone: "crit", glyph: "■", text: "near limit" };
+    return { tone: "warn", glyph: "▲", text: "hot" };
   }
 
   function windowCell(a, key, cap) {
@@ -359,16 +416,13 @@ const SCRIPT = String.raw`
     return t;
   }
 
-  function renderTiles(h) {
-    var rate = h.totalRequests > 0 ? (h.totalErrors / h.totalRequests * 100).toFixed(1) + "% of requests" : "no requests yet";
-    $("tiles").replaceChildren(
-      tile("Requests", num(h.totalRequests), "since start"),
-      tile("Errors", num(h.totalErrors), rate),
-      tile("Input tokens", num(h.totalInputTokens), "uncached"),
-      tile("Output tokens", num(h.totalOutputTokens), "since start"),
-      tile("Cache read tokens", num(h.totalCacheReadTokens), "warm prompt cache"),
-      tile("Token refreshes", num(h.totalRefreshes), "OAuth")
-    );
+  // What the counters since start used to be six tiles for. They reset on every restart,
+  // unlike the history below, so they are context for the accounts, not a headline.
+  function renderSince(h) {
+    var rate = h.totalRequests > 0 ? " (" + (h.totalErrors / h.totalRequests * 100).toFixed(1) + "%)" : "";
+    $("since").textContent = "Since the router started: " + num(h.totalRequests) + " requests · " + num(h.totalErrors) + " errors" + rate
+      + " · input " + num(h.totalInputTokens) + " · output " + num(h.totalOutputTokens) + " · cache read " + num(h.totalCacheReadTokens)
+      + " · " + num(h.totalRefreshes) + (h.totalRefreshes === 1 ? " token refresh" : " token refreshes");
   }
 
   function renderAccounts(h) {
@@ -442,12 +496,7 @@ const SCRIPT = String.raw`
   }
 
   function renderHeader(h) {
-    var ok = h.status === "ok";
-    var meta = $("meta");
-    meta.replaceChildren(
-      glyph(ok ? "good" : "crit", ok ? "✓" : "■"),
-      document.createTextNode((ok ? "ok" : "degraded — no healthy account") + " · " + h.mode + " → " + h.target + " · up " + dur(h.uptime * 1000))
-    );
+    $("meta").textContent = h.mode + " → " + h.target + " · up " + dur(h.uptime * 1000);
   }
 
   // A drag-selection is wiped by a table rebuild, so while one exists the tables
@@ -460,8 +509,10 @@ const SCRIPT = String.raw`
   function render() {
     var h = S.data;
     if (!h) return;
+    S.sev = validSeverity(h.severity) ? h.severity : null;
     renderHeader(h);
-    renderTiles(h);
+    renderStrip();
+    renderSince(h);
     if (!selecting() || !S.rendered) {
       renderAccounts(h);
       renderLogs(h);
@@ -478,6 +529,9 @@ const SCRIPT = String.raw`
   function setBanner(msg) {
     var b = $("banner");
     S.failing = !!msg;
+    // While the router cannot be reached a verdict from the last good poll would
+    // read as reassurance, so the strip steps aside for the banner.
+    if (msg) $("strip").hidden = true;
     if (msg) {
       b.hidden = false;
       b.textContent = msg + (S.okAt ? " Showing data from " + dur(Date.now() - S.okAt) + " ago." : "");
@@ -498,7 +552,6 @@ const SCRIPT = String.raw`
   var WINDOWS = [["1d", "Last 24 hours"], ["7d", "Last 7 days"], ["14d", "Last 14 days"], ["30d", "Last 30 days"]];
   var U = { data: null, okAt: 0, inflight: false, picked: "", pickedNode: null, scrolled: false };
 
-  function isNum(n) { return typeof n === "number" && isFinite(n); }
   function validTotals(t) {
     return !!t && isNum(t.total) && isNum(t.input) && isNum(t.output) && isNum(t.cacheRead) && isNum(t.cacheCreation) && isNum(t.requests);
   }

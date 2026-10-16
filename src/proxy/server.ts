@@ -23,6 +23,7 @@ import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample } from "./usage-history.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
+import { computeSeverity, BURST_WINDOW_MS } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
@@ -648,6 +649,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       totalOutputTokens: stats.totalOutputTokens,
       accounts: accountViews,
       recentLogs: stats.getRecentLogs(50),
+      // The one verdict both status surfaces draw. The 429 count reads the whole
+      // buffer for the window, not the 50 rows above, which a busy pool fills in
+      // under a minute.
+      severity: computeSeverity(accountViews, stats.getLogsSince(Date.now() - BURST_WINDOW_MS), Date.now()),
     });
   });
 
@@ -1332,6 +1337,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       if (err instanceof NoAvailableAccountError) {
         stats.totalErrors++;
         logError("pool", 429, err.message);
+        // The worst thing a client can be told, and until now the one rejection
+        // the activity list never showed.
+        stats.addLog({
+          ts: Date.now(), accountId: "pool", model: "-", type: "error", statusCode: 429,
+          details: `no account available — retry in ${err.retryAfterSeconds}s`,
+        });
         res.setHeader("Retry-After", String(err.retryAfterSeconds));
         res.status(429).json({
           type: "error",

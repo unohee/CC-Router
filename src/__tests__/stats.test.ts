@@ -45,3 +45,16 @@ describe("ProxyStats.getRecentLogs", () => {
     expect(stats.getRecentLogs(2).map(e => e.accountId)).toEqual(["c", "b"]);
   });
 });
+
+describe("ProxyStats.getLogsSince", () => {
+  it("returns every buffered entry at or after the cut, oldest first, uncapped", () => {
+    const stats = new ProxyStats();
+    for (let i = 1; i <= 100; i++) add(stats, i % 2 ? "a" : "b", i);
+
+    const since = stats.getLogsSince(41);
+
+    expect(since).toHaveLength(60);
+    expect(since.map(e => e.ts)).toEqual(Array.from({ length: 60 }, (_, i) => 41 + i));
+    expect(stats.getLogsSince(1000)).toEqual([]);
+  });
+});
