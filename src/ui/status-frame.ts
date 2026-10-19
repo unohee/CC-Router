@@ -12,6 +12,7 @@ import {
   computeSeverity,
   describeSeverity,
   formatRemaining,
+  shortAge,
   windowReading,
 } from "../proxy/severity.js";
 import type { AccountRung, AccountSeverity, PoolSeverity, WindowKey } from "../proxy/severity.js";
@@ -164,8 +165,11 @@ function windowCell(
   const r = windowReading(rl, key, now);
 
   if (!r.ok) {
-    // No figure is shown as a figure: an unmeasured window is not 0 %.
-    const note = tier.bar > 0 ? READING_NOTE[r.note] ?? r.note : "—";
+    // No figure is shown as a figure: an unmeasured window is not 0 %. A 7-day window
+    // upstream never reports (a Teams seat has only the 5-hour limit) is said to be
+    // absent rather than unread; the claim is about what was reported, not the plan.
+    const absent = key === "sevenDay" && a.weeklyWindow === "not-reported";
+    const note = tier.bar > 0 ? (absent ? "no 7d window" : READING_NOTE[r.note] ?? r.note) : "—";
     return [head, seg(padCells(note, total - 3), "gray")];
   }
 
@@ -191,8 +195,9 @@ function stateWord(a: AccountStat, s: AccountSeverity, now: number): { text: str
     case "cooling": return { text: `COOL ${formatRemaining((s.until ?? now) - now)}`, color: "red", glyph: GLYPH.problem };
     case "limited": return { text: "LIMITED", color: "red", glyph: GLYPH.problem };
     case "unhealthy": return { text: "ERROR", color: "red", glyph: GLYPH.problem };
-    case "near": return { text: "NEAR", color: "red", glyph: GLYPH.problem };
-    case "hot": return { text: "hot", color: "yellow", glyph: GLYPH.watch };
+    // A warning built on an old reading says so, or an idle account's weekly figure looks live.
+    case "near": return { text: s.age ? `NEAR ${shortAge(s.age)}` : "NEAR", color: "red", glyph: GLYPH.problem };
+    case "hot": return { text: s.age ? `hot ${shortAge(s.age)}` : "hot", color: "yellow", glyph: GLYPH.watch };
     default:
       // `busy` is information, not a rung: it does not raise the verdict.
       return a.busy

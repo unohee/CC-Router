@@ -793,3 +793,62 @@ describe("the status strip", () => {
     }
   });
 });
+
+describe("weekly windows and old readings", () => {
+  const noWeekly = (over: Record<string, unknown> = {}) => ({
+    ...NO_LIMITS, status: "allowed", fiveHourUtil: 0.3, fiveHourReset: inMin(60), lastUpdated: Date.now(), ...over,
+  });
+
+  it("says a 7-day window was not reported only when the router has seen enough responses without one", async () => {
+    const page = await boot(ok(health([
+      account({ id: "teams", weeklyWindow: "not-reported", rateLimits: noWeekly() }),
+      account({ id: "fresh", weeklyWindow: "unknown", rateLimits: noWeekly() }),
+    ])));
+    const [teams, fresh] = page.rows("accbody");
+    expect(teams).toContain("no 7d window reported");
+    expect(teams).not.toContain("no reading");
+    expect(fresh).toContain("no reading");
+    expect(fresh).not.toContain("no 7d window reported");
+    const note = find(page.el("accbody"), e => e.className === "note" && e.title.includes("may have no weekly limit"));
+    expect(note).toHaveLength(1);
+    // It reports what upstream said, not what the plan is.
+    expect(note[0].title).toContain("what was reported, not what the plan is");
+  });
+
+  it("leaves the 5-hour side alone, and a 7-day window that exists keeps its figure", async () => {
+    const page = await boot(ok(health([account({
+      id: "kyte", weeklyWindow: "seen",
+      rateLimits: noWeekly({ sevenDayUtil: 0.5, sevenDayReset: inMin(3000) }),
+    })])));
+    const [row] = page.rows("accbody");
+    expect(row).toContain("30%");
+    expect(row).toContain("50%");
+    expect(row).not.toContain("no 7d window");
+  });
+
+  it("says how old the reading is beside a warning built on it, and in the strip", async () => {
+    const idle = account({
+      id: "kyte", weeklyWindow: "seen",
+      rateLimits: noWeekly({ fiveHourUtil: 0, fiveHourReset: 0, sevenDayUtil: 0.88, sevenDayReset: inMin(3000), lastUpdated: Date.now() - 43 * 3_600_000 }),
+    });
+    const page = await boot(ok(health([account({ id: "lyra", rateLimits: noWeekly() }), idle])));
+    const [lyra, kyte] = page.rows("accbody");
+    expect(kyte).toContain("88%");
+    expect(kyte).toContain("read 1d 19h ago");
+    expect(lyra).not.toContain("read ");
+    expect(page.el("stripreasons").textContent).toBe("kyte 7d 88% · 43h old");
+  });
+
+  it("does not age-stamp a reading that is current", async () => {
+    const page = await boot(ok(health([account({ id: "hot", rateLimits: noWeekly({ fiveHourUtil: 0.85 }) })])));
+    expect(page.rows("accbody")[0]).not.toContain("read ");
+    expect(page.el("stripreasons").textContent).toBe("hot 5h 85%");
+  });
+
+  it("refuses a verdict whose age is not a number", async () => {
+    const doc = health([account()]);
+    doc.severity.accounts[0] = { ...doc.severity.accounts[0], age: "old" as never };
+    const page = await boot(ok(doc));
+    expect(page.el("strip").attrs["data-level"]).toBe("unknown");
+  });
+});

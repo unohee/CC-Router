@@ -47,6 +47,12 @@ export interface Account {
   bare429Streak?: number;
   /** Runtime-only: when the last bare 429 landed, so a stale streak expires. */
   lastBare429At?: number;
+  /** Runtime-only: responses that carried quota headers since the router started.
+   *  With `sevenDayWindowSeen` it tells an account that has no weekly window
+   *  from one that has not been measured yet. Never persisted. */
+  quotaReadings?: number;
+  /** Runtime-only: some response has carried a 7-day window for this account. */
+  sevenDayWindowSeen?: boolean;
   requestCount: number;
   errorCount: number;
   lastUsed: number;      // Unix timestamp in ms

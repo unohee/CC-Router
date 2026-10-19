@@ -290,7 +290,7 @@ const SCRIPT = String.raw`
     for (var j = 0; j < v.accounts.length; j++) {
       var a = v.accounts[j];
       if (!a || typeof a.id !== "string" || typeof a.state !== "string" || !Object.prototype.hasOwnProperty.call(RUNGS, a.rung)) return false;
-      if ((a.until !== undefined && !isNum(a.until)) || (a.util !== undefined && !isNum(a.util))) return false;
+      if ((a.until !== undefined && !isNum(a.until)) || (a.util !== undefined && !isNum(a.util)) || (a.age !== undefined && !isNum(a.age))) return false;
     }
     return true;
   }
@@ -339,6 +339,11 @@ const SCRIPT = String.raw`
       return { ok: false, note: "not measured yet", why: "This account has not served a request since the router started, and usage is read from response headers." };
     }
     var util = rl[key + "Util"] || 0, reset = rl[key + "Reset"] || 0;
+    // Upstream names a window only for accounts that have one; an account whose responses never
+    // mention a 7-day window (a Teams seat has the 5-hour limit alone) has nothing to read there.
+    if (key === "sevenDay" && reset <= 0 && util <= 0 && a.weeklyWindow === "not-reported") {
+      return { ok: false, note: "no 7d window reported", why: "Upstream has not named a 7-day window in this account's recent responses, so its plan may have no weekly limit. This says what was reported, not what the plan is." };
+    }
     if (reset <= 0 && util <= 0) {
       return { ok: false, note: "no reading", why: "No usage is available for this window: upstream did not report one, or it reset and a new window has not opened yet." };
     }
@@ -394,6 +399,9 @@ const SCRIPT = String.raw`
         text.appendChild(sev);
       }
       text.appendChild(el("span", "note", r.reset > 0 ? "resets in " + dur(r.reset * 1000 - now()) : "reset time unknown"));
+      // The figure behind a warning can be days old on an idle account; say so beside it.
+      var sv = accountSeverity(a);
+      if (sv && sv.age && sv.window === (key === "fiveHour" ? "5h" : "7d")) text.appendChild(el("span", "note", "read " + dur(sv.age) + " ago"));
     }
     if (cap > 0 && cap < 100) {
       var tick = el("div", "tick");

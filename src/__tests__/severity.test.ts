@@ -9,7 +9,11 @@ import {
   describeSeverity,
   formatRemaining,
   severityOfUtil,
+  shortAge,
+  weeklyWindowOf,
   windowReading,
+  STALE_READING_MS,
+  WEEKLY_PROBE_READINGS,
 } from "../proxy/severity.js";
 import type { SeverityAccountInput } from "../proxy/severity.js";
 
@@ -227,5 +231,52 @@ describe("formatRemaining", () => {
     expect(formatRemaining(156 * MIN)).toBe("2h36m");
     expect(formatRemaining(27 * 60 * MIN)).toBe("1d3h");
     expect(formatRemaining(-5)).toBe("0s");
+  });
+});
+
+describe("an old reading says how old it is", () => {
+  const stale = (ageMs: number, util = 0.88) => ({
+    ...limits(0, util), fiveHourUtil: 0, fiveHourReset: 0, sevenDayUtil: util, lastUpdated: NOW - ageMs,
+  });
+
+  it("adds the age to a warning built on a reading older than half an hour, and not before", () => {
+    const old = computeSeverity([acct("kyte", { rateLimits: stale(43 * 60 * MIN / 60) })], [], NOW);
+    expect(old.accounts[0]).toMatchObject({ state: "hot", window: "7d", util: 0.88, age: 43 * MIN });
+    expect(old.reasons).toEqual(["kyte 7d 88% · 43m old"]);
+    const justUnder = computeSeverity([acct("kyte", { rateLimits: stale(STALE_READING_MS - 1) })], [], NOW);
+    expect(justUnder.accounts[0].age).toBeUndefined();
+    expect(justUnder.reasons).toEqual(["kyte 7d 88%"]);
+    expect(computeSeverity([acct("kyte", { rateLimits: stale(STALE_READING_MS) })], [], NOW).accounts[0].age).toBe(STALE_READING_MS);
+  });
+
+  it("reads days for an idle account, and carries the age on a near-limit reading too", () => {
+    const days = computeSeverity([acct("kyte", { rateLimits: stale(43 * 60 * MIN, 0.97) })], [], NOW);
+    expect(days.accounts[0]).toMatchObject({ state: "near", age: 43 * 60 * MIN });
+    expect(days.reasons).toEqual(["kyte 7d 97% · 43h old"]);
+  });
+
+  it("leaves a healthy account alone however old its reading is", () => {
+    const quiet = computeSeverity([acct("a", { rateLimits: stale(90 * 60 * MIN, 0.2) })], [], NOW);
+    expect(quiet.accounts[0]).toEqual({ id: "a", rung: "ok", state: "ok" });
+  });
+
+  it("formats an age in one unit", () => {
+    expect([shortAge(0), shortAge(45 * MIN), shortAge(59 * MIN), shortAge(60 * MIN), shortAge(43 * 60 * MIN),
+      shortAge(99 * 60 * MIN), shortAge(100 * 60 * MIN), shortAge(5 * 24 * 60 * MIN), shortAge(-1)])
+      .toEqual(["0m", "45m", "59m", "1h", "43h", "99h", "4d", "5d", "0m"]);
+  });
+});
+
+describe("whether an account has a weekly window", () => {
+  it("is unknown until enough responses have been read, then 'not-reported' if none named one", () => {
+    expect(WEEKLY_PROBE_READINGS).toBe(20);
+    expect(weeklyWindowOf({})).toBe("unknown");
+    expect(weeklyWindowOf({ quotaReadings: WEEKLY_PROBE_READINGS - 1 })).toBe("unknown");
+    expect(weeklyWindowOf({ quotaReadings: WEEKLY_PROBE_READINGS })).toBe("not-reported");
+  });
+
+  it("is 'seen' as soon as one response named a 7-day window, however few were read", () => {
+    expect(weeklyWindowOf({ sevenDayWindowSeen: true })).toBe("seen");
+    expect(weeklyWindowOf({ sevenDayWindowSeen: true, quotaReadings: 5000 })).toBe("seen");
   });
 });

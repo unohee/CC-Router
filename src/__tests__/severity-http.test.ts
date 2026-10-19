@@ -32,9 +32,18 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+const OK_WEEKLY = {
+  ...OK,
+  headers: {
+    ...OK.headers,
+    "anthropic-ratelimit-unified-7d-utilization": "0.88",
+    "anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 2 * 86_400),
+  },
+};
+
 interface Health {
   status: string;
-  accounts: { id: string; healthy: boolean; coolingUntil?: number; modelCooldowns?: Record<string, number>; expiresInMs: number; enabled?: boolean; rateLimits?: unknown }[];
+  accounts: { id: string; weeklyWindow?: string; healthy: boolean; coolingUntil?: number; modelCooldowns?: Record<string, number>; expiresInMs: number; enabled?: boolean; rateLimits?: unknown }[];
   recentLogs: { ts: number; accountId: string; type: string; statusCode?: number; details?: string }[];
   severity?: {
     pool: string; reasons: string[]; recent429s: number;
@@ -147,5 +156,30 @@ it("agrees with the pure module when given the same health data", async () => {
     const again = computeSeverity(h.accounts, h.recentLogs, Date.now());
     expect(h.severity?.pool).toBe(again.pool);
     expect(h.severity?.accounts.map(a => [a.id, a.rung, a.state])).toEqual(again.accounts.map(a => [a.id, a.rung, a.state]));
+  });
+});
+
+it("says an account has no weekly window only after enough responses never named one", async () => {
+  await withRouter([], async ({ send, health }) => {
+    expect((await health()).accounts[0].weeklyWindow).toBe("unknown");
+    for (let i = 0; i < 19; i++) expect((await send()).status).toBe(200);
+    expect((await health()).accounts[0].weeklyWindow).toBe("unknown");    // 19 readings: not yet
+    await send();
+    expect((await health()).accounts[0].weeklyWindow).toBe("not-reported"); // the 20th
+  });
+});
+
+it("knows an account has a weekly window the moment one response names it, and keeps knowing", async () => {
+  await withRouter([OK_WEEKLY], async ({ send, health }) => {
+    await send();
+    const first = await health();
+    expect(first.accounts[0].weeklyWindow).toBe("seen");
+    expect((first.accounts[0].rateLimits as { sevenDayUtil: number }).sevenDayUtil).toBe(0.88);
+    // The next response carries no 7-day figure and replaces the reading whole,
+    // yet the account is still one that has a weekly window.
+    await send();
+    const second = await health();
+    expect((second.accounts[0].rateLimits as { sevenDayUtil: number }).sevenDayUtil).toBe(0);
+    expect(second.accounts[0].weeklyWindow).toBe("seen");
   });
 });

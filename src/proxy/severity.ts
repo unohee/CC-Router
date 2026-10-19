@@ -32,6 +32,10 @@ export const PROBLEM_AT = 0.95;
 /** This many upstream 429s inside the window is a problem in its own right. */
 export const BURST_COUNT = 3;
 export const BURST_WINDOW_MS = 5 * 60_000;
+/** A reading older than this is called out wherever it is the reason for a warning. */
+export const STALE_READING_MS = 30 * 60_000;
+/** How many responses with quota headers, none carrying a 7-day window, before an account is called weekly-less. */
+export const WEEKLY_PROBE_READINGS = 20;
 
 /** What severity needs to know about a window of quota use; a subset of the health view. */
 export interface SeverityRateLimits {
@@ -70,6 +74,8 @@ export interface AccountSeverity {
   /** The window that is hottest, and how full it is (1 = full). Set for "near" and "hot". */
   window?: "5h" | "7d";
   util?: number;
+  /** How old the reading behind a "near" or "hot" is, in ms, when it is older than `STALE_READING_MS`. */
+  age?: number;
 }
 
 export interface PoolSeverity {
@@ -109,6 +115,28 @@ export function windowReading(
   if (reset <= 0 && util <= 0) return { ok: false, note: "no reading" };
   if (reset > 0 && reset * 1000 <= now) return { ok: false, note: "reset since last reading" };
   return { ok: true, util, reset };
+}
+
+/** Whether an account has a 7-day window at all, as far as its responses have said. */
+export type WeeklyWindow = "seen" | "not-reported" | "unknown";
+
+/**
+ * An account whose responses never name a 7-day window is not "unmeasured" on
+ * that side, it has none to measure (a Teams seat has only the 5-hour limit).
+ * That is a claim about what upstream has *reported*, not about the plan, which
+ * the router does not record, so it waits for enough responses before saying it.
+ */
+export function weeklyWindowOf(a: { quotaReadings?: number; sevenDayWindowSeen?: boolean }): WeeklyWindow {
+  if (a.sevenDayWindowSeen) return "seen";
+  return (a.quotaReadings ?? 0) >= WEEKLY_PROBE_READINGS ? "not-reported" : "unknown";
+}
+
+/** "45m", "43h", "5d": one unit, for a reading's age where width is scarce. */
+export function shortAge(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 100 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
 /** "4m", "2h36m", "1d3h"; seconds below a minute, because a cooldown can be that short. */
@@ -164,8 +192,14 @@ function assessAccount(a: SeverityAccountInput, now: number): AccountSeverity {
   }
   if (hottest) {
     const rung = severityOfUtil(hottest.util);
-    if (rung === "problem") return { id, rung, state: "near", ...hottest };
-    if (rung === "watch") return { id, rung, state: "hot", ...hottest };
+    // A figure that has not been refreshed for a while is still the reason for the
+    // warning, so the warning says how old it is; an idle account's weekly reading
+    // can be days behind and looks just as current as a live one.
+    const lastUpdated = a.rateLimits?.lastUpdated;
+    const age = typeof lastUpdated === "number" && lastUpdated > 0 ? now - lastUpdated : 0;
+    const aged = age >= STALE_READING_MS ? { age } : {};
+    if (rung === "problem") return { id, rung, state: "near", ...hottest, ...aged };
+    if (rung === "watch") return { id, rung, state: "hot", ...hottest, ...aged };
   }
   return { id, rung: "ok", state: "ok" };
 }
@@ -182,7 +216,8 @@ function reasonOf(s: AccountSeverity, now: number): string {
     case "near":
     case "hot": {
       const pct = Math.round((s.util ?? 0) * 100);
-      return (s.util ?? 0) >= 1 ? `${s.id} ${s.window} at limit` : `${s.id} ${s.window} ${pct}%`;
+      const figure = (s.util ?? 0) >= 1 ? `${s.id} ${s.window} at limit` : `${s.id} ${s.window} ${pct}%`;
+      return s.age ? `${figure} · ${shortAge(s.age)} old` : figure;
     }
     default: return s.id;
   }

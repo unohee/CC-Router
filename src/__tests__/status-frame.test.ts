@@ -259,6 +259,30 @@ describe("the frame", () => {
     expect(cellWidth(tiny)).toBeLessThanOrEqual(43);
   });
 
+  it("says a 7-day window is absent only when upstream has said none exists, and in plain words when it has not", () => {
+    const noWeekly = { ...limits(0.3), sevenDayUtil: 0, sevenDayReset: 0 };
+    const row = (weeklyWindow: AccountStat["weeklyWindow"], cols = 80) =>
+      text(buildFrame(frameInput(health([account("lyra", { rateLimits: noWeekly, weeklyWindow })]), { cols })).lines[1]!);
+    expect(row("not-reported")).toContain("7d no 7d window");
+    expect(row("unknown")).toContain("7d no reading");
+    expect(row(undefined)).toContain("7d no reading");
+    expect(row("seen")).toContain("7d no reading");   // it has a window; this reading just lost it to a roll-over
+    expect(row("not-reported", 66)).toMatch(/7d\s+—/);   // narrow panes show a dash, as before
+  });
+
+  it("puts the age of an old reading beside the warning, in the state column and in the strip", () => {
+    const idle = account("kyte", { rateLimits: { ...limits(0), fiveHourUtil: 0, fiveHourReset: 0, sevenDayUtil: 0.88, lastUpdated: NOW - 43 * 60 * MIN } });
+    const live = account("lyra", { rateLimits: limits(0.84) });
+    const { lines } = buildFrame(frameInput(health([live, idle], manyLogs(3))));
+    const joined = lines.map(text);
+    expect(joined[0]).toContain("Watch — lyra 5h 84% · kyte 7d 88% · 43h old");
+    expect(joined.slice(1).find(l => l.includes("kyte"))).toMatch(/▲ kyte\s+hot 43h\s+5h/);
+    // The live account's state word has no age, so a warning on fresh data is not cluttered.
+    expect(joined.slice(1).find(l => l.includes("lyra"))).toMatch(/▲ lyra\s+hot\s{3,}5h/);
+    // The age must still fit the state column on a near-limit row.
+    expect(cellWidth("NEAR 100d")).toBeLessThanOrEqual(9);
+  });
+
   it("colours a window red once it reaches the routing cap, not only the problem line", () => {
     const a = account("lyra", { sessionLimitPercent: 40 });
     const s = computeSeverity([a], [], NOW).accounts[0]!;

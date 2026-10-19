@@ -33,6 +33,8 @@ export interface AccountStat {
   enabled?: boolean;
   sessionLimitPercent?: number;
   weeklyLimitPercent?: number;
+  /** Whether upstream has ever named a 7-day window for this account. */
+  weeklyWindow?: "seen" | "not-reported" | "unknown";
 }
 
 export interface ProviderOperationalStatus {

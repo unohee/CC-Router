@@ -23,7 +23,8 @@ import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample } from "./usage-history.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
-import { computeSeverity, BURST_WINDOW_MS } from "./severity.js";
+import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
+import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
@@ -74,6 +75,8 @@ export interface HealthAccountView {
   rateLimits?: AccountRateLimits;
   sessionLimitPercent?: number;
   weeklyLimitPercent?: number;
+  /** Whether upstream has ever named a 7-day window for this account (Anthropic accounts only). */
+  weeklyWindow?: WeeklyWindow;
 }
 
 export interface OperationalStatus {
@@ -182,6 +185,7 @@ function publicAnthropicAccountView(a: Account): HealthAccountView {
     lastUsedMs: a.lastUsed,
     lastRefreshMs: a.lastRefresh,
     rateLimits: a.rateLimits,
+    weeklyWindow: weeklyWindowOf(a),
   };
 }
 
@@ -1116,7 +1120,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         // actually limiting: "five_hour" vs "seven_day") to explain WHY the
         // account got rate-limited, not just that it did.
         const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
-        if (rl) account.rateLimits = rl;
+        if (rl) {
+          account.rateLimits = rl;
+          // `rl` replaces the previous reading whole, so whether this account has a
+          // weekly window at all has to be remembered here, not read back from it.
+          account.quotaReadings = (account.quotaReadings ?? 0) + 1;
+          if (rl.sevenDayReset > 0 || rl.sevenDayUtil > 0) account.sevenDayWindowSeen = true;
+        }
 
         // A served request ends a bare-429 streak: the "consecutive" in the
         // escalating cooldown means refused again with nothing served between.
