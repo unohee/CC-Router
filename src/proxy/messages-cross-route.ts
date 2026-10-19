@@ -9,6 +9,10 @@ import { createOpenAIStreamToAnthropicNormalizer, openAIStreamFailure } from "..
 import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
 import { codexCanHold, estimatePromptTokens } from "../providers/openai/context-limits.js";
+import { decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
+import type { OllamaDecision, ResolvedOllamaFallbackConfig } from "../providers/ollama/fallback-policy.js";
+import { forwardToOllama } from "../providers/ollama/transport.js";
+import type { OllamaUsage } from "../providers/ollama/transport.js";
 import {
   decideMigration,
   type PinBlock, type CompactAskGuard,
@@ -49,6 +53,30 @@ type OpenAIRouteInfo = OpenAIActivity & {
    *  gone, so it still counts as served, but not as a success. */
   failedAfterStart?: boolean;
 };
+
+export type OllamaRouteInfo = OpenAIActivity & {
+  upstreamModel: string;
+  /** Seconds until the Anthropic pool frees up, as it read when deciding. */
+  poolWaitSeconds: number;
+  usage?: OllamaUsage;
+  failedAfterStart?: boolean;
+  /** The client hung up mid-response. Served, but neither a success nor an
+   *  upstream error. */
+  clientClosed?: boolean;
+};
+
+/** Present only when ProxyConfig.ollamaFallback is enabled. Absent, the
+ *  routes below do no Ollama work at all. */
+export interface OllamaFallbackRouteOptions {
+  config: ResolvedOllamaFallbackConfig;
+  /** TokenPool.secondsUntilAvailable. */
+  poolWaitSeconds: (model?: string) => number;
+  /** Read per request so a rotated key takes effect without a restart. */
+  apiKey: () => string | undefined;
+  /** Same upstream timeout as the Anthropic proxy. */
+  timeoutMs: number;
+  fetchImpl?: typeof fetch;
+}
 
 export interface MessagesCrossProviderRouteOptions {
   /** Select an OpenAI account. `preferredAccountId` asks for one specific
@@ -121,6 +149,13 @@ export interface MessagesCrossProviderRouteOptions {
   }) => void;
   /** Tracks per-session prompt size so a compaction can be spotted. */
   contextTracker?: SessionContextTracker;
+  /** Last-resort fallback to an Ollama endpoint; see OllamaFallbackRouteOptions. */
+  ollamaFallback?: OllamaFallbackRouteOptions;
+  /** Fired after Ollama answered (or started answering) a request. */
+  onOllamaFallback?: (info: OllamaRouteInfo) => void;
+  /** Fired when Ollama was considered for a blocked pool but not used, or
+   *  failed before answering. Not fired while Anthropic can serve. */
+  onOllamaSkip?: (reason: string) => void;
 }
 
 export interface OpenAIUsage {
@@ -516,6 +551,49 @@ export function mountMessagesCrossProviderRoute(
 ): void {
   const forwardOpenAI = opts.forwardOpenAI ?? forwardOpenAICodexResponse;
   const prepareOpenAIAccount = opts.prepareOpenAIAccount ?? (async () => true);
+  const ollama = opts.ollamaFallback;
+
+  const decideOllama = (claudeModel: string, estimatedPromptTokens: number | null): OllamaDecision => {
+    const decision = decideOllamaFallback({
+      config: ollama?.config ?? null,
+      claudeModel,
+      anthropicAvailable: () => opts.hasAvailableAnthropicAccount?.(claudeModel) ?? true,
+      poolWaitSeconds: () => ollama?.poolWaitSeconds(claudeModel) ?? 0,
+      estimatedPromptTokens,
+      apiKey: () => ollama?.apiKey(),
+    });
+    // Only a decision taken against a blocked pool is worth surfacing; the
+    // everyday "Anthropic can serve" answer would bury it.
+    if (!decision.use && decision.reason !== "disabled" && decision.reason !== "anthropic-available") {
+      opts.onOllamaSkip?.(decision.detail ? `${decision.reason} (${decision.detail})` : decision.reason);
+    }
+    return decision;
+  };
+
+  // count_tokens is answered locally while requests are going to Ollama:
+  // Ollama does not implement it (404; a known bug can hang the daemon on it),
+  // and proxying it to the blocked pool only earns the client a 429. Mounted
+  // only when the fallback is enabled, so the default path is untouched.
+  if (ollama) {
+    app.post(
+      "/v1/messages/count_tokens",
+      express.json({
+        limit: "10mb",
+        verify: (req, _res, buf) => {
+          (req as Request)._ccRawBody = Buffer.from(buf);
+        },
+      }),
+      (req: Request, res: Response, next: NextFunction) => {
+        if (!isAnthropicMessagesRequest(req.body)) return next();
+        const route = selectRoute(req.body.model, opts.modelRouting);
+        if (route.provider !== "anthropic_subscription") return next();
+        const estimated = estimatePromptTokens(req._ccRawBody);
+        const decision = decideOllama(route.upstreamModel, estimated);
+        if (!decision.use) return next();
+        res.json({ input_tokens: estimated ?? 0 });
+      },
+    );
+  }
 
   app.post(
     "/v1/messages",
@@ -780,6 +858,45 @@ export function mountMessagesCrossProviderRoute(
           return;
         }
         // OpenAI unavailable too — fall through to the normal (degraded) Anthropic path.
+      }
+
+      // Last resort: an Ollama model, but only for a pool that is blocked for
+      // longer than the operator is willing to wait. Re-decided on every request
+      // and never pinned, so the session returns to Anthropic the moment an
+      // account frees up. A session pinned to an Anthropic account reaches this
+      // point too: the migration hold above only applies while an alternative
+      // account exists, and with none the pin cannot be retained downstream.
+      if (ollama && !res.headersSent) {
+        const decision = decideOllama(route.upstreamModel, estimatedPromptTokens);
+        if (decision.use) {
+          const outcome = await forwardToOllama({
+            baseUrl: ollama.config.baseUrl,
+            apiKey: ollama.apiKey(),
+            upstreamModel: decision.model,
+            publicModel: req.body.model ?? route.publicModel,
+            body: req.body as unknown as Record<string, unknown>,
+            timeoutMs: ollama.timeoutMs,
+            fetchImpl: ollama.fetchImpl,
+          }, res);
+          if (outcome.ok) {
+            opts.onOllamaFallback?.({
+              upstreamModel: decision.model,
+              poolWaitSeconds: decision.waitSeconds,
+              usage: outcome.usage,
+              failedAfterStart: outcome.failedAfterStart,
+              clientClosed: outcome.clientClosed,
+              ...openAIActivity(req, res, startedAt, sessionId),
+            });
+            return;
+          }
+          // The client hung up before Ollama answered. Nothing failed, and the
+          // pool's 429 would only be logged for a request nobody is waiting on.
+          if (outcome.reason === "client_closed" || res.destroyed) return;
+          // Nothing was written: the client gets the pool's own 429, whose
+          // Retry-After says when Claude is back. Ollama's error says nothing
+          // useful about that.
+          opts.onOllamaSkip?.(`ollama-failed (${outcome.reason}${outcome.status ? ` ${outcome.status}` : ""}: ${outcome.detail.slice(0, 120)})`);
+        }
       }
 
       next();

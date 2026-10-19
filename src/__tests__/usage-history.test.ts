@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  UsageHistory, sanitizeModel, openAISample, HOUR_MS, DAY_MS, RETENTION_DAYS, UNKNOWN_MODEL, OTHER_MODEL,
+  UsageHistory, sanitizeModel, openAISample, ollamaSample, HOUR_MS, DAY_MS, RETENTION_DAYS, UNKNOWN_MODEL, OTHER_MODEL,
 } from "../proxy/usage-history.js";
 
 const NOW = Date.UTC(2026, 9, 16, 12, 30); // 2026-10-16 12:30Z
@@ -288,5 +288,23 @@ describe("openAISample", () => {
     expect(h.buckets()).toEqual([{
       hour: HOUR, provider: "openai", model: "gpt", input: 7, output: 3, cacheRead: 0, cacheCreation: 0, requests: 1,
     }]);
+  });
+});
+
+describe("ollamaSample", () => {
+  it("lands as its own provider with cache reads, and survives a save and restore", () => {
+    const { h } = store();
+    h.record(ollamaSample({ input_tokens: 11, output_tokens: 4, cache_read_input_tokens: 2 }, "glm:cloud", NOW)!);
+    const expected = [{
+      hour: HOUR, provider: "ollama", model: "glm:cloud", input: 11, output: 4, cacheRead: 2, cacheCreation: 0, requests: 1,
+    }];
+    expect(h.buckets()).toEqual(expected);
+    const { h: restored } = store();
+    expect(restored.restore(h.toFile())).toBe(true);
+    expect(restored.buckets()).toEqual(expected);
+  });
+
+  it("makes nothing when the response reported no usage", () => {
+    expect(ollamaSample(undefined, "glm:cloud", NOW)).toBeNull();
   });
 });

@@ -755,7 +755,8 @@ const SCRIPT = String.raw`
     var m = d.models, kids = [];
     if (m.rows.length === 0) kids.push(el("li", "note", "No usage in the last " + m.windowDays + " days."));
     m.rows.forEach(function (r) {
-      var name = r.provider === "openai" ? r.model + " (OpenAI)" : r.model;
+      var name = r.provider === "openai" ? r.model + " (OpenAI)"
+        : r.provider === "ollama" ? r.model + " (Ollama)" : r.model;
       kids.push(shareRow(name, r.share, num(r.total) + " · " + pct(r.share), r.model + " · " + plural(r.requests, "request")));
     });
     if (m.others) kids.push(shareRow(plural(m.others.count, "other model"), m.others.share, num(m.others.total) + " · " + pct(m.others.share), ""));

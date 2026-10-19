@@ -16,12 +16,14 @@ import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } fro
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import type { ThrottleGate } from "./throttle.js";
+import { logOllamaFallback, logOllamaTransition } from "./logger.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
-import { usageHistory, openAISample } from "./usage-history.js";
+import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
+import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness } from "../providers/ollama/fallback-policy.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
@@ -325,6 +327,30 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts);
   const initialConfig = readConfig();
   const modelRouting = initialConfig.modelRouting ?? {};
+
+  // Ollama fallback — opt-in, null unless enabled. Problems that make it
+  // unusable are reported once here, not on every request it then declines.
+  const ollamaConfig = resolveOllamaFallbackConfig(initialConfig.ollamaFallback);
+  if (ollamaConfig) {
+    if (!ollamaConfig.model) {
+      console.warn(chalk.yellow("⚠ Ollama fallback is enabled but no model is set — it will stay inactive."));
+      console.warn(chalk.gray("  Run: cc-router configure --ollama-model <model>"));
+    } else if (ollamaConfig.keyRequired && !readOllamaApiKey(ollamaConfig)) {
+      console.warn(chalk.yellow(`⚠ Ollama fallback: ${ollamaConfig.baseUrl} needs an API key, but ${ollamaConfig.apiKeyEnv} is not set — it will stay inactive.`));
+    } else {
+      console.log(chalk.gray(`  Ollama fallback: ${ollamaConfig.model} via ${ollamaConfig.baseUrl} when every account is blocked for over ${ollamaConfig.minWaitSeconds}s`));
+    }
+  }
+  /** What /cc-router/health reports about the Ollama fallback. `serving` is
+   *  true from an Ollama answer until the next successful Anthropic one. */
+  const ollamaStatus = {
+    serving: false,
+    lastServedAt: null as number | null,
+    requests: 0,
+    errors: 0,
+    lastSkipReason: null as string | null,
+    lastSkipAt: null as number | null,
+  };
 
   // Session affinity — see session-router.ts for why request-level round-robin
   // and prompt caching work against each other.
@@ -657,6 +683,27 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
       severity: computeSeverity(accountViews, stats.getLogsSince(Date.now() - BURST_WINDOW_MS), Date.now()),
+      ollamaFallback: ollamaConfig
+        ? {
+          enabled: true,
+          model: ollamaConfig.model || null,
+          baseUrl: ollamaConfig.baseUrl,
+          minWaitSeconds: ollamaConfig.minWaitSeconds,
+          // Readiness, so a missing key shows before the pool is blocked. The
+          // key is read from this process's environment — under a service
+          // manager that is the unit's, not the operator's shell. Only its
+          // presence is reported, never the value.
+          keyRequired: ollamaConfig.keyRequired,
+          keyPresent: Boolean(readOllamaApiKey(ollamaConfig)),
+          ...ollamaReadiness(ollamaConfig),
+          serving: ollamaStatus.serving,
+          lastServedAt: ollamaStatus.lastServedAt,
+          requests: ollamaStatus.requests,
+          errors: ollamaStatus.errors,
+          lastSkipReason: ollamaStatus.lastSkipReason,
+          lastSkipAt: ollamaStatus.lastSkipAt,
+        }
+        : { enabled: false },
     });
   });
 
@@ -1024,6 +1071,51 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         ...activity,
       });
     },
+    ...(ollamaConfig ? {
+      ollamaFallback: {
+        config: ollamaConfig,
+        poolWaitSeconds: (model?: string) => pool.secondsUntilAvailable(model),
+        apiKey: () => readOllamaApiKey(ollamaConfig),
+        timeoutMs: proxyRequestTimeoutMs,
+      },
+    } : {}),
+    onOllamaSkip: (reason) => {
+      ollamaStatus.lastSkipReason = reason;
+      ollamaStatus.lastSkipAt = Date.now();
+    },
+    onOllamaFallback: ({ upstreamModel, poolWaitSeconds, usage, failedAfterStart, clientClosed, ...activity }) => {
+      if (!ollamaStatus.serving) {
+        logOllamaTransition("ollama", `every account blocked for ${poolWaitSeconds}s`);
+        ollamaStatus.serving = true;
+      }
+      ollamaStatus.requests++;
+      ollamaStatus.lastServedAt = Date.now();
+      logOllamaFallback(upstreamModel, poolWaitSeconds,
+        failedAfterStart ? "— failed mid-response" : clientClosed ? "— client disconnected" : undefined);
+      // Its own provider in the history, and never an Anthropic account's
+      // counters: these tokens were not spent on any Claude subscription.
+      if (usage) {
+        stats.totalInputTokens += usage.input_tokens;
+        stats.totalOutputTokens += usage.output_tokens;
+        stats.totalCacheReadTokens += usage.cache_read_input_tokens ?? 0;
+        const sample = ollamaSample(usage, upstreamModel, Date.now());
+        if (sample) usageHistory.record(sample);
+      }
+      if (failedAfterStart) {
+        stats.totalErrors++;
+        ollamaStatus.errors++;
+      }
+      const msg = `all Anthropic accounts blocked for ${poolWaitSeconds}s — answered by Ollama (${upstreamModel})`;
+      stats.addLog({
+        ts: Date.now(), accountId: "ollama", model: upstreamModel,
+        type: failedAfterStart ? "error" : "route",
+        details: failedAfterStart ? `${msg} — upstream failed mid-response`
+          : clientClosed ? `${msg} — client disconnected` : msg,
+        inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        cacheReadTokens: usage?.cache_read_input_tokens,
+        ...activity,
+      });
+    },
     onFallback: ({ openAIAccountId, upstreamModel, usage, failedAfterStart, ...activity }) => {
       const msg = `all Anthropic accounts exhausted — routing to ${openAIAccountId} (${upstreamModel})`;
       logFallback(openAIAccountId, upstreamModel);
@@ -1131,6 +1223,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         // A served request ends a bare-429 streak: the "consecutive" in the
         // escalating cooldown means refused again with nothing served between.
         if (status < 400) resetBare429Streak(account);
+
+        // The first Anthropic answer after a stretch on Ollama closes it.
+        if (status < 400 && ollamaStatus.serving) {
+          ollamaStatus.serving = false;
+          logOllamaTransition("anthropic", `${account.id} answered`);
+        }
 
         if (status === 401) {
           // Token invalid or expired mid-request.
@@ -1354,6 +1452,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           details: `no account available — retry in ${err.retryAfterSeconds}s`,
         });
         res.setHeader("Retry-After", String(err.retryAfterSeconds));
+        // Tell Claude Code this is a retryable wait, not a plan limit. The router
+        // must never put anthropic-ratelimit-unified-* headers on this response:
+        // those make the client stop and show "limit reached" instead of retrying.
+        res.setHeader("x-should-retry", "true");
         res.status(429).json({
           type: "error",
           error: {

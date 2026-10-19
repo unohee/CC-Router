@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { SUGGESTED_TIER_MODELS } from "../protocol/model-ref.js";
-import { writeClaudeSettings, removeClaudeSettings, readClaudeProxySettings } from "../utils/claude-config.js";
+import { writeClaudeSettings, removeClaudeSettings, readClaudeProxySettings, setRetryWatchdog } from "../utils/claude-config.js";
 import { writeCodexRouterConfig } from "../utils/codex-config.js";
 import { readConfig, writeConfig, generateProxySecret, getThrottleConfig } from "../config/manager.js";
+import { resolveOllamaFallbackConfig } from "../providers/ollama/fallback-policy.js";
 import { DEFAULT_THROTTLE } from "../proxy/throttle.js";
 import { PROXY_PORT, CLAUDE_SETTINGS_PATH } from "../config/paths.js";
 import { buildModelRoutingUpdate } from "../protocol/model-routing-config.js";
@@ -26,12 +27,20 @@ export function registerConfigure(program: Command): void {
     .option("--disable-auto-update", "Disable automatic updates for the proxy")
     .option("--enable-fallback", "Enable automatic fallback to OpenAI when all Claude accounts are exhausted")
     .option("--disable-fallback", "Disable automatic cross-provider fallback")
+    .option("--enable-ollama-fallback", "Answer from Ollama when every Claude account is blocked for longer than --ollama-min-wait")
+    .option("--disable-ollama-fallback", "Disable the Ollama fallback (default)")
+    .option("--ollama-model <model>", "Ollama model the fallback asks for (e.g. a :cloud model)")
+    .option("--ollama-base-url <url>", "Ollama endpoint (default https://ollama.com; key read from $OLLAMA_API_KEY)")
+    .option("--ollama-min-wait <seconds>", "Fall back only when the earliest reset is further away than this (default 900)")
+    .option("--ollama-context-tokens <n>", "Largest request (router estimate, ~2x real tokens) sent to Ollama (default 1048576)")
     .option("--enable-session-pool-openai", "Let whole sessions be assigned to an OpenAI subscription account")
     .option("--disable-session-pool-openai", "Assign sessions to Claude accounts only (default)")
     .option("--disable-session-affinity", "Pick an account per request instead of per session")
     .option("--enable-session-affinity", "Pin each session to one account (default)")
     .option("--enable-model-tiers", "Map Claude tiers (opus/sonnet/haiku) to comparable Codex models")
     .option("--disable-model-tiers", "Send every cross-provider request to the single default model")
+    .option("--enable-retry-watchdog", "Let Claude Code keep retrying until an account resets (writes CLAUDE_CODE_RETRY_WATCHDOG=1)")
+    .option("--disable-retry-watchdog", "Remove CLAUDE_CODE_RETRY_WATCHDOG from ~/.claude/settings.json (default)")
     .option("--enable-throttle", "Pace requests to accounts whose quota is running hot (reduces burst-driven 429s)")
     .option("--disable-throttle", "Disable request pacing (default)")
     .option("--throttle-max-inflight <n>", "Max concurrent in-flight requests per account (0 disables the gate)")
@@ -56,6 +65,14 @@ export function registerConfigure(program: Command): void {
       disableSessionAffinity?: boolean;
       enableModelTiers?: boolean;
       disableModelTiers?: boolean;
+      enableOllamaFallback?: boolean;
+      disableOllamaFallback?: boolean;
+      ollamaModel?: string;
+      ollamaBaseUrl?: string;
+      ollamaMinWait?: string;
+      ollamaContextTokens?: string;
+      enableRetryWatchdog?: boolean;
+      disableRetryWatchdog?: boolean;
       enableThrottle?: boolean;
       disableThrottle?: boolean;
       throttleMaxInflight?: string;
@@ -127,6 +144,12 @@ export function registerConfigure(program: Command): void {
           ? chalk.green("enabled") + chalk.gray(` (per-account max ${throttle.perAccountMaxInFlight}, +${throttle.minIntervalMs}ms between sends, start ${Math.round(throttle.startUtil * 100)}%)`)
           : chalk.gray("disabled");
         console.log(`    Throttle:            ${throttleStatus}`);
+        const ollama = resolveOllamaFallbackConfig(cfg.ollamaFallback);
+        console.log(`    Ollama fallback:     ${ollama
+          ? (ollama.model
+            ? chalk.green("enabled") + chalk.gray(` (${ollama.model} via ${ollama.baseUrl}, after ${ollama.minWaitSeconds}s)`)
+            : chalk.yellow("enabled (inactive — no model)"))
+          : chalk.gray("disabled")}`);
         const tierMap = cfg.modelRouting?.openAITierMap;
         if (tierMap && Object.keys(tierMap).length > 0) {
           const gated = !cfg.modelRouting?.openAIDefaultModel;
@@ -220,6 +243,83 @@ export function registerConfigure(program: Command): void {
         delete modelRouting.openAITierMap;
         writeConfig({ ...cfg, modelRouting });
         console.log(chalk.green("✓ Model tier routing disabled — the OpenAI default answers every tier."));
+        console.log(chalk.gray("  Restart cc-router for the change to take effect."));
+        return;
+      }
+
+      if (opts.enableRetryWatchdog) {
+        setRetryWatchdog(true);
+        console.log(chalk.green(`✓ Retry watchdog enabled in ${CLAUDE_SETTINGS_PATH}.`));
+        console.log(chalk.gray("  When every account is limited, Claude Code waits for the router's"));
+        console.log(chalk.gray("  Retry-After (the earliest reset in the pool) instead of giving up."));
+        console.log(chalk.gray("  Takes effect in newly started Claude Code sessions."));
+        return;
+      }
+
+      if (opts.disableRetryWatchdog) {
+        setRetryWatchdog(false);
+        console.log(chalk.green(`✓ Retry watchdog removed from ${CLAUDE_SETTINGS_PATH}.`));
+        return;
+      }
+
+      // ─── Ollama fallback (opt-in last resort) ───────────────────────────────
+      // One block, so `--enable-ollama-fallback --ollama-model X` is a single
+      // write. The setting flags alone update the stored values without
+      // changing whether the fallback is on.
+      if (opts.enableOllamaFallback || opts.disableOllamaFallback
+          || opts.ollamaModel !== undefined || opts.ollamaBaseUrl !== undefined || opts.ollamaMinWait !== undefined
+          || opts.ollamaContextTokens !== undefined) {
+        const cfg = readConfig();
+        const next = { ...(cfg.ollamaFallback ?? { enabled: false, model: "" }) };
+        if (opts.ollamaModel !== undefined) next.model = opts.ollamaModel.trim();
+        if (opts.ollamaBaseUrl !== undefined) {
+          const url = opts.ollamaBaseUrl.trim();
+          try {
+            new URL(url);
+          } catch {
+            console.error(chalk.red(`Not a URL: ${opts.ollamaBaseUrl}`));
+            process.exit(1);
+          }
+          next.baseUrl = url;
+        }
+        if (opts.ollamaMinWait !== undefined) {
+          const seconds = Number(opts.ollamaMinWait);
+          if (!Number.isFinite(seconds) || seconds < 0) {
+            console.error(chalk.red(`--ollama-min-wait must be a number of seconds >= 0, got ${opts.ollamaMinWait}`));
+            process.exit(1);
+          }
+          next.minWaitSeconds = seconds;
+        }
+        if (opts.ollamaContextTokens !== undefined) {
+          const tokens = Number(opts.ollamaContextTokens);
+          if (!Number.isInteger(tokens) || tokens < 1) {
+            console.error(chalk.red(`--ollama-context-tokens must be a positive integer, got ${opts.ollamaContextTokens}`));
+            process.exit(1);
+          }
+          next.contextTokens = tokens;
+        }
+        if (opts.enableOllamaFallback) next.enabled = true;
+        if (opts.disableOllamaFallback) next.enabled = false;
+        writeConfig({ ...cfg, ollamaFallback: next });
+
+        const resolved = resolveOllamaFallbackConfig(next);
+        if (!resolved) {
+          console.log(chalk.green(opts.disableOllamaFallback ? "✓ Ollama fallback disabled." : "✓ Ollama fallback settings saved (fallback is disabled)."));
+        } else {
+          if (!resolved.model) {
+            console.log(chalk.yellow("⚠ No Ollama model configured yet."));
+            console.log(chalk.gray("  Run: cc-router configure --ollama-model <model>"));
+            console.log(chalk.gray("  The fallback will stay inactive until a model is set."));
+          }
+          console.log(chalk.green("✓ Ollama fallback enabled."));
+          console.log(chalk.gray(`  When every Claude account is blocked for more than ${resolved.minWaitSeconds}s, a request`));
+          console.log(chalk.gray(`  is answered by ${resolved.model || "(no model)"} via ${resolved.baseUrl} instead of a 429.`));
+          if (resolved.keyRequired) {
+            console.log(chalk.gray(`  The API key is read from $${resolved.apiKeyEnv} in cc-router's environment.`));
+            console.log(chalk.gray(`  Under a service manager (systemd, launchd) set it in the service's environment,`));
+            console.log(chalk.gray(`  not just your shell. /cc-router/health reports ollamaFallback.keyPresent.`));
+          }
+        }
         console.log(chalk.gray("  Restart cc-router for the change to take effect."));
         return;
       }

@@ -12,7 +12,7 @@
  * wrong for everyone not on the server's clock.
  */
 
-export type UsageProvider = "anthropic" | "openai";
+export type UsageProvider = "anthropic" | "openai" | "ollama";
 
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -86,7 +86,7 @@ function count(value: unknown): number {
 }
 
 function isProvider(value: unknown): value is UsageProvider {
-  return value === "anthropic" || value === "openai";
+  return value === "anthropic" || value === "openai" || value === "ollama";
 }
 
 export interface UsageHistoryOptions {
@@ -243,6 +243,26 @@ export function openAISample(
 ): UsageSample | null {
   if (!usage) return null;
   return { ts, provider: "openai", model, input: usage.input_tokens, output: usage.output_tokens, request: true };
+}
+
+/**
+ * A request answered by the Ollama fallback, as a usage-history sample.
+ *
+ * Its own provider, so these tokens are never counted against a Claude account
+ * or read as OpenAI traffic. Unlike Codex, Ollama reports cache reads, so they
+ * are kept.
+ */
+export function ollamaSample(
+  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined,
+  model: unknown,
+  ts: number,
+): UsageSample | null {
+  if (!usage) return null;
+  return {
+    ts, provider: "ollama", model, input: usage.input_tokens, output: usage.output_tokens,
+    cacheRead: usage.cache_read_input_tokens, cacheCreation: usage.cache_creation_input_tokens,
+    request: true,
+  };
 }
 
 /** The process-wide store the proxy records into and the usage endpoint reads. */

@@ -63,11 +63,58 @@ export function removeClaudeSettings(): void {
     if (env) {
       delete env["ANTHROPIC_BASE_URL"];
       delete env["ANTHROPIC_AUTH_TOKEN"];
+      // Only meaningful against the router's pool 429; see setRetryWatchdog.
+      delete env[RETRY_WATCHDOG_ENV];
       if (Object.keys(env).length === 0) delete existing["env"];
     }
     writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(existing, null, 2), "utf-8");
   } catch {
     // If we can't parse it, leave it alone
+  }
+}
+
+export const RETRY_WATCHDOG_ENV = "CLAUDE_CODE_RETRY_WATCHDOG";
+
+/**
+ * Opt in to (or out of) Claude Code's retry watchdog in ~/.claude/settings.json.
+ *
+ * When every account is limited the router answers 429 with Retry-After set to
+ * the earliest reset in the pool. Without the watchdog Claude Code gives up on
+ * a Retry-After above 60s; with it, the client keeps retrying until an account
+ * is free again. Other env keys and settings are left untouched.
+ */
+export function setRetryWatchdog(enabled: boolean): void {
+  const dir = dirname(CLAUDE_SETTINGS_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(CLAUDE_SETTINGS_PATH)) {
+    try {
+      existing = JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
+    } catch {
+      // Refuse to overwrite a file we cannot parse.
+      throw new Error(`Cannot parse ${CLAUDE_SETTINGS_PATH}; fix it before changing the retry watchdog.`);
+    }
+  }
+
+  const env = { ...((existing["env"] as Record<string, unknown>) ?? {}) };
+  if (enabled) env[RETRY_WATCHDOG_ENV] = "1";
+  else delete env[RETRY_WATCHDOG_ENV];
+
+  const updated: Record<string, unknown> = { ...existing, env };
+  if (Object.keys(env).length === 0) delete updated["env"];
+  writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(updated, null, 2), "utf-8");
+}
+
+/** Read whether the retry watchdog is enabled in ~/.claude/settings.json. */
+export function readRetryWatchdog(): boolean {
+  if (!existsSync(CLAUDE_SETTINGS_PATH)) return false;
+  try {
+    const raw = JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, "utf-8")) as Record<string, unknown>;
+    const env = raw["env"] as Record<string, unknown> | undefined;
+    return env?.[RETRY_WATCHDOG_ENV] === "1";
+  } catch {
+    return false;
   }
 }
 

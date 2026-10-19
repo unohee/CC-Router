@@ -58,6 +58,21 @@ function retryAfterSeconds(a: Account, model?: string, now = Date.now()): number
   return Math.max(1, Math.ceil((blockedUntil - now) / 1000));
 }
 
+/** Enabled and not refused by upstream: getNext() may still hand it out,
+ *  if only through a degraded tier (busy, or over a user cap). */
+function isNotBlocked(a: Account, model?: string): boolean {
+  return a.enabled && !isCooling(a, model) && a.rateLimits.status !== "rate_limited";
+}
+
+/**
+ * The Retry-After getNext() reports once every healthy account is blocked:
+ * the soonest any enabled one can be tried again. Infinity when none is
+ * enabled, which getNext() maps to EmptyPoolError rather than a wait.
+ */
+function blockedPoolRetryAfter(healthy: Account[], model?: string): number {
+  return Math.min(...healthy.filter(a => a.enabled).map(a => retryAfterSeconds(a, model)));
+}
+
 /**
  * Roll over any rate-limit window whose reset timestamp has passed.
  *
@@ -187,9 +202,7 @@ export class TokenPool {
       // must never be bypassed: doing so was the key-rotation deadlock seen in
       // production, where the same account received every retry after both
       // accounts had returned 429.
-      const notBlocked = healthy.filter(a =>
-        a.enabled && !isCooling(a, model) && a.rateLimits.status !== "rate_limited"
-      );
+      const notBlocked = healthy.filter(a => isNotBlocked(a, model));
       const healthyUsable = notBlocked.filter(isUsable);
       if (healthyUsable.length > 0) {
         return this.markSelected(healthyUsable.reduce((best, a) =>
@@ -207,7 +220,7 @@ export class TokenPool {
         return fallback;
       }
 
-      const retryAfter = Math.min(...healthy.filter(a => a.enabled).map(a => retryAfterSeconds(a, model)));
+      const retryAfter = blockedPoolRetryAfter(healthy, model);
       if (!Number.isFinite(retryAfter)) throw new EmptyPoolError("no healthy enabled accounts");
       throw new NoAvailableAccountError(retryAfter);
     }
@@ -327,6 +340,26 @@ export class TokenPool {
   hasAvailableAccount(model?: string): boolean {
     for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
     return this.accounts.some(a => this.isAvailable(a, model));
+  }
+
+  /**
+   * Seconds until getNext() would hand out an account for `model` again.
+   *
+   * 0 means it would serve one now — including through its degraded tiers
+   * (busy, over a user cap, or every account unhealthy), so this is NOT the
+   * negation of hasAvailableAccount(). A positive value is exactly the
+   * Retry-After the router answers with when getNext() throws
+   * NoAvailableAccountError. Infinity means there is nothing to wait for:
+   * the pool is empty or no healthy account is enabled (getNext() throws
+   * EmptyPoolError). Never mutates selection state.
+   */
+  secondsUntilAvailable(model?: string): number {
+    if (this.accounts.length === 0) return Infinity;
+    for (const a of this.accounts) clearExpiredCooldown(a, this.onCooldownExpired);
+    const healthy = this.accounts.filter(a => a.healthy);
+    if (healthy.length === 0) return 0;
+    if (healthy.some(a => isNotBlocked(a, model))) return 0;
+    return blockedPoolRetryAfter(healthy, model);
   }
 
   getAll(): Account[] {

@@ -25,6 +25,8 @@ import {
   writeClaudeSettings,
   removeClaudeSettings,
   readClaudeProxySettings,
+  setRetryWatchdog,
+  readRetryWatchdog,
 } from "../utils/claude-config.js";
 
 const settingsPath = () => `${MOCK_DIR}/settings.json`;
@@ -179,5 +181,59 @@ describe("readClaudeProxySettings", () => {
   it("returns empty object when env block is missing", () => {
     fs.writeFileSync(settingsPath(), JSON.stringify({ model: "claude-opus-4-6" }));
     expect(readClaudeProxySettings()).toEqual({});
+  });
+});
+
+// ─── setRetryWatchdog ────────────────────────────────────────────────────────
+
+describe("setRetryWatchdog", () => {
+  it("is off until opted in", () => {
+    writeClaudeSettings(3456);
+    expect(readRetryWatchdog()).toBe(false);
+    const written = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
+    expect(written.env.CLAUDE_CODE_RETRY_WATCHDOG).toBeUndefined();
+  });
+
+  it("adds the flag next to the router env and keeps the rest", () => {
+    fs.writeFileSync(settingsPath(), JSON.stringify({ theme: "dark", env: { FOO: "bar" } }));
+    writeClaudeSettings(3456);
+    setRetryWatchdog(true);
+    const written = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
+    expect(written.theme).toBe("dark");
+    expect(written.env).toMatchObject({
+      FOO: "bar",
+      ANTHROPIC_BASE_URL: "http://localhost:3456",
+      CLAUDE_CODE_RETRY_WATCHDOG: "1",
+    });
+    expect(readRetryWatchdog()).toBe(true);
+  });
+
+  it("survives a later writeClaudeSettings", () => {
+    setRetryWatchdog(true);
+    writeClaudeSettings(3456);
+    expect(readRetryWatchdog()).toBe(true);
+  });
+
+  it("disabling removes only the flag", () => {
+    writeClaudeSettings(3456);
+    setRetryWatchdog(true);
+    setRetryWatchdog(false);
+    const written = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
+    expect(written.env.CLAUDE_CODE_RETRY_WATCHDOG).toBeUndefined();
+    expect(written.env.ANTHROPIC_BASE_URL).toBe("http://localhost:3456");
+  });
+
+  it("is removed with the rest of the router settings", () => {
+    writeClaudeSettings(3456);
+    setRetryWatchdog(true);
+    removeClaudeSettings();
+    const written = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
+    expect(written.env).toBeUndefined();
+  });
+
+  it("refuses to overwrite an unparseable settings file", () => {
+    fs.writeFileSync(settingsPath(), "{ not json");
+    expect(() => setRetryWatchdog(true)).toThrow(/Cannot parse/);
+    expect(fs.readFileSync(settingsPath(), "utf-8")).toBe("{ not json");
   });
 });

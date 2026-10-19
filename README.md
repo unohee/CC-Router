@@ -328,6 +328,8 @@ cc-router configure --show   Show current Claude Code proxy settings
 cc-router configure --remove Remove cc-router settings (same as revert without stopping)
 
 cc-router configure --enable-fallback           Route to OpenAI when every Claude account is exhausted
+cc-router configure --enable-retry-watchdog     Let Claude Code wait for the earliest reset instead of failing
+cc-router configure --enable-ollama-fallback --ollama-model <m>  Answer from Ollama when the reset is far away
 cc-router configure --enable-session-pool-openai  Let whole sessions be assigned to OpenAI accounts
 cc-router configure --enable-model-tiers        Map Claude tiers to comparable Codex models
 cc-router configure --disable-session-affinity  Pick an account per request instead of per session
@@ -574,6 +576,41 @@ Disable it:
 ```bash
 cc-router configure --disable-fallback
 ```
+
+---
+
+## Waiting out an exhausted pool (opt-in)
+
+When every Claude account is limited, the router answers `429` with `Retry-After` set to the earliest reset across the pool and `x-should-retry: true`. Claude Code on its own gives up on any `Retry-After` above 60 seconds, so a 5-hour or 7-day window ends the request immediately. Claude Code's retry watchdog keeps it waiting instead:
+
+```bash
+cc-router configure --enable-retry-watchdog    # writes CLAUDE_CODE_RETRY_WATCHDOG=1 into ~/.claude/settings.json
+cc-router configure --disable-retry-watchdog
+```
+
+Measured with Claude Code 2.1.303: without the watchdog a `Retry-After: 75` fails at once; with it the client waits the full value (an hour for `Retry-After: 3600`) and retries, also when the 429 is an upstream plan-limit response forwarded as-is. It applies to Claude Code sessions started after the change. While it waits, the session is idle; see the Ollama fallback below to keep working instead.
+
+---
+
+## Fallback to Ollama (opt-in)
+
+When every Claude account is blocked **and** the earliest reset is further away than `minWaitSeconds` (default 900), CC-Router can answer `/v1/messages` from an Anthropic-compatible Ollama endpoint instead of a 429. Closer resets keep the 429 above, so a short wait never swaps the model. The decision is made per request with no session pin: the first request after an account frees up goes back to Claude.
+
+```bash
+# Ollama Cloud directly (key read from $OLLAMA_API_KEY in cc-router's environment — set it in the service unit)
+cc-router configure --enable-ollama-fallback --ollama-model <cloud model>
+# or through a local Ollama daemon that is signed in (no key needed, ":cloud" model names)
+cc-router configure --enable-ollama-fallback --ollama-base-url http://127.0.0.1:11434 --ollama-model deepseek-v4.1-flash:cloud
+cc-router configure --ollama-min-wait 900 --ollama-context-tokens 1048576
+cc-router configure --disable-ollama-fallback
+```
+
+- Ollama's responses carry `thinking` blocks without a `signature`. The router strips them (and renumbers the remaining blocks) so they never enter Claude Code's history, where Anthropic would reject them once the session returns.
+- The response `model` is rewritten to the Claude model the client asked for. `/v1/messages/count_tokens`, which Ollama does not support, is answered locally while the fallback would be used.
+- `--ollama-context-tokens` is compared against the router's size estimate (bytes / 2), which runs about twice the real token count of a Claude Code request. Lower it for models with a small context window; larger requests keep the 429.
+- If Ollama fails before the first byte (including its own 429 when credits run out) the client gets the router's 429, so the retry watchdog still applies.
+- Optional per-tier models: `ollamaFallback.tierMap: { "opus": "...", "sonnet": "...", "haiku": "..." }` in `config.json`.
+- `/cc-router/health` reports `ollamaFallback` (`ready`, `keyPresent`, `serving`, `requests`, `errors`, `lastSkipReason`, never the key). Tokens appear in the usage history under provider `ollama`.
 
 ---
 

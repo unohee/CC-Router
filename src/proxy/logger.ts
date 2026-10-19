@@ -228,3 +228,27 @@ export function logBlockedClient(pattern: string, userAgent: string | undefined,
     + (suppressed > 0 ? chalk.gray(` (+${suppressed} more since the last line)`) : "")
   );
 }
+
+/** A request answered by the Ollama fallback. */
+export function logOllamaFallback(model: string, poolWaitSeconds: number, note?: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    chalk.magenta(` ⇄ OLLAMA → ${model}`) +
+    chalk.gray(` (Anthropic blocked for ${poolWaitSeconds}s)`) +
+    (note ? chalk.yellow(` ${note}`) : "")
+  );
+}
+
+/**
+ * Serving moved between Anthropic and the Ollama fallback. Logged once per
+ * switch, so a stretch of fallback traffic has a visible start and end.
+ */
+export function logOllamaTransition(to: "ollama" | "anthropic", detail: string): void {
+  console.log(
+    chalk.gray(`[${ts()}]`) +
+    (to === "ollama"
+      ? chalk.magenta(` ⇄ serving switched to Ollama`)
+      : chalk.green(` ⇄ serving back on Anthropic`)) +
+    chalk.gray(` (${detail})`)
+  );
+}

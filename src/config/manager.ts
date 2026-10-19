@@ -214,6 +214,22 @@ export function saveOpenAIAccounts(accounts: OpenAISubscriptionAccount[]): void 
  * Claude Code's ANTHROPIC_BASE_URL points at `remoteUrl`; Claude Desktop
  * (optionally) is intercepted via mitmproxy and redirected to the same URL.
  */
+/** See ProxyConfig.ollamaFallback. Read through resolveOllamaFallbackConfig,
+ *  which applies the defaults and coerces hand-edited values. */
+export interface OllamaFallbackConfig {
+  enabled: boolean;
+  baseUrl?: string;
+  /** Name of the environment variable that holds the API key. */
+  apiKeyEnv?: string;
+  /** Fall back only when the pool's earliest reset is further away than this. */
+  minWaitSeconds?: number;
+  /** Upstream model used when the request's Claude tier is not in `tierMap`. */
+  model: string;
+  tierMap?: { opus?: string; sonnet?: string; haiku?: string };
+  /** Largest estimated prompt the fallback model is asked to carry. */
+  contextTokens?: number;
+}
+
 export interface ClientConfig {
   /** Full URL of the CC-Router server, e.g. "http://192.168.1.50:3456" or "https://proxy.example.com" */
   remoteUrl: string;
@@ -256,6 +272,15 @@ export interface ProxyConfig {
    *  a /v1/messages request to a healthy OpenAI subscription account instead of
    *  degrading. Requires modelRouting.openAIDefaultModel to be set. Default: false (disabled). */
   crossProviderFallback?: boolean;
+  /** Opt-in last resort: when every Anthropic account is blocked and the
+   *  earliest reset is further away than `minWaitSeconds`, answer /v1/messages
+   *  from an Anthropic-Messages-compatible Ollama endpoint instead of a 429.
+   *  Absent, or `enabled !== true`, leaves routing untouched. The API key is
+   *  read from `process.env[apiKeyEnv]` per request and is never stored here.
+   *  Defaults: baseUrl "https://ollama.com", apiKeyEnv "OLLAMA_API_KEY",
+   *  minWaitSeconds 900, contextTokens 1048576 (compared against the bytes/2
+   *  estimate, which runs about twice the real token count). */
+  ollamaFallback?: OllamaFallbackConfig;
   /** Pin each Claude Code session to one account so its prompt cache survives.
    *  Default: true. Sessions without the header keep plain round-robin. */
   sessionAffinity?: boolean;

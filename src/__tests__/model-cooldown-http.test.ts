@@ -71,6 +71,9 @@ it("isolates Fable 429 across the actual proxy, session routing and health endpo
     const third = await send("claude-fable-5");
     expect(third.status).toBe(429);
     expect(Number(third.headers.get("retry-after"))).toBeGreaterThan(3500);
+    // The router's own 429 is a retryable wait, never a relayed plan limit.
+    expect(third.headers.get("x-should-retry")).toBe("true");
+    expect([...third.headers.keys()].filter(k => k.startsWith("anthropic-ratelimit-unified"))).toEqual([]);
     await third.text();
     expect(seen).toEqual(["claude-fable-5-1", "claude-sonnet-4-6"]);
     const health = await (await fetch(base + "/cc-router/health")).json();

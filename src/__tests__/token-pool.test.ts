@@ -682,3 +682,40 @@ describe("TokenPool — blockState", () => {
     expect(pool.blockState("a")).toEqual({ kind: "indefinite" });
   });
 });
+
+describe("TokenPool.secondsUntilAvailable", () => {
+  it("is 0 while getNext would serve, including through its degraded tiers", () => {
+    const busy = makeAccount("busy", true, true);
+    expect(new TokenPool([busy]).secondsUntilAvailable()).toBe(0);
+    const capped = makeAccount("capped");
+    capped.sessionLimitPercent = 10;
+    capped.rateLimits = { ...capped.rateLimits, fiveHourUtil: 0.5 };
+    expect(new TokenPool([capped]).secondsUntilAvailable()).toBe(0);
+    expect(new TokenPool([makeAccount("sick", false)]).secondsUntilAvailable()).toBe(0);
+  });
+
+  it("equals the Retry-After getNext throws once every account is blocked, without mutating", () => {
+    const a = makeAccount("a");
+    const b = makeAccount("b");
+    a.coolingUntil = Date.now() + 120_000;
+    b.coolingUntil = Date.now() + 7_200_000;
+    const pool = new TokenPool([a, b]);
+    const wait = pool.secondsUntilAvailable();
+    expect(wait).toBeGreaterThanOrEqual(119);
+    expect(wait).toBeLessThanOrEqual(120);
+    expect(a.requestCount + b.requestCount).toBe(0);
+    try {
+      pool.getNext();
+      expect.unreachable();
+    } catch (err) {
+      expect((err as NoAvailableAccountError).retryAfterSeconds).toBe(wait);
+    }
+  });
+
+  it("is Infinity when there is nothing to wait for", () => {
+    expect(new TokenPool([]).secondsUntilAvailable()).toBe(Infinity);
+    const off = makeAccount("off");
+    off.enabled = false;
+    expect(new TokenPool([off]).secondsUntilAvailable()).toBe(Infinity);
+  });
+});
