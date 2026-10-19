@@ -23,14 +23,15 @@ import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
-import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness } from "../providers/ollama/fallback-policy.js";
+import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
+import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
-import { codexCanHold, targetCanHoldContext } from "../providers/openai/context-limits.js";
+import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../providers/openai/context-limits.js";
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
@@ -331,6 +332,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Ollama fallback — opt-in, null unless enabled. Problems that make it
   // unusable are reported once here, not on every request it then declines.
   const ollamaConfig = resolveOllamaFallbackConfig(initialConfig.ollamaFallback);
+  const upstream429Relay = resolveUpstream429Relay(initialConfig.upstream429Relay);
   if (ollamaConfig) {
     if (!ollamaConfig.model) {
       console.warn(chalk.yellow("⚠ Ollama fallback is enabled but no model is set — it will stay inactive."));
@@ -1274,9 +1276,42 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
             : null;
           const reason = scoped ? `rate limited (model: ${req._ccAnthropicModel})`
             : windowLabel ? `rate limited (${windowLabel})` : "rate limited";
+          // The cooldown above is now part of the pool, so the wait computed here
+          // already routes around this account. See upstream-429-relay.ts.
+          let relayNote = "";
+          if (upstream429Relay === "retryable" && isRetryableQuota429(proxyRes.headers, rl, statedRetry)) {
+            const model = req._ccAnthropicModel;
+            const estimated = estimatePromptTokens((req as Request)._ccRawBody);
+            // The same fallbacks, in the same order, the retry would meet in
+            // messages-cross-route: Codex first (when configured), then Ollama.
+            const fallbackServes = () =>
+              (initialConfig.crossProviderFallback === true
+                && Boolean(modelRouting.openAIDefaultModel)
+                && openAIAccounts.some(canServeOpenAI)
+                && codexCanHold(estimated))
+              || decideOllamaFallback({
+                config: ollamaConfig,
+                claudeModel: model,
+                anthropicAvailable: () => pool.hasAvailableAccount(model),
+                poolWaitSeconds: () => pool.secondsUntilAvailable(model),
+                estimatedPromptTokens: estimated,
+                apiKey: () => (ollamaConfig ? readOllamaApiKey(ollamaConfig) : undefined),
+              }).use;
+            const clientWait = clientRetryAfterSeconds(
+              pool.secondsUntilAvailable(model),
+              fallbackServes,
+              retryAfter,
+              pool.getAll().some(a => a.healthy),
+            );
+            const removed = makeUpstream429Retryable(proxyRes.headers, clientWait);
+            // Only call it a plan limit when upstream named one; the unified
+            // headers ride on every response, including bare 429s.
+            const planLimit = removed > 0 && (rl?.status === "rate_limited" || /^(five_hour|seven_day)/.test(rl?.claim ?? ""));
+            relayNote = ` — client retries in ${clientWait}s${planLimit ? " (plan-limit headers withheld)" : ""}`;
+          }
           pendingLog.type = "error";
-          pendingLog.details = `${reason} — cooldown ${retryAfter}s`;
-          logError(account.id, 429, `${reason} — cooldown ${retryAfter}s`);
+          pendingLog.details = `${reason} — cooldown ${retryAfter}s${relayNote}`;
+          logError(account.id, 429, `${reason} — cooldown ${retryAfter}s${relayNote}`);
 
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.

@@ -132,6 +132,11 @@ it.concurrent("cools an unexplained 429 for 8s, not a minute, and logs who asked
     // The activity log keeps the cooldown the router chose next to what upstream
     // said; it used to be replaced by the body alone.
     expect(await activity()).toContain("rate limited — cooldown 8s — upstream said: Error");
+    // A bare 429 says nothing about the account: it is relayed untouched and
+    // the client keeps its own backoff.
+    expect(res.headers.get("retry-after")).toBeNull();
+    expect(res.headers.get("x-should-retry")).toBeNull();
+    expect(res.headers.get("anthropic-ratelimit-unified-status")).toBe("allowed");
   });
 }, 20_000);
 

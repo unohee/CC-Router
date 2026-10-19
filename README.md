@@ -590,6 +590,18 @@ cc-router configure --disable-retry-watchdog
 
 Measured with Claude Code 2.1.303: without the watchdog a `Retry-After: 75` fails at once; with it the client waits the full value (an hour for `Retry-After: 3600`) and retries, also when the 429 is an upstream plan-limit response forwarded as-is. It applies to Claude Code sessions started after the change. While it waits, the session is idle; see the Ollama fallback below to keep working instead.
 
+### One account's limit is not the session's
+
+When a single account answers 429 for its 5-hour or weekly window, the router puts that account on cooldown and tells the client to retry instead of relaying the refusal verbatim. It withholds the `anthropic-ratelimit-unified-*` headers (which make Claude Code stop with "limit reached") and sends `Retry-After: 1` with `x-should-retry: true` when another account, the Codex fallback or the Ollama fallback can take the retry, or the pool's earliest reset otherwise. Claude Code retries a header-free 429 under 60 seconds on its own, without the watchdog, and the retry is routed to another account.
+
+Only quota refusals are rewritten: a named window, `rate_limited` status or a stated `Retry-After`. Bare 429s and any upstream `x-should-retry: false` are relayed untouched. To restore the old verbatim relay:
+
+```json
+{ "upstream429Relay": "passthrough" }
+```
+
+A large session (200K+ tokens) pinned to the refusing account is held for at most 60 seconds rather than moved, since a longer hold ends sessions running without the watchdog.
+
 ---
 
 ## Fallback to Ollama (opt-in)

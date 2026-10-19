@@ -180,3 +180,9 @@ describe("CompactAskGuard — the window is the only thing that lifts an ask", (
     expect(asks).toBe(1);
   });
 });
+
+describe("hold limit", () => {
+  it("never holds longer than Claude Code retries without the watchdog (60s)", () => {
+    expect(L.maxWaitSeconds).toBeLessThanOrEqual(60);
+  });
+});

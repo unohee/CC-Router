@@ -56,8 +56,11 @@ export const DEFAULT_MIGRATION_LIMITS: MigrationLimits = {
    *  would cost more complexity than it saves. */
   largeSessionTokens: 200_000,
   /** The outer edge of a stall a user reads as slowness rather than a hang.
-   *  Past it, paying the rewrite is the better trade. */
-  maxWaitSeconds: 90,
+   *  Past it, paying the rewrite is the better trade. Also a hard client limit:
+   *  the hold answers with this as Retry-After, and Claude Code without
+   *  CLAUDE_CODE_RETRY_WATCHDOG gives up on any Retry-After above 60s (measured
+   *  on 2.1.303), so a longer hold ended the session it meant to keep. */
+  maxWaitSeconds: 60,
   /** Compaction destroys context, so only ask when the rewrite it avoids is
    *  large. */
   compactAskFloorTokens: 400_000,

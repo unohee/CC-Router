@@ -192,10 +192,10 @@ describe("forwardToOllama", () => {
       const tick = setInterval(() => {
         res.write(STREAM_EVENTS[i++]);
         if (i === STREAM_EVENTS.length) { clearInterval(tick); res.end(); }
-      }, 50); // 14 events x 50ms = ~700ms total, longer than the 400ms timeout but never idle for it
+      }, 100); // 14 events x 100ms = ~1.4s total, longer than the 1s timeout but never idle for it
     });
     const res = new FakeRes();
-    const outcome = await forward(base, res, 400);
+    const outcome = await forward(base, res, 1_000);
     expect(outcome).toEqual({ ok: true, status: 200, usage: { input_tokens: 3, output_tokens: 10 } });
     expect(res.body).toContain("message_stop");
     expect(res.body).toContain("t9 ");

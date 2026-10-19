@@ -281,6 +281,11 @@ export interface ProxyConfig {
    *  minWaitSeconds 900, contextTokens 1048576 (compared against the bytes/2
    *  estimate, which runs about twice the real token count). */
   ollamaFallback?: OllamaFallbackConfig;
+  /** How an upstream 429 reaches the client. "retryable" (default) withholds the
+   *  anthropic-ratelimit-unified-* headers and sends a short Retry-After so the
+   *  client retries and is routed to another account, instead of Claude Code
+   *  stopping on one pool account's plan limit. "passthrough" relays it verbatim. */
+  upstream429Relay?: "retryable" | "passthrough";
   /** Pin each Claude Code session to one account so its prompt cache survives.
    *  Default: true. Sessions without the header keep plain round-robin. */
   sessionAffinity?: boolean;
