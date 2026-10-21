@@ -417,6 +417,29 @@ describe("SessionRouter soft cap", () => {
     expect(r.resolve("s", POOL, notVega, lyraResetsSoon)!.accountId).toBe("lyra");
   });
 
+  it("ranks an account with a weekly window by the five-hour window it shares with the rest", () => {
+    // vela on 2026-10-22: kyte alone reports a weekly window (27%, 6.7 days out)
+    // and its five-hour window is unopened; lyra is half way through hers.
+    // Ranked on its weekly window kyte scored ~34x below lyra and sat idle.
+    const now = 1_792_597_026;
+    const r = new SessionRouter({ softCapUtil: 0.98, now: () => now * 1000 });
+    const pool = ["lyra", "kyte"].map(T);
+    const vela = (t: SessionTarget) => t.accountId === "kyte"
+      ? { util: 0.27, resetAtSec: 1_793_174_400, pace: { util: 0, resetAtSec: 0 } }
+      : { util: 0.5, resetAtSec: 1_792_608_600, pace: { util: 0.5, resetAtSec: 1_792_608_600 } };
+    expect(r.resolve("new", pool, () => true, vela)!.accountId).toBe("kyte");
+  });
+
+  it("still keeps sessions off an account whose weekly window is past the cap", () => {
+    const now = 1_792_597_026;
+    const r = new SessionRouter({ softCapUtil: 0.98, now: () => now * 1000 });
+    const pool = ["lyra", "kyte"].map(T);
+    const weeklyFull = (t: SessionTarget) => t.accountId === "kyte"
+      ? { util: 0.99, resetAtSec: 1_793_174_400, pace: { util: 0, resetAtSec: 0 } }
+      : { util: 0.5, resetAtSec: 1_792_608_600 };
+    expect(r.resolve("new", pool, () => true, weeklyFull)!.accountId).toBe("lyra");
+  });
+
   it("still places a new session when every account is past the cap", () => {
     expect(router().resolve("new", POOL, notVega, () => 0.95)).not.toBeNull();
   });

@@ -22,6 +22,11 @@ export interface TargetMetrics {
   /** When that window resets, epoch seconds. Absent or 0 means no window is
    *  open (or none is known). */
   resetAtSec?: number;
+  /** The window placement ranks by, when it differs from the binding one.
+   *  Utilizations of different windows are fractions of different quotas, so
+   *  ranking must compare every target on the same window. Absent means rank by
+   *  `util`/`resetAtSec`. The soft-cap check always uses `util`. */
+  pace?: { util: number; resetAtSec?: number };
 }
 
 /** Why an existing session left its target. */
@@ -351,7 +356,8 @@ export class SessionRouter {
     const load = this.loadOf(preferred);
     const nowSec = this.now() / 1000;
     const score = (t: SessionTarget): number => {
-      const { util, resetAtSec } = this.metricsOf(t, utilOf);
+      const m = this.metricsOf(t, utilOf);
+      const { util, resetAtSec } = m.pace ?? m;
       const ttrMin = resetAtSec && resetAtSec > nowSec ? (resetAtSec - nowSec) / 60 : UNOPENED_WINDOW_MIN;
       return (cap - util) / Math.max(ttrMin, MIN_TTR_MIN) / (1 + (load.get(targetKey(t)) ?? 0));
     };

@@ -467,9 +467,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       ? pool.getById(t.accountId)?.rateLimits
       : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits;
     if (!limits) return { util: 0 };
+    // Rank on the five-hour window every account shares. Ranking on whichever
+    // window is fuller compared a weekly fraction against other accounts'
+    // five-hour fractions and divided it by days to reset: the one account
+    // that reports a weekly window (27% used, 6.7 days out) scored ~40x below
+    // the rest and was left idle while they ran at the cap. The weekly window
+    // still decides whether the account is over the soft cap.
+    const pace = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
     return limits.sevenDayUtil > limits.fiveHourUtil
-      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset }
-      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
+      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace }
+      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace };
   };
 
   // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
