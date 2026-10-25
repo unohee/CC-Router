@@ -13,6 +13,9 @@ export interface ModelRoutingConfig {
   openAIAliases?: Record<string, string>;
   /** Per-tier override of the Claude -> OpenAI model mapping. */
   openAITierMap?: Partial<Record<ClaudeTier, string>>;
+  /** Override reasoning effort only for Claude -> OpenAI fallback/session routes.
+   *  Explicit OpenAI requests keep their own effort. Absent preserves the Claude request's effort. */
+  openAIReasoningEffort?: string;
 }
 
 /** Capability tier of a Claude model, used to pick a comparable OpenAI model. */

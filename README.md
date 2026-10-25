@@ -571,6 +571,30 @@ cc-router configure --enable-fallback
 
 When it triggers, the console prints a distinct `FALLBACK` log line, and the event appears in `/cc-router/health`'s recent activity. If no OpenAI account is available either, the request proceeds through the normal (possibly degraded) Claude flow exactly as it did before this feature existed — a fallback attempt never turns into a hard failure.
 
+To use one Codex model and fixed reasoning effort for Claude fallback requests,
+merge this into `~/.cc-router/config.json`, remove any `modelRouting.openAITierMap`,
+and restart the router:
+
+```json
+{
+  "crossProviderFallback": true,
+  "sessionPoolIncludesOpenAI": false,
+  "modelRouting": {
+    "openAIDefaultModel": "gpt-6.1-sol",
+    "openAIReasoningEffort": "medium"
+  }
+}
+```
+
+`openAIReasoningEffort` overrides the Claude request's effort on fallback and
+OpenAI-pinned session routes. Without it, the request's effort passes through.
+Explicit `openai/*` requests and `/v1/responses` retain their requested effort.
+When Ollama fallback is also enabled, Codex is attempted first; Ollama is tried
+if Codex cannot serve before a response has started, subject to Ollama's wait
+and context limits below. Requests exceeding Codex's context guard skip directly
+to Ollama. Keeping `sessionPoolIncludesOpenAI` false prevents new sessions from
+being assigned to Codex while Claude is available.
+
 Disable it:
 
 ```bash

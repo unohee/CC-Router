@@ -687,6 +687,14 @@ export function mountMessagesCrossProviderRoute(
       const openAIDefaultModel = opts.modelRouting?.openAIDefaultModel?.trim();
       const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting)
         ?? openAIDefaultModel;
+      const crossProviderEffort = opts.modelRouting?.openAIReasoningEffort?.trim();
+      const crossProviderBody: AnthropicMessagesRequest = {
+        ...req.body,
+        model: `openai/${tieredModel}`,
+        ...(crossProviderEffort ? {
+          output_config: { ...req.body.output_config, effort: crossProviderEffort },
+        } : {}),
+      };
 
       // Size the conversation once, here: both the account-move policy below
       // and the placement decision further down need the same number, and
@@ -789,7 +797,7 @@ export function mountMessagesCrossProviderRoute(
       // falls through to Anthropic, same as the fallback path below.
       if (sessionTarget?.provider === "openai" && openAIDefaultModel && tieredModel) {
         const outcome = await forwardAnthropicRequestAsOpenAI(
-          { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
+          crossProviderBody, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
           sessionTarget.accountId,
@@ -841,7 +849,7 @@ export function mountMessagesCrossProviderRoute(
       if (anthropicExhausted && openAIDefaultModel && tieredModel
           && codexCanHold(estimatedPromptTokens)) {
         const outcome = await forwardAnthropicRequestAsOpenAI(
-          { ...req.body, model: `openai/${tieredModel}` }, res, requestedStream,
+          crossProviderBody, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
           /* preferredAccountId */ undefined,
