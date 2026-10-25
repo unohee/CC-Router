@@ -226,13 +226,23 @@ async function forwardAnthropicRequestAsOpenAI(
    *  to 200k, which drives long conversations into autocompact thrashing. */
   publicModel?: string,
 ): Promise<OpenAIForwardOutcome> {
+  // Every way this gives up is logged. The fallback chain treats any failure as
+  // "Codex unavailable" and moves on, so without a line here a converter that
+  // threw on every real request read exactly like Codex being skipped by
+  // design — and it went unnoticed through two investigations (2026-10-26).
   const account = getOpenAIAccount(preferredAccountId);
-  if (!account) return { ok: false, reason: "no_account" };
+  if (!account) {
+    console.error("[cross-route] no OpenAI account can serve right now");
+    return { ok: false, reason: "no_account" };
+  }
 
   let observedUsage: OpenAIUsage | undefined;
   try {
     const ready = await prepareOpenAIAccount(account);
-    if (!ready) return { ok: false, reason: "prepare_failed" };
+    if (!ready) {
+      console.error(`[cross-route] OpenAI account "${account.id}" could not be prepared (token refresh failed)`);
+      return { ok: false, reason: "prepare_failed" };
+    }
 
     const body = anthropicToOpenAIResponses(reqBody, modelRouting);
     const upstream = await forwardOpenAI({
@@ -242,6 +252,8 @@ async function forwardAnthropicRequestAsOpenAI(
     });
 
     if (!upstream.ok && !passThroughUpstreamErrors) {
+      const detail = await upstream.text().catch(() => "");
+      console.error(`[cross-route] OpenAI account "${account.id}" answered HTTP ${upstream.status}: ${detail.slice(0, 200)}`);
       return { ok: false, reason: "request_failed" };
     }
 
@@ -262,6 +274,7 @@ async function forwardAnthropicRequestAsOpenAI(
       console.error(`[cross-route] OpenAI request to "${account.id}" failed after the response had already started: ${(err as Error).message}`);
       return { ok: true, account, usage: observedUsage, failedAfterStart: true };
     }
+    console.error(`[cross-route] OpenAI request to "${account.id}" failed before sending: ${(err as Error).message}`);
     return { ok: false, reason: "request_failed" };
   }
 }

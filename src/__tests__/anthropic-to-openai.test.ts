@@ -135,3 +135,93 @@ describe("anthropicToOpenAIResponses", () => {
     expect(without.reasoning).toBeUndefined();
   });
 });
+
+describe("anthropicToOpenAIResponses on what Claude Code actually sends", () => {
+  // Block shapes from a request captured from Claude Code 2.1.309 (2026-10-26).
+  // The converter used to treat every block that was not text or tool_use as a
+  // tool_result and read `.content.map` off it, so the first of these threw —
+  // and the throw was swallowed as "Codex unavailable".
+  const realistic = {
+    model: "claude-opus-5-5",
+    max_tokens: 128000,
+    stream: true,
+    thinking: { type: "adaptive", display: "omitted" },
+    output_config: { effort: "medium" },
+    system: [{ type: "text" as const, text: "You are Claude Code." }],
+    tools: [
+      { name: "Read", description: "Read a file", input_schema: { type: "object", properties: {} } },
+      { type: "advisor_20260301", name: "advisor", model: "claude-fable-5-1", defer_loading: true },
+    ],
+    messages: [
+      { role: "user" as const, content: [{ type: "text", text: "read it" }] },
+      { role: "system" as const, content: [
+        { type: "text", text: "# Environment" },
+        { type: "tool_addition", tool: { type: "tool_reference", name: "advisor" }, cache_control: { type: "ephemeral" } },
+      ] },
+      { role: "assistant" as const, content: [
+        { type: "thinking", thinking: "", signature: "sig" },
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "server_tool_use", id: "srvtoolu_1", name: "advisor", input: {} },
+        { type: "advisor_tool_result", tool_use_id: "srvtoolu_1", text: "Check the size guard first." },
+        { type: "text", text: "Reading." },
+        { type: "tool_use", id: "toolu_1", name: "Read", input: { path: "a" } },
+      ] },
+      { role: "user" as const, content: [
+        { type: "tool_result", tool_use_id: "toolu_1" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        { type: "text", text: "and this screenshot" },
+      ] },
+    ],
+  };
+
+  it("converts the request instead of throwing", () => {
+    expect(() => anthropicToOpenAIResponses(realistic as never)).not.toThrow();
+  });
+
+  it("keeps what the target can use and drops what only Anthropic understands", () => {
+    const body = anthropicToOpenAIResponses(realistic as never);
+    expect(body.input).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "read it" }] },
+      // A mid-conversation system message stays a system message; the
+      // tool_addition notice is dropped.
+      { role: "system", content: [{ type: "input_text", text: "# Environment" }] },
+      // Thinking and the server tool call are dropped; the advisor's text survives.
+      { role: "assistant", content: [
+        { type: "output_text", text: "Check the size guard first." },
+        { type: "output_text", text: "Reading." },
+      ] },
+      { type: "function_call", call_id: "toolu_1", name: "Read", arguments: "{\"path\":\"a\"}" },
+      // A tool result with no content is an empty output, not a crash.
+      { type: "function_call_output", call_id: "toolu_1", output: "" },
+      { role: "user", content: [
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+        { type: "input_text", text: "and this screenshot" },
+      ] },
+    ]);
+  });
+
+  it("offers only the tools the target can call", () => {
+    const body = anthropicToOpenAIResponses(realistic as never);
+    // The advisor is a server tool: no input schema, nothing Codex could run.
+    expect(body.tools?.map(t => t.name)).toEqual(["Read"]);
+  });
+
+  it("names an image inside a tool result instead of dropping it silently", () => {
+    const body = anthropicToOpenAIResponses({
+      messages: [{ role: "user", content: [{
+        type: "tool_result", tool_use_id: "t", content: [
+          { type: "text", text: "screenshot:" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        ],
+      }] }],
+    } as never);
+    expect(body.input).toEqual([{ type: "function_call_output", call_id: "t", output: "screenshot:\n[image omitted]" }]);
+  });
+
+  it("skips a block kind it has never seen rather than failing the request", () => {
+    const body = anthropicToOpenAIResponses({
+      messages: [{ role: "user", content: [{ type: "some_future_block", payload: 1 }, { type: "text", text: "hi" }] }],
+    } as never);
+    expect(body.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
+  });
+});

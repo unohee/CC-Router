@@ -29,12 +29,19 @@ export interface OpenAIRefusal {
   refusal: string;
 }
 
+/** An image in a user message; a data URL or a remote URL. Accepted by the
+ *  Codex backend (verified 2026-10-26 with a base64 PNG data URL). */
+export interface OpenAIInputImage {
+  type: "input_image";
+  image_url: string;
+}
+
 /**
- * What may appear inside a message's `content`: text only. Function calls and
- * their outputs are top-level input items (see `OpenAIInputItem`), never
- * nested here, so they are deliberately absent from this union.
+ * What may appear inside a message's `content`. Function calls and their
+ * outputs are top-level input items (see `OpenAIInputItem`), never nested
+ * here, so they are deliberately absent from this union.
  */
-export type OpenAIInputContent = OpenAIInputText | OpenAIOutputText;
+export type OpenAIInputContent = OpenAIInputText | OpenAIOutputText | OpenAIInputImage;
 
 export interface OpenAIInputMessage {
   role: OpenAIInputRole;
