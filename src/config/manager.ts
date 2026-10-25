@@ -226,6 +226,9 @@ export interface OllamaFallbackConfig {
   /** Upstream model used when the request's Claude tier is not in `tierMap`. */
   model: string;
   tierMap?: { opus?: string; sonnet?: string; haiku?: string };
+  /** Fill tiers `tierMap` leaves unset from the live Ollama Cloud catalog
+   *  (providers/tier-matching.ts). Off unless true. */
+  autoTierMap?: boolean;
   /** Largest estimated prompt the fallback model is asked to carry. */
   contextTokens?: number;
 }

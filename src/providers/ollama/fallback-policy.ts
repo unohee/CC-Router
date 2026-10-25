@@ -1,5 +1,6 @@
 import { claudeTierOf } from "../../protocol/model-ref.js";
 import type { OllamaFallbackConfig } from "../../config/manager.js";
+import type { TierModels } from "../tier-matching.js";
 
 /**
  * When an Anthropic request may be answered by Ollama instead.
@@ -34,6 +35,8 @@ export interface ResolvedOllamaFallbackConfig {
   contextTokens: number;
   /** The endpoint refuses requests without a key (Ollama Cloud). */
   keyRequired: boolean;
+  /** Fill unset tiers from the live catalog (providers/tier-matching.ts). */
+  autoTierMap: boolean;
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -82,6 +85,7 @@ export function resolveOllamaFallbackConfig(
     },
     contextTokens: cleanNumber(raw.contextTokens, OLLAMA_DEFAULT_CONTEXT_TOKENS, 1),
     keyRequired: ollamaKeyRequired(baseUrl),
+    autoTierMap: raw.autoTierMap === true,
   };
 }
 
@@ -110,14 +114,16 @@ export function ollamaReadiness(
 /**
  * The Ollama model that answers in place of `claudeModel` (already
  * alias-resolved). Keeps the request's tier when `tierMap` names one, so an
- * opus request is not answered by the model chosen for haiku.
+ * opus request is not answered by the model chosen for haiku. `matched` comes
+ * from the live catalog and only fills tiers `tierMap` leaves unset.
  */
 export function ollamaModelFor(
   claudeModel: string | undefined,
   config: Pick<ResolvedOllamaFallbackConfig, "model" | "tierMap">,
+  matched: TierModels = {},
 ): string {
   const tier = claudeTierOf(claudeModel);
-  return (tier ? config.tierMap[tier] : undefined) ?? config.model;
+  return (tier ? config.tierMap[tier] ?? matched[tier] : undefined) ?? config.model;
 }
 
 export type OllamaSkipReason =
@@ -144,6 +150,8 @@ export interface OllamaDecisionInput {
   poolWaitSeconds: () => number;
   estimatedPromptTokens: number | null;
   apiKey: () => string | undefined;
+  /** Catalog-matched tiers; read only once Ollama is chosen. */
+  matchedTiers?: () => TierModels;
 }
 
 export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision {
@@ -174,5 +182,5 @@ export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision
 
   if (config.keyRequired && !input.apiKey()) return { use: false, reason: "no-api-key" };
 
-  return { use: true, model: ollamaModelFor(input.claudeModel, config), waitSeconds: wait };
+  return { use: true, model: ollamaModelFor(input.claudeModel, config, input.matchedTiers?.()), waitSeconds: wait };
 }

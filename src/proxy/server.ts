@@ -36,6 +36,8 @@ import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../pro
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
+import { createTierDiscovery, fetchOllamaCatalog } from "../providers/tier-matching.js";
+import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
 import type { SessionTarget, TargetMetrics } from "./session-router.js";
@@ -603,6 +605,29 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   startRefreshLoop(accounts);
   startOpenAIRefreshLoop(openAIAccounts, saveOpenAIAccounts);
 
+  // Tier matching — opt-in per provider. Fills tiers the configured maps leave
+  // unset, so the top tier (opus, and the advisor's fable) reaches each
+  // fallback's strongest model instead of the single default.
+  const openAIAutoTiers = modelRouting.openAIAutoTierMap === true;
+  const tierDiscovery = openAIAutoTiers || ollamaConfig?.autoTierMap
+    ? createTierDiscovery({
+      codexCatalog: openAIAutoTiers ? async () => {
+        const account = openAIAccounts.find(a => a.enabled !== false);
+        if (!account) return [];
+        if (!await prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts)) return [];
+        return fetchOpenAICodexModelCatalog(account);
+      } : undefined,
+      ollamaCatalog: ollamaConfig?.autoTierMap
+        ? () => fetchOllamaCatalog(ollamaConfig.baseUrl, readOllamaApiKey(ollamaConfig))
+        : undefined,
+      onChange: (provider, tiers) => {
+        const pairs = Object.entries(tiers).map(([tier, model]) => `${tier}→${model}`).join(", ");
+        console.log(chalk.gray(`  ${provider === "openai" ? "Codex" : "Ollama"} tiers matched: ${pairs}`));
+      },
+    })
+    : null;
+  tierDiscovery?.refresh().catch(() => {});
+
   const app = express();
   const proxyRequestTimeoutMs = getProxyRequestTimeoutMs();
 
@@ -717,6 +742,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           lastSkipReason: ollamaStatus.lastSkipReason,
           lastSkipAt: ollamaStatus.lastSkipAt,
           quota: ollamaQuota?.snapshot(),
+          matchedTiers: ollamaConfig.autoTierMap ? tierDiscovery?.ollama() ?? {} : null,
         }
         : { enabled: false },
     });
@@ -984,6 +1010,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     },
     prepareOpenAIAccount: (account) => prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts),
     modelRouting,
+    matchedOpenAITiers: () => (openAIAutoTiers ? tierDiscovery?.openAI() : undefined) ?? {},
     crossProviderFallback: initialConfig.crossProviderFallback === true,
     hasAvailableAnthropicAccount: (model) => pool.hasAvailableAccount(model),
     resolveSessionTarget,
@@ -1092,6 +1119,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         poolWaitSeconds: (model?: string) => pool.secondsUntilAvailable(model),
         apiKey: () => readOllamaApiKey(ollamaConfig),
         timeoutMs: proxyRequestTimeoutMs,
+        matchedTiers: () => tierDiscovery?.ollama() ?? {},
       },
     } : {}),
     onOllamaSkip: (reason) => {

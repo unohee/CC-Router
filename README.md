@@ -454,6 +454,13 @@ With `--enable-model-tiers`, tier is preserved across the bridge:
 Unmapped or unrecognised models fall back to the configured OpenAI default. Edit
 `modelRouting.openAITierMap` in `~/.cc-router/config.json` to change a tier.
 
+To follow the live Codex catalog instead of a fixed table, set
+`modelRouting.openAIAutoTierMap: true`. Every six hours the router reads
+`codex/models` and matches by family — `astra` (frontier) for opus and fable,
+`sol` (workhorse) for sonnet, `luna` (fast) for haiku — taking the newest model
+of each. It only fills tiers `openAITierMap` leaves unset. A failed read keeps
+the last match, and the router logs the match each time it changes.
+
 ---
 
 ## Codex CLI support (experimental)
@@ -646,6 +653,7 @@ cc-router configure --disable-ollama-fallback
 - `--ollama-context-tokens` is compared against the router's size estimate (bytes / 2), which runs about twice the real token count of a Claude Code request. Lower it for models with a small context window; larger requests keep the 429.
 - If Ollama fails before the first byte (including its own 429 when credits run out) the client gets the router's 429, so the retry watchdog still applies.
 - Optional per-tier models: `ollamaFallback.tierMap: { "opus": "...", "sonnet": "...", "haiku": "..." }` in `config.json`.
+- `ollamaFallback.autoTierMap: true` fills the tiers `tierMap` leaves unset from the Ollama Cloud catalog. Opus (and fable) gets the largest tool-capable model, sonnet the largest one from another family, and haiku keeps `model`. Ollama publishes no quality ranking, so this uses parameter size as a stand-in. For a local daemon the catalog comes from `ollama.com/api/tags` without a key, and names are rewritten to the daemon's form (`kimi-k3:cloud`, `deepseek-v4-pro:0813-cloud`). Larger models use more of the monthly credit. `/cc-router/health` shows the match as `ollamaFallback.matchedTiers`.
 - `/cc-router/health` reports `ollamaFallback` (`ready`, `keyPresent`, `serving`, `requests`, `errors`, `lastSkipReason`, never the key). Tokens appear in the usage history under provider `ollama`.
 - The account table at `/cc-router/dashboard` and `cc-router status` also show
   Codex's reported 5-hour/weekly windows and Ollama Cloud's monthly credit balance,
