@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createTierDiscovery,
+  fetchOllamaCandidates,
   fetchOllamaCatalog,
   matchCodexTiers,
   matchOllamaTiers,
@@ -170,6 +171,41 @@ describe("fetchOllamaCatalog", () => {
   });
 });
 
+describe("fetchOllamaCandidates", () => {
+  const GB_ = 1_000_000_000;
+  const tags = { models: [
+    { name: "big-model", size: 900 * GB_, capabilities: ["tools"] },
+    { name: "small-window", size: 800 * GB_, capabilities: ["tools"] },
+    { name: "configured", size: 400 * GB_, capabilities: ["tools"] },
+  ] };
+  const windows: Record<string, number> = {
+    "configured:cloud": 1_048_576, "big-model:cloud": 1_048_576, "small-window:cloud": 262_144,
+  };
+
+  function showFetch(opts: { showFails?: boolean } = {}) {
+    return vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/tags")) return jsonResponse(tags);
+      if (opts.showFails) return jsonResponse({}, 500);
+      const model = JSON.parse(String(init?.body)).model as string;
+      return jsonResponse({ model_info: { "general.architecture": "x", "x.context_length": windows[model] ?? 0 } });
+    });
+  }
+
+  it("drops a candidate whose window is smaller than the configured model's", async () => {
+    const catalog = await fetchOllamaCandidates("http://127.0.0.1:11434", undefined, "configured:cloud",
+      showFetch() as unknown as typeof fetch);
+    expect(catalog.map(m => m.name)).toEqual(["big-model:cloud", "configured:cloud"]);
+    // Filtered out rather than merely down-ranked, so it can never be matched.
+    expect(matchOllamaTiers(catalog)).toEqual({ opus: "big-model:cloud", sonnet: "configured:cloud" });
+  });
+
+  it("keeps the whole catalog when the configured model's window cannot be read", async () => {
+    const catalog = await fetchOllamaCandidates("http://127.0.0.1:11434", undefined, "configured:cloud",
+      showFetch({ showFails: true }) as unknown as typeof fetch);
+    expect(catalog.map(m => m.name)).toEqual(["big-model:cloud", "small-window:cloud", "configured:cloud"]);
+  });
+});
+
 describe("fetchOpenAICodexModelCatalog", () => {
   const account = { id: "codex", provider: "openai_subscription", accessToken: "tok" } as OpenAISubscriptionAccount;
 
@@ -206,6 +242,26 @@ describe("createTierDiscovery", () => {
       expect(onChange).toHaveBeenCalledTimes(2);
     } finally {
       discovery.stop();
+    }
+  });
+
+  it("retries before the full interval while a provider still has no match", async () => {
+    vi.useFakeTimers();
+    let served = 0;
+    const catalog = vi.fn(async () => { served++; return served === 1 ? [] : CODEX_CATALOG; });
+    const discovery = createTierDiscovery({ codexCatalog: catalog, intervalMs: 6 * 60 * 60 * 1000 });
+    try {
+      await discovery.refresh();
+      expect(discovery.openAI()).toEqual({});
+      // A catalog that was down at boot must not wait six hours to be retried.
+      await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+      expect(discovery.openAI().opus).toBe("gpt-6-astra");
+      // Once matched, the short tick no longer re-reads it.
+      await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+      expect(catalog).toHaveBeenCalledTimes(2);
+    } finally {
+      discovery.stop();
+      vi.useRealTimers();
     }
   });
 

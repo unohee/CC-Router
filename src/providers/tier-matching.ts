@@ -168,6 +168,67 @@ export async function fetchOllamaCatalog(
   }
 }
 
+/** Context window an Ollama endpoint reports for one model, or null if it does not say. */
+export async function fetchOllamaContextLength(
+  baseUrl: string,
+  model: string,
+  apiKey: string | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<number | null> {
+  try {
+    const res = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/api/show`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(isOllamaCloud(baseUrl) && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model }),
+      redirect: "error",
+      signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const info = (await res.json() as { model_info?: Record<string, unknown> }).model_info ?? {};
+    for (const [key, value] of Object.entries(info)) {
+      if (key.endsWith("context_length") && typeof value === "number" && value > 0) return value;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** How many of the largest models are sized up per refresh; one `/api/show` each. */
+const CONTEXT_PROBE_LIMIT = 8;
+
+/**
+ * The catalog, cut to models that can carry what the configured model already
+ * carries. The router admits a request on `contextTokens`, not on the model's
+ * window, so a matched model with a smaller window than the configured one
+ * would turn conversations the configured model answers into failures — and
+ * a failure before the first byte becomes a 429 rather than an answer.
+ *
+ * Only the largest few are probed. A model whose window cannot be read is
+ * dropped, unless the configured model's window is unknown too, in which case
+ * there is nothing to compare against and the catalog is returned unfiltered.
+ */
+export async function fetchOllamaCandidates(
+  baseUrl: string,
+  apiKey: string | undefined,
+  configuredModel: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OllamaCatalogModel[]> {
+  const catalog = await fetchOllamaCatalog(baseUrl, apiKey, fetchImpl);
+  const minContext = await fetchOllamaContextLength(baseUrl, configuredModel, apiKey, fetchImpl);
+  if (minContext === null) return catalog;
+
+  const largest = catalog
+    .filter(m => m.size > 0 && m.capabilities.includes("tools"))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, CONTEXT_PROBE_LIMIT);
+  const windows = await Promise.all(largest.map(m => fetchOllamaContextLength(baseUrl, m.name, apiKey, fetchImpl)));
+  return largest.filter((_, i) => (windows[i] ?? 0) >= minContext);
+}
+
 export interface TierDiscoveryOptions {
   /** Absent when the provider's matching is off. */
   codexCatalog?: () => Promise<CodexCatalogModel[]>;
@@ -184,6 +245,10 @@ export interface TierDiscovery {
 }
 
 const DEFAULT_REFRESH_MS = 6 * 60 * 60 * 1000;
+/** Retry cadence while a provider has no match yet, e.g. the catalog was
+ *  unreachable at boot. Waiting the full interval would leave the top tier on
+ *  the default model for hours. */
+const UNMATCHED_RETRY_MS = 5 * 60 * 1000;
 
 function sameTiers(a: TierModels, b: TierModels): boolean {
   return a.opus === b.opus && a.sonnet === b.sonnet && a.haiku === b.haiku;
@@ -197,27 +262,43 @@ function sameTiers(a: TierModels, b: TierModels): boolean {
 export function createTierDiscovery(opts: TierDiscoveryOptions): TierDiscovery {
   let openAI: TierModels = {};
   let ollama: TierModels = {};
+  let openAIMatchedAt = 0;
+  let ollamaMatchedAt = 0;
+  const intervalMs = opts.intervalMs ?? DEFAULT_REFRESH_MS;
 
-  const refresh = async (): Promise<void> => {
-    await Promise.all([
-      (async () => {
-        if (!opts.codexCatalog) return;
-        const next = matchCodexTiers(await opts.codexCatalog().catch(() => []));
-        if (Object.keys(next).length === 0 || sameTiers(next, openAI)) return;
-        openAI = next;
-        opts.onChange?.("openai", next);
-      })(),
-      (async () => {
-        if (!opts.ollamaCatalog) return;
-        const next = matchOllamaTiers(await opts.ollamaCatalog().catch(() => []));
-        if (Object.keys(next).length === 0 || sameTiers(next, ollama)) return;
-        ollama = next;
-        opts.onChange?.("ollama", next);
-      })(),
-    ]);
+  const refreshOpenAI = async (): Promise<void> => {
+    if (!opts.codexCatalog) return;
+    const next = matchCodexTiers(await opts.codexCatalog().catch(() => []));
+    if (Object.keys(next).length === 0) return;
+    openAIMatchedAt = Date.now();
+    if (sameTiers(next, openAI)) return;
+    openAI = next;
+    opts.onChange?.("openai", next);
   };
 
-  const timer = setInterval(() => { refresh().catch(() => {}); }, opts.intervalMs ?? DEFAULT_REFRESH_MS);
+  const refreshOllama = async (): Promise<void> => {
+    if (!opts.ollamaCatalog) return;
+    const next = matchOllamaTiers(await opts.ollamaCatalog().catch(() => []));
+    if (Object.keys(next).length === 0) return;
+    ollamaMatchedAt = Date.now();
+    if (sameTiers(next, ollama)) return;
+    ollama = next;
+    opts.onChange?.("ollama", next);
+  };
+
+  const refresh = async (): Promise<void> => {
+    await Promise.all([refreshOpenAI(), refreshOllama()]);
+  };
+
+  // Ticks at the short cadence; a provider is re-read once its last match is
+  // a full interval old, or on every tick while it has none.
+  const due = (matchedAt: number) => matchedAt === 0 || Date.now() - matchedAt >= intervalMs;
+  const timer = setInterval(() => {
+    Promise.all([
+      due(openAIMatchedAt) ? refreshOpenAI() : undefined,
+      due(ollamaMatchedAt) ? refreshOllama() : undefined,
+    ]).catch(() => {});
+  }, Math.min(intervalMs, UNMATCHED_RETRY_MS));
   timer.unref?.();
 
   return {

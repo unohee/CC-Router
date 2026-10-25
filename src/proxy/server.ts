@@ -36,7 +36,7 @@ import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../pro
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
-import { createTierDiscovery, fetchOllamaCatalog } from "../providers/tier-matching.js";
+import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
 import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
@@ -618,7 +618,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         return fetchOpenAICodexModelCatalog(account);
       } : undefined,
       ollamaCatalog: ollamaConfig?.autoTierMap
-        ? () => fetchOllamaCatalog(ollamaConfig.baseUrl, readOllamaApiKey(ollamaConfig))
+        ? () => fetchOllamaCandidates(ollamaConfig.baseUrl, readOllamaApiKey(ollamaConfig), ollamaConfig.model)
         : undefined,
       onChange: (provider, tiers) => {
         const pairs = Object.entries(tiers).map(([tier, model]) => `${tier}→${model}`).join(", ");

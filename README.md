@@ -410,18 +410,23 @@ using subagents naturally spreads across providers without breaking any cache.
 
 The model echo above has a cost, and the router is what pays it.
 
-Codex accepts at most **872,000** tokens (read from `codex/models`; the ordinary
-window it advertises is 272,000). Claude Code, told it is talking to a Claude
-model, will happily grow a session past that. When it does, Codex refuses
-**every** request for that session — and the refusal arrives inside an HTTP 200
-stream, so no status code marks the account as unusable.
+`codex/models` advertises a hard limit of **872,000** tokens (and an ordinary
+window of 272,000), but the backend is the authority: measured on 2026-10-25 by
+sending real source trees straight to it, gpt-6.1-sol accepted 913,300 input
+tokens and refused at about 930,000 — a wall of roughly 920K. Claude Code, told
+it is talking to a Claude model, will happily grow a session past that. When it
+does, Codex refuses **every** request for that session — and the refusal arrives
+inside an HTTP 200 stream, so no status code marks the account as unusable.
 
 So the router sizes each request before it routes it, and stops handing a
-session to a Codex account once its conversation passes **800,000** tokens. The
-72k of headroom absorbs the estimate's own error plus one more turn's growth,
-which matters because being refused is not free: the session is re-pinned and
-its whole prefix is rewritten into the next account's cache, measured at
-600-750K tokens. The numbers live in
+session to a Codex account once its estimate passes **750,000** tokens-worth of
+prompt. That estimate divides the body by the measured 3.6 bytes per token, so
+it stops a session at roughly 700K real tokens, leaving 235K of estimate
+headroom for one more turn's growth and the estimate's own error. The wall that
+headroom is measured against is **985,000** in the same estimate units (913,300
+real tokens accepted, ~930,000 refused). Headroom matters because being refused
+is not free — the session is re-pinned and its whole prefix is rewritten into
+the next account's cache, measured at 600-750K tokens. The numbers live in
 `src/providers/openai/context-limits.ts`.
 
 This needs nothing configured on the client. Earlier versions asked for a
