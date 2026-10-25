@@ -86,9 +86,33 @@ export interface HealthData {
   totalInputTokens: number;
   totalOutputTokens?: number;
   accounts: AccountStat[];
+  /** Read-only fallback provider, separate from editable OAuth accounts. */
+  ollamaFallback?: OllamaFallbackView;
   recentLogs: LogEntry[];
   /** Absent from a router older than the one that introduced it; the dashboard then computes it. */
   severity?: PoolSeverity;
+}
+
+export interface OllamaFallbackView {
+  enabled: boolean;
+  model?: string | null;
+  baseUrl?: string;
+  ready?: boolean;
+  keyRequired?: boolean;
+  keyPresent?: boolean;
+  serving?: boolean;
+  inactiveReason?: string | null;
+  requests?: number;
+  errors?: number;
+  lastServedAt?: number | null;
+  quota?: {
+    status: "known" | "unavailable";
+    source: string | null;
+    checkedAt: number | null;
+    balance?: { includedUsd: number; allowanceUsd: number; purchasedUsd: number };
+    resetsAt: number | null;
+    reason?: string;
+  };
 }
 
 export type Focus = "logs" | "accounts" | "models";

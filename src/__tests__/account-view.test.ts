@@ -6,17 +6,17 @@ describe("accountProviderTag", () => {
     expect(accountProviderTag({
       provider: "openai_subscription",
       rateLimits: { plan: "pro" },
-    })).toBe(" [OpenAI pro]");
+    })).toBe(" [Codex pro]");
   });
 
   it("names the provider alone before Codex has reported a plan", () => {
     // The plan arrives in response headers, so it is absent until the account
     // has served at least one request.
-    expect(accountProviderTag({ provider: "openai_subscription" })).toBe(" [OpenAI]");
+    expect(accountProviderTag({ provider: "openai_subscription" })).toBe(" [Codex]");
     expect(accountProviderTag({
       provider: "openai_subscription",
       rateLimits: { plan: "   " },
-    })).toBe(" [OpenAI]");
+    })).toBe(" [Codex]");
   });
 
   it("shows the plan alone for Anthropic accounts, which are the unmarked default", () => {

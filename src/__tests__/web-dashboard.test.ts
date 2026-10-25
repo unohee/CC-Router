@@ -234,6 +234,78 @@ describe("dashboard route", () => {
 // ─── The script, run for real ────────────────────────────────────────────────
 
 describe("dashboard script", () => {
+  it("shows Codex quotas and actual Ollama monthly credit balance in the same account table", async () => {
+    const page = await boot(ok(health([account({
+      id: "codex", provider: "openai_subscription",
+      rateLimits: { ...NO_LIMITS, fiveHourUtil: 0.23, sevenDayUtil: 0.67, fiveHourReset: inMin(60), sevenDayReset: inMin(3000), lastUpdated: Date.now(), plan: "pro" },
+    })], {
+      ollamaFallback: {
+        enabled: true, ready: true, keyRequired: true, keyPresent: true,
+        model: "deepseek-v4-pro", requests: 4, errors: 0,
+        quota: {
+          status: "known", source: "https://ollama.com/api/balance", checkedAt: Date.now() - 30_000,
+          balance: { includedUsd: 273.04, allowanceUsd: 300, purchasedUsd: 5 }, resetsAt: Date.now() + 86_400_000,
+        },
+      },
+    })));
+    const [codex, ollama] = page.rows("accbody");
+    expect(codex).toContain("Codex · pro");
+    expect(codex).toContain("23%");
+    expect(codex).toContain("67%");
+    expect(ollama).toContain("Ollama Cloud");
+    expect(ollama).toContain("$273.04 / $300.00 remaining");
+    expect(ollama).toContain("monthly credits · 9% used");
+    expect(ollama).toContain("prepaid remaining $5.00");
+    expect(ollama).toContain("checked");
+    expect(ollama).toContain("API key set");
+    expect(find(page.el("accbody"), el => el.attrs["colspan"] === "2")).toHaveLength(1);
+    expect(find(page.el("accbody"), el => el.title === "https://ollama.com/api/balance")).toHaveLength(1);
+    expect(page.el("accsum").textContent).toBe("1 of 1 subscription accounts ok");
+  });
+
+  it("marks exhausted monthly and prepaid credits red, but keeps prepaid capacity available", async () => {
+    for (const purchasedUsd of [0, 5]) {
+      const page = await boot(ok(health([], { ollamaFallback: {
+        enabled: true, ready: true, serving: true,
+        quota: { status: "known", source: "https://ollama.com/api/balance", checkedAt: Date.now(), balance: { includedUsd: 0, allowanceUsd: 300, purchasedUsd }, resetsAt: Date.now() + 60_000 },
+      } })));
+      const row = page.rows("accbody")[0];
+      if (purchasedUsd === 0) {
+        expect(row).toContain("credits exhausted");
+        expect(find(page.el("accbody"), el => el.className === "glyph g-good")).toHaveLength(0);
+        expect(find(page.el("accbody"), el => el.className === "glyph g-crit")).toHaveLength(1);
+      } else {
+        expect(row).not.toContain("credits exhausted");
+        expect(row).toContain("serving");
+        expect(row).toContain("prepaid remaining $5.00");
+      }
+    }
+  });
+
+  it("does not turn a missing or stale Ollama balance into zero usage", async () => {
+    for (const quota of [undefined,
+      { status: "unavailable", source: "https://ollama.com/api/balance", checkedAt: Date.now(), reason: "HTTP 503", resetsAt: null },
+      { status: "known", source: "https://ollama.com/api/balance", checkedAt: Date.now() - 120_000, balance: { includedUsd: 300, allowanceUsd: 300, purchasedUsd: 0 }, resetsAt: Date.now() - 60_000 },
+    ]) {
+      const page = await boot(ok(health([], { ollamaFallback: { enabled: true, ready: true, quota } })));
+      const [ollama] = page.rows("accbody");
+      expect(ollama).toMatch(/quota (unavailable|reset)/);
+      expect(ollama).not.toContain("0% used");
+      expect(ollama).not.toContain("$300");
+      expect(find(page.el("accbody"), el => el.attrs["aria-valuenow"] !== undefined)).toHaveLength(0);
+    }
+  });
+
+  it("shows negative credit balances as reported while keeping the visual meter bounded", async () => {
+    const page = await boot(ok(health([], { ollamaFallback: {
+      enabled: true, ready: true,
+      quota: { status: "known", source: "https://ollama.com/api/balance", checkedAt: Date.now(), balance: { includedUsd: -15, allowanceUsd: 300, purchasedUsd: 0 }, resetsAt: Date.now() + 60_000 },
+    } })));
+    expect(page.rows("accbody")[0]).toContain("$-15.00 / $300.00 remaining");
+    expect(page.rows("accbody")[0]).toContain("105% used");
+    expect(find(page.el("accbody"), el => el.className.startsWith("fill") && el.style.width === "100%")).toHaveLength(1);
+  });
+
   it("does not draw an unmeasured account as 0%", async () => {
     // A router that just restarted has measured nothing. A bar at 0% would say
     // "idle", which is the opposite of "unknown".

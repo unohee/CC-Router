@@ -20,7 +20,7 @@ import { accountCooldownSummary, accountProviderTag, paddedProviderTag } from ".
 import type { ModelsStatus } from "./modelsApi.js";
 import { planLayout, DETAILS_LINES } from "./status-layout.js";
 import type { LayoutPlan, WidthTier } from "./status-layout.js";
-import type { AccountStat, Focus, HealthData, Mode, OperationalStatus } from "./status-types.js";
+import type { AccountStat, Focus, HealthData, Mode, OperationalStatus, OllamaFallbackView } from "./status-types.js";
 import {
   cellWidth, fitSegs, padCells, seg, segsWidth, terminalSafeText, truncateCells,
 } from "./term-text.js";
@@ -269,6 +269,38 @@ export function accountLine(
 }
 
 const RANK: Record<AccountRung, number> = { problem: 0, watch: 1, ok: 2, off: 3 };
+
+export function ollamaLine(a: OllamaFallbackView, fit: number, now: number): Seg[] {
+  const q = a.quota;
+  const b = q?.balance;
+  const reset = typeof q?.resetsAt === "number" && q.resetsAt <= now;
+  const known = q?.status === "known" && b
+    && [b.includedUsd, b.allowanceUsd, b.purchasedUsd].every(Number.isFinite)
+    && !reset;
+  const exhausted = known && b && Math.max(0, b.includedUsd) + Math.max(0, b.purchasedUsd) <= 0;
+  const state = exhausted ? "credits exhausted" : a.serving ? "serving" : a.ready ? "ready" : a.inactiveReason === "no-api-key" ? "needs key" : "inactive";
+  const color = exhausted ? "red" : a.ready ? "cyan" : "yellow";
+  const quota: Seg[] = [];
+  if (known && b) {
+    quota.push(seg(`monthly $${b.includedUsd.toFixed(2)}/$${b.allowanceUsd.toFixed(2)} left`, "white"));
+    if (b.allowanceUsd > 0) {
+      const util = (b.allowanceUsd - b.includedUsd) / b.allowanceUsd;
+      quota.push(seg(` (${Math.round(util * 100)}% used)`, util >= 0.95 ? "red" : util >= 0.8 ? "yellow" : "green"));
+    }
+    if (b.purchasedUsd !== 0) quota.push(seg(` +$${b.purchasedUsd.toFixed(2)} prepaid`, "white"));
+    if (q.resetsAt) quota.push(seg(` ↻${formatRemaining(q.resetsAt - now)}`, "gray"));
+  } else {
+    quota.push(seg(reset ? "quota reset; refresh pending" : "quota unavailable", "gray"));
+    if (q?.reason) quota.push(seg(` (${terminalSafeText(q.reason)})`, "gray"));
+  }
+  if (q?.checkedAt) quota.push(seg(` read ${formatAgo(q.checkedAt, now)}`, "gray"));
+  return fitSegs([
+    seg("  ◇ ", color), seg("Ollama Cloud", color, { bold: true }),
+    seg(` ${state}  `, color), ...quota,
+    seg(`  req ${a.requests ?? 0}  err ${a.errors ?? 0}`, "gray"),
+    seg(`  last ${a.lastServedAt ? formatAgo(a.lastServedAt, now) : "never"}`, "gray"),
+  ], fit);
+}
 
 /**
  * Which accounts to draw when there is room for `rows` of them, as indices into
@@ -554,7 +586,7 @@ export interface Frame {
 export function buildFrame(input: FrameInput): Frame {
   const { data, now } = input;
   const region = input.focus === "models" ? "models" : "activity";
-  const plan = planLayout({ rows: input.rows, cols: input.cols, accountCount: data.accounts.length, region, detailsOpen: input.detailsOpen });
+  const plan = planLayout({ rows: input.rows, cols: input.cols, accountCount: data.accounts.length, ollamaEnabled: data.ollamaFallback?.enabled, region, detailsOpen: input.detailsOpen });
   const sev = input.severity ?? computeSeverity(data.accounts, data.recentLogs, now);
 
   const lines: Seg[][] = [stripLine(sev, data, input.updatedAgoSec, plan.fit)];
@@ -570,6 +602,7 @@ export function buildFrame(input: FrameInput): Frame {
     lines.push(accountLine(a, s, plan, input.focus === "accounts" && i === input.selectedAccountIndex, now, sev.thresholds));
   }
   if (plan.accountFold) lines.push(fitSegs(foldLine(rungs, shown, input.focus === "accounts"), plan.fit));
+  if (plan.ollamaRow && data.ollamaFallback) lines.push(ollamaLine(data.ollamaFallback, plan.fit, now));
 
   if (plan.totals) lines.push(fitSegs(totalsLine(data), plan.fit));
   if (plan.operations && data.operational) {

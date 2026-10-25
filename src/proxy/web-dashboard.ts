@@ -438,7 +438,7 @@ const SCRIPT = String.raw`
       var tr = el("tr");
       var rl = a.rateLimits || {};
       var plan = (rl.plan || "").trim();
-      var provider = a.provider === "openai_subscription" ? "OpenAI" : "Claude";
+      var provider = a.provider === "openai_subscription" ? "Codex" : "Claude";
       var idCell = el("td", "acct", a.id);
       idCell.appendChild(el("span", "plan", plan ? provider + " · " + plan : provider));
       tr.appendChild(idCell);
@@ -457,12 +457,74 @@ const SCRIPT = String.raw`
       tr.appendChild(lab(el("td", "dim mono", a.expiresInMs > 0 ? "expires in " + dur(a.expiresInMs) : "expired"), "Token"));
       return tr;
     });
+    if (h.ollamaFallback && h.ollamaFallback.enabled) rows.push(ollamaAccountRow(h.ollamaFallback));
     $("accbody").replaceChildren.apply($("accbody"), rows);
     // Counted by the same rule as the Status column. The server's own healthy
     // flag stays true through a cooldown (that lives in coolingUntil), so counting
     // it would say "5 of 5" over a row that is visibly resting.
     var okCount = h.accounts.filter(function (a) { return accountStatus(a).tone === "good"; }).length;
-    $("accsum").textContent = okCount + " of " + h.accounts.length + " ok";
+    $("accsum").textContent = okCount + " of " + h.accounts.length
+      + (h.ollamaFallback && h.ollamaFallback.enabled ? " subscription accounts ok" : " ok");
+  }
+
+  function ollamaAccountRow(a) {
+    var tr = el("tr");
+    var idCell = el("td", "acct", "Ollama Cloud");
+    idCell.appendChild(el("span", "plan", a.model || "fallback"));
+    tr.appendChild(idCell);
+    var q = a.quota, b = q && q.balance;
+    var reset = q && isNum(q.resetsAt) && q.resetsAt <= now();
+    var known = q && q.status === "known" && b && isNum(b.includedUsd) && isNum(b.allowanceUsd) && isNum(b.purchasedUsd) && !reset;
+    var exhausted = known && Math.max(0, b.includedUsd) + Math.max(0, b.purchasedUsd) <= 0;
+    var state = exhausted ? "credits exhausted" : a.serving ? "serving" : a.ready ? "ready" : a.inactiveReason === "no-api-key" ? "needs API key" : "inactive";
+    var stCell = lab(el("td"), "Status");
+    stCell.appendChild(glyph(exhausted ? "crit" : a.ready ? "good" : "warn", exhausted ? "■" : a.ready ? "✓" : "▲"));
+    stCell.appendChild(document.createTextNode(state));
+    tr.appendChild(stCell);
+
+    var quotaCell = lab(el("td"), "Monthly credits", true);
+    quotaCell.setAttribute("colspan", "2");
+    var box = el("div", "win"), meter = el("div", "meter"), fill = el("div", "fill"), text = el("div", "wtext");
+    meter.appendChild(fill);
+    meter.setAttribute("role", "meter");
+    meter.setAttribute("aria-label", "Ollama Cloud monthly credit usage");
+    meter.setAttribute("aria-valuemin", "0");
+    meter.setAttribute("aria-valuemax", "100");
+    if (known) {
+      text.appendChild(el("strong", "pct", "$" + b.includedUsd.toFixed(2) + " / $" + b.allowanceUsd.toFixed(2) + " remaining"));
+      if (b.allowanceUsd > 0) {
+        var util = (b.allowanceUsd - b.includedUsd) / b.allowanceUsd;
+        var pct = Math.round(util * 100);
+        fill.className = "fill " + severity(util);
+        fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+        meter.setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, pct))));
+        meter.setAttribute("aria-valuetext", pct + "% of monthly credits used");
+        text.appendChild(el("span", "note", "monthly credits · " + pct + "% used"));
+      } else {
+        meter.className = "meter na";
+        meter.setAttribute("aria-valuetext", "No monthly allowance reported");
+      }
+      text.appendChild(el("span", "note", "prepaid remaining $" + b.purchasedUsd.toFixed(2)));
+      text.appendChild(el("span", "note", q.resetsAt > 0 ? "renews in " + dur(q.resetsAt - now()) : "renewal time unknown"));
+    } else {
+      meter.className = "meter na";
+      var unavailable = reset ? "quota reset; refresh pending" : "quota unavailable";
+      meter.setAttribute("aria-valuetext", unavailable);
+      text.appendChild(el("span", "note", unavailable));
+      if (q && q.reason) text.appendChild(el("span", "note", q.reason));
+    }
+    if (q && q.checkedAt) text.appendChild(el("span", "note", "checked " + ago(q.checkedAt)));
+    if (q && q.source) {
+      var source = el("span", "note", "Ollama balance API");
+      source.title = q.source;
+      text.appendChild(source);
+    }
+    box.appendChild(meter); box.appendChild(text); quotaCell.appendChild(box); tr.appendChild(quotaCell);
+    tr.appendChild(lab(el("td", "num", num(a.requests)), "Requests"));
+    tr.appendChild(lab(el("td", "num", num(a.errors)), "Errors"));
+    tr.appendChild(lab(el("td", "dim mono", ago(a.lastServedAt)), "Last used"));
+    tr.appendChild(lab(el("td", "dim mono", a.keyRequired ? (a.keyPresent ? "API key set" : "API key missing") : "local endpoint"), "Authentication"));
+    return tr;
   }
 
   function tokensText(l) {
