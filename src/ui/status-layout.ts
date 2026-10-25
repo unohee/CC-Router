@@ -8,7 +8,7 @@
  * The plan therefore never spends more than `rows - 1` lines, and what it drops
  * when short is decided here, in the order the operator asked for:
  *
- *   problem strip  >  one line per account  >  activity log  >  details
+ *   problem strip  >  Ollama quota row  >  managed accounts  >  activity log  >  details
  *
  * Totals, the operations block and the details panel are extras that appear only
  * when there is room left over after those.
@@ -27,6 +27,8 @@ export interface LayoutInput {
   rows: number;
   cols: number;
   accountCount: number;
+  /** One read-only Ollama row alongside the managed account rows. */
+  ollamaEnabled?: boolean;
   region: Region;
   /** The operator opened details for the selected log row. */
   detailsOpen: boolean;
@@ -43,6 +45,7 @@ export interface LayoutPlan {
   accountRows: number;
   /** A "+N more" line follows the accounts. */
   accountFold: boolean;
+  ollamaRow: boolean;
   totals: boolean;
   operations: boolean;
   /** The heading line above the activity log or the model list. */
@@ -72,7 +75,7 @@ export function planLayout(input: LayoutInput): LayoutPlan {
   const width = widthTier(cols);
 
   const blank: LayoutPlan = {
-    budget, fit, width, minimal: true, accountRows: 0, accountFold: false, totals: false,
+    budget, fit, width, minimal: true, accountRows: 0, accountFold: false, ollamaRow: false, totals: false,
     operations: false, regionTitle: false, regionBody: 0, details: false, detailsSuppressed: false,
     footer: false, lines: 1,
   };
@@ -80,6 +83,8 @@ export function planLayout(input: LayoutInput): LayoutPlan {
 
   const footer = budget >= 3;
   let remaining = budget - 1 - (footer ? 1 : 0);
+  const ollamaRow = input.ollamaEnabled === true && remaining > 0;
+  if (ollamaRow) remaining--;
 
   // Accounts come before everything but the strip. When they do not all fit the
   // last line says how many were left out, so the list is never silently short.
@@ -125,11 +130,11 @@ export function planLayout(input: LayoutInput): LayoutPlan {
   const regionBody = input.region === "activity" ? Math.min(body, LOG_VISIBLE) : body;
 
   const lines =
-    1 + accountRows + (accountFold ? 1 : 0) + (totals ? 1 : 0) + (operations ? OPERATIONS_LINES : 0)
+    1 + accountRows + (accountFold ? 1 : 0) + (ollamaRow ? 1 : 0) + (totals ? 1 : 0) + (operations ? OPERATIONS_LINES : 0)
     + (regionTitle ? 1 : 0) + regionBody + (details ? DETAILS_LINES : 0) + (footer ? 1 : 0);
 
   return {
-    budget, fit, width, minimal: false, accountRows, accountFold, totals, operations, regionTitle,
+    budget, fit, width, minimal: false, accountRows, accountFold, ollamaRow, totals, operations, regionTitle,
     regionBody, details, detailsSuppressed, footer, lines,
   };
 }

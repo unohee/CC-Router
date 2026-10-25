@@ -21,7 +21,7 @@ export const PROVIDER_TAG_WIDTH = 14;
 export function accountProviderTag(account: AccountTagInput): string {
   const plan = account.rateLimits?.plan?.trim();
   if (account.provider === "openai_subscription") {
-    return plan ? ` [OpenAI ${plan}]` : " [OpenAI]";
+    return plan ? ` [Codex ${plan}]` : " [Codex]";
   }
   return plan ? ` [${plan}]` : "";
 }

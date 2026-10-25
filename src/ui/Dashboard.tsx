@@ -158,7 +158,7 @@ function LiveDashboard({
   // How many log rows this pane can show decides how far ↑↓ may go: a cursor on a
   // row that is not drawn would be a selection nobody can see.
   const layout = planLayout({
-    rows, cols, accountCount: data.accounts.length,
+    rows, cols, accountCount: data.accounts.length, ollamaEnabled: data.ollamaFallback?.enabled,
     region: focus === "models" ? "models" : "activity", detailsOpen,
   });
   const visibleLogCount = Math.max(1, Math.min(logs.length, layout.regionBody));

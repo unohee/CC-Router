@@ -66,6 +66,7 @@ interface Ctx {
     ollamaFallback: {
       enabled: boolean; requests?: number; errors?: number; serving?: boolean; lastSkipReason?: string | null; lastServedAt?: number | null;
       keyRequired?: boolean; keyPresent?: boolean; ready?: boolean; inactiveReason?: string | null;
+      quota?: { status: string; balance?: { includedUsd: number; allowanceUsd: number; purchasedUsd: number } };
     };
     recentLogs: { accountId: string; model: string; type: string; statusCode?: number; details?: string; inputTokens?: number }[];
     totalErrors: number;
@@ -103,6 +104,17 @@ async function withRouter(
   const ollamaSeen: Ctx["ollamaSeen"] = [];
   let ollamaAbandoned = 0;
   const ollama: Server = createServer((req, res) => {
+    // Balance telemetry is not an inference and must not consume the scripted
+    // inference responses or affect the request/abandonment assertions below.
+    if (req.method === "GET" && req.url === "/api/balance") {
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        included: { balance_usd: 75, allowance_usd: 100, period: { until: new Date(Date.now() + 86_400_000).toISOString() } },
+        purchased: { balance_usd: 5 },
+      }));
+      return;
+    }
     let raw = "";
     req.on("data", c => { raw += c; });
     req.on("end", () => {
@@ -241,6 +253,9 @@ it.concurrent("answers from Ollama when the pool is blocked far into the future,
     expect(json.content.map(b => b.type)).toEqual(["text"]);
 
     expect(ollamaSeen.map(s => s.body["model"])).toEqual(["glm:cloud", "big:cloud"]);
+    expect((await health()).ollamaFallback.quota).toMatchObject({
+      status: "known", balance: { includedUsd: 75, allowanceUsd: 100, purchasedUsd: 5 },
+    });
     expect(ollamaSeen[0].headers["authorization"]).toBe("Bearer test-ollama-key");
     expect(ollamaSeen[0].headers["anthropic-version"]).toBe("2023-06-01");
     expect(ollamaSeen[0].body["messages"]).toEqual([{ role: "user", content: "hi" }]);

@@ -24,6 +24,7 @@ import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
+import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
@@ -332,6 +333,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Ollama fallback — opt-in, null unless enabled. Problems that make it
   // unusable are reported once here, not on every request it then declines.
   const ollamaConfig = resolveOllamaFallbackConfig(initialConfig.ollamaFallback);
+  const ollamaQuota = ollamaConfig ? createOllamaQuotaMonitor({
+    config: ollamaConfig,
+    apiKey: () => readOllamaApiKey(ollamaConfig),
+  }) : null;
   const upstream429Relay = resolveUpstream429Relay(initialConfig.upstream429Relay);
   if (ollamaConfig) {
     if (!ollamaConfig.model) {
@@ -711,6 +716,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           errors: ollamaStatus.errors,
           lastSkipReason: ollamaStatus.lastSkipReason,
           lastSkipAt: ollamaStatus.lastSkipAt,
+          quota: ollamaQuota?.snapshot(),
         }
         : { enabled: false },
     });
@@ -1578,6 +1584,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // ─── Graceful shutdown ────────────────────────────────────────────────────
   const shutdown = () => {
+    ollamaQuota?.stop();
     console.log(chalk.yellow("\nShutting down — saving tokens..."));
     // This save replaces every Anthropic record on disk with the pool. Anything
     // added to accounts.json while the server ran — by an older CLI, or by hand —

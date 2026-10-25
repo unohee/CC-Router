@@ -89,6 +89,20 @@ describe("term-text", () => {
 });
 
 describe("planLayout", () => {
+  it("reserves an Ollama row without overflowing or taking away the footer", () => {
+    for (let rows = 2; rows <= 40; rows++) {
+      for (const cols of [40, 80, 110, 160]) {
+        const data = health(pool(12), manyLogs(20), {
+          ollamaFallback: { enabled: true, ready: true, requests: 5, errors: 1 },
+        });
+        const { lines, plan } = buildFrame(frameInput(data, { rows, cols }));
+        expect(lines.length).toBeLessThanOrEqual(plan.budget);
+        expect(lines.every(line => segsWidth(line) <= plan.fit)).toBe(true);
+        if (plan.ollamaRow) expect(lines.map(text).join("\n")).toContain("Ollama Cloud");
+      }
+    }
+  });
+
   it("never spends more than rows - 1 lines, in any pane", () => {
     for (let rows = 1; rows <= 70; rows++) {
       for (let cols = 1; cols <= 200; cols += 7) {
@@ -164,6 +178,70 @@ describe("pickAccounts", () => {
 });
 
 describe("the frame", () => {
+  it("shows Codex windows and Ollama monthly credits together without inventing 5h or 7d credits", () => {
+    const data = health([
+      account("lyra"),
+      account("codex", { provider: "openai_subscription", rateLimits: { ...limits(0.23, 0.67), plan: "pro" } }),
+    ], [], {
+      ollamaFallback: {
+        enabled: true, ready: true, requests: 4, errors: 0,
+        quota: {
+          status: "known", source: "https://ollama.com/api/balance", checkedAt: NOW - 30_000,
+          balance: { includedUsd: 273.04, allowanceUsd: 300, purchasedUsd: 0 }, resetsAt: NOW + 30 * 86_400_000,
+        },
+      },
+    });
+    for (const cols of [80, 110, 160]) {
+      const { lines } = buildFrame(frameInput(data, { cols }));
+      const codex = lines.map(text).find(line => line.includes("codex"))!;
+      expect(codex).toContain("23%");
+      expect(codex).toContain("67%");
+      if (cols >= 110) expect(codex).toContain("[Codex pro]");
+      const ollama = lines.map(text).find(line => line.includes("Ollama Cloud"))!;
+      expect(ollama).toContain("monthly $273.04/$300.00 left (9% used)");
+      expect(ollama).not.toMatch(/5h|7d/);
+    }
+  });
+
+  it("keeps an unavailable or expired Ollama credit reading unknown", () => {
+    for (const status of ["unavailable", "known"] as const) {
+      const data = health([], [], {
+        ollamaFallback: {
+          enabled: true, ready: true,
+          quota: {
+            status, source: "https://ollama.com/api/balance", checkedAt: NOW - 60_000,
+            balance: { includedUsd: 300, allowanceUsd: 300, purchasedUsd: 0 },
+            resetsAt: status === "known" ? NOW - 1 : null,
+            reason: status === "unavailable" ? "HTTP 503" : undefined,
+          },
+        },
+      });
+      const output = buildFrame(frameInput(data)).lines.map(text).join("\n");
+      expect(output).toMatch(/quota (unavailable|reset)/);
+      expect(output).not.toContain("0% used");
+      expect(output).not.toContain("$300");
+    }
+  });
+
+  it("marks Ollama credit exhaustion instead of reporting ready, while preserving prepaid capacity", () => {
+    for (const purchasedUsd of [0, 5]) {
+      const data = health([], [], {
+        ollamaFallback: {
+          enabled: true, ready: true,
+          quota: { status: "known", source: "https://ollama.com/api/balance", checkedAt: NOW, balance: { includedUsd: 0, allowanceUsd: 300, purchasedUsd }, resetsAt: NOW + 60_000 },
+        },
+      });
+      const line = buildFrame(frameInput(data, { cols: 160 })).lines.find(line => text(line).includes("Ollama Cloud"))!;
+      if (purchasedUsd === 0) {
+        expect(text(line)).toContain("credits exhausted");
+        expect(line.find(seg => seg.text === "Ollama Cloud")?.color).toBe("red");
+      } else {
+        expect(text(line)).toContain("ready");
+        expect(text(line)).toContain("+$5.00 prepaid");
+      }
+    }
+  });
+
   it("fits every pane: never taller than rows - 1, never wider than cols - 1, strip first", () => {
     const logs = [
       ...manyLogs(30),

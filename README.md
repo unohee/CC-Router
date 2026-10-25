@@ -647,6 +647,14 @@ cc-router configure --disable-ollama-fallback
 - If Ollama fails before the first byte (including its own 429 when credits run out) the client gets the router's 429, so the retry watchdog still applies.
 - Optional per-tier models: `ollamaFallback.tierMap: { "opus": "...", "sonnet": "...", "haiku": "..." }` in `config.json`.
 - `/cc-router/health` reports `ollamaFallback` (`ready`, `keyPresent`, `serving`, `requests`, `errors`, `lastSkipReason`, never the key). Tokens appear in the usage history under provider `ollama`.
+- The account table at `/cc-router/dashboard` and `cc-router status` also show
+  Codex's reported 5-hour/weekly windows and Ollama Cloud's monthly credit balance,
+  prepaid balance, and renewal time. Ollama balance telemetry is refreshed every
+  60 seconds without making an inference request. For a signed-in local daemon,
+  older versions without `/api/balance` use the local user's Ollama signing key
+  only after confirming the daemon and cloud account match. Direct cloud routing
+  uses the configured API key. Missing, failed, stale, or unsupported readings
+  show `quota unavailable`; request counts are never treated as a credit quota.
 
 ---
 
