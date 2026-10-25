@@ -23,6 +23,7 @@ import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputI
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
 import type { SessionTarget } from "./session-router.js";
+import type { TierModels } from "../providers/tier-matching.js";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -76,6 +77,8 @@ export interface OllamaFallbackRouteOptions {
   /** Same upstream timeout as the Anthropic proxy. */
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  /** Ollama tiers matched from the live catalog; empty unless `autoTierMap` is on. */
+  matchedTiers?: () => TierModels;
 }
 
 export interface MessagesCrossProviderRouteOptions {
@@ -86,6 +89,9 @@ export interface MessagesCrossProviderRouteOptions {
   prepareOpenAIAccount?: (account: OpenAISubscriptionAccount) => Promise<boolean>;
   forwardOpenAI?: ForwardOpenAI;
   modelRouting?: ModelRoutingConfig;
+  /** Codex tiers matched from the live catalog; empty unless
+   *  `modelRouting.openAIAutoTierMap` is on. Fills tiers `openAITierMap` leaves unset. */
+  matchedOpenAITiers?: () => TierModels;
   /** Opt-in: when true, exhausted Anthropic capacity triggers automatic OpenAI fallback. Default false. */
   crossProviderFallback?: boolean;
   /** Point-in-time Anthropic-pool availability check (TokenPool.hasAvailableAccount). Required when crossProviderFallback is true. */
@@ -561,6 +567,7 @@ export function mountMessagesCrossProviderRoute(
       poolWaitSeconds: () => ollama?.poolWaitSeconds(claudeModel) ?? 0,
       estimatedPromptTokens,
       apiKey: () => ollama?.apiKey(),
+      matchedTiers: ollama?.matchedTiers,
     });
     // Only a decision taken against a blocked pool is worth surfacing; the
     // everyday "Anthropic can serve" answer would bury it.
@@ -685,7 +692,7 @@ export function mountMessagesCrossProviderRoute(
       // must never be a harder failure than the degraded Anthropic path the
       // request would have taken anyway.
       const openAIDefaultModel = opts.modelRouting?.openAIDefaultModel?.trim();
-      const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting)
+      const tieredModel = openAIModelForClaudeModel(req.body.model, opts.modelRouting, opts.matchedOpenAITiers?.())
         ?? openAIDefaultModel;
       const crossProviderEffort = opts.modelRouting?.openAIReasoningEffort?.trim();
       const crossProviderBody: AnthropicMessagesRequest = {

@@ -16,6 +16,9 @@ export interface ModelRoutingConfig {
   /** Override reasoning effort only for Claude -> OpenAI fallback/session routes.
    *  Explicit OpenAI requests keep their own effort. Absent preserves the Claude request's effort. */
   openAIReasoningEffort?: string;
+  /** Fill tiers `openAITierMap` leaves unset from the live Codex catalog
+   *  (providers/tier-matching.ts). Off unless true. */
+  openAIAutoTierMap?: boolean;
 }
 
 /** Capability tier of a Claude model, used to pick a comparable OpenAI model. */
@@ -64,10 +67,15 @@ export function claudeTierOf(model: string | undefined): ClaudeTier | null {
  * no map, unmapped tier, or an unrecognised Claude name — returns
  * `openAIDefaultModel`, so behaviour is unchanged for anyone who has not opted
  * into tier routing.
+ *
+ * `matched` is the tier map discovered from the live catalog, consulted only
+ * for tiers the configured map leaves unset; the caller passes it only when
+ * `openAIAutoTierMap` is on.
  */
 export function openAIModelForClaudeModel(
   model: string | undefined,
   config: ModelRoutingConfig = {},
+  matched: Partial<Record<ClaudeTier, string>> = {},
 ): string | undefined {
   // Resolve aliases first. A configured alias need not contain the family word
   // ("fast" -> claude-haiku-4-5), so classifying the name as written would lose
@@ -77,7 +85,7 @@ export function openAIModelForClaudeModel(
     ? claudeTierOf(parsed.upstreamModel)
     : null;
   if (tier) {
-    const mapped = cleanModel(config.openAITierMap?.[tier]);
+    const mapped = cleanModel(config.openAITierMap?.[tier]) ?? cleanModel(matched[tier]);
     if (mapped) return mapped;
   }
   return cleanModel(config.openAIDefaultModel);

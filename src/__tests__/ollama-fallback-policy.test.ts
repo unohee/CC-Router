@@ -33,6 +33,7 @@ describe("resolveOllamaFallbackConfig", () => {
     expect(c).toEqual({
       baseUrl: "https://ollama.com", apiKeyEnv: "OLLAMA_API_KEY", minWaitSeconds: 900, model: "m",
       tierMap: { opus: undefined, sonnet: undefined, haiku: undefined }, contextTokens: 1_048_576, keyRequired: true,
+      autoTierMap: false,
     });
     expect(LOCAL.baseUrl).toBe("http://127.0.0.1:11434");
     expect(LOCAL.keyRequired).toBe(false);

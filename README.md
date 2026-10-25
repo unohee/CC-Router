@@ -410,18 +410,23 @@ using subagents naturally spreads across providers without breaking any cache.
 
 The model echo above has a cost, and the router is what pays it.
 
-Codex accepts at most **872,000** tokens (read from `codex/models`; the ordinary
-window it advertises is 272,000). Claude Code, told it is talking to a Claude
-model, will happily grow a session past that. When it does, Codex refuses
-**every** request for that session — and the refusal arrives inside an HTTP 200
-stream, so no status code marks the account as unusable.
+`codex/models` advertises a hard limit of **872,000** tokens (and an ordinary
+window of 272,000), but the backend is the authority: measured on 2026-10-25 by
+sending real source trees straight to it, gpt-6.1-sol accepted 913,300 input
+tokens and refused at about 930,000 — a wall of roughly 920K. Claude Code, told
+it is talking to a Claude model, will happily grow a session past that. When it
+does, Codex refuses **every** request for that session — and the refusal arrives
+inside an HTTP 200 stream, so no status code marks the account as unusable.
 
 So the router sizes each request before it routes it, and stops handing a
-session to a Codex account once its conversation passes **800,000** tokens. The
-72k of headroom absorbs the estimate's own error plus one more turn's growth,
-which matters because being refused is not free: the session is re-pinned and
-its whole prefix is rewritten into the next account's cache, measured at
-600-750K tokens. The numbers live in
+session to a Codex account once its estimate passes **750,000** tokens-worth of
+prompt. That estimate divides the body by the measured 3.6 bytes per token, so
+it stops a session at roughly 700K real tokens, leaving 235K of estimate
+headroom for one more turn's growth and the estimate's own error. The wall that
+headroom is measured against is **985,000** in the same estimate units (913,300
+real tokens accepted, ~930,000 refused). Headroom matters because being refused
+is not free — the session is re-pinned and its whole prefix is rewritten into
+the next account's cache, measured at 600-750K tokens. The numbers live in
 `src/providers/openai/context-limits.ts`.
 
 This needs nothing configured on the client. Earlier versions asked for a
@@ -453,6 +458,13 @@ With `--enable-model-tiers`, tier is preserved across the bridge:
 
 Unmapped or unrecognised models fall back to the configured OpenAI default. Edit
 `modelRouting.openAITierMap` in `~/.cc-router/config.json` to change a tier.
+
+To follow the live Codex catalog instead of a fixed table, set
+`modelRouting.openAIAutoTierMap: true`. Every six hours the router reads
+`codex/models` and matches by family — `astra` (frontier) for opus and fable,
+`sol` (workhorse) for sonnet, `luna` (fast) for haiku — taking the newest model
+of each. It only fills tiers `openAITierMap` leaves unset. A failed read keeps
+the last match, and the router logs the match each time it changes.
 
 ---
 
@@ -646,6 +658,7 @@ cc-router configure --disable-ollama-fallback
 - `--ollama-context-tokens` is compared against the router's size estimate (bytes / 2), which runs about twice the real token count of a Claude Code request. Lower it for models with a small context window; larger requests keep the 429.
 - If Ollama fails before the first byte (including its own 429 when credits run out) the client gets the router's 429, so the retry watchdog still applies.
 - Optional per-tier models: `ollamaFallback.tierMap: { "opus": "...", "sonnet": "...", "haiku": "..." }` in `config.json`.
+- `ollamaFallback.autoTierMap: true` fills the tiers `tierMap` leaves unset from the Ollama Cloud catalog. Opus (and fable) gets the largest tool-capable model, sonnet the largest one from another family, and haiku keeps `model`. Ollama publishes no quality ranking, so this uses parameter size as a stand-in. For a local daemon the catalog comes from `ollama.com/api/tags` without a key, and names are rewritten to the daemon's form (`kimi-k3:cloud`, `deepseek-v4-pro:0813-cloud`). Larger models use more of the monthly credit. `/cc-router/health` shows the match as `ollamaFallback.matchedTiers`.
 - `/cc-router/health` reports `ollamaFallback` (`ready`, `keyPresent`, `serving`, `requests`, `errors`, `lastSkipReason`, never the key). Tokens appear in the usage history under provider `ollama`.
 - The account table at `/cc-router/dashboard` and `cc-router status` also show
   Codex's reported 5-hour/weekly windows and Ollama Cloud's monthly credit balance,

@@ -28,10 +28,21 @@ export const CODEX_MAX_CONTEXT_WINDOW = 872_000;
  * an HTTP 200 stream where nothing marks the account as unusable.
  *
  * So a session is held to the pool minimum rather than the Claude maximum. The
- * headroom below CODEX_MAX_CONTEXT_WINDOW absorbs the estimate's own error plus
- * the growth of one more turn, so a session is moved off Codex before it hits
- * the wall rather than after — a refusal costs a full prefix rewrite into the
- * next account, measured at 600-750K tokens.
+ * headroom absorbs the estimate's own error plus the growth of one more turn,
+ * so a session is moved off Codex before it hits the wall rather than after —
+ * a refusal costs a full prefix rewrite into the next account, measured at
+ * 600-750K tokens.
+ *
+ * Measured 2026-10-25 by sending real source trees to gpt-6.1-sol directly:
+ * the backend accepted 913,300 input tokens and refused at ~930K, so the wall
+ * is about 920K, a little above the 872,000 it advertises. The old 800,000
+ * ceiling was in estimate units of bytes/2, where the estimate read 2.03x the
+ * backend's own count, so it actually cut sessions at roughly 400K real tokens.
+ *
+ * With BYTES_PER_TOKEN at a measured 3.6, the same 750,000 estimate units admit
+ * about 700K real tokens — 1.8x what the old pairing admitted — and leave 235K
+ * of estimate headroom on the wall for one more turn plus the error a single
+ * ratio carries across different kinds of content.
  *
  * This used to be enforced by the operator instead, as `autoCompactWindow` in
  * `~/.claude/settings.json`. That setting is global: it also capped sessions
@@ -40,7 +51,16 @@ export const CODEX_MAX_CONTEXT_WINDOW = 872_000;
  * ceiling belongs on the target that cannot hold the conversation, which is
  * what `codexCanHold` below now applies, per request.
  */
-export const CODEX_SESSION_CEILING = 800_000;
+export const CODEX_SESSION_CEILING = 750_000;
+
+/**
+ * The wall in the same estimate units as the ceiling — body bytes divided by
+ * BYTES_PER_TOKEN — so a test can check the headroom without the conversion.
+ *
+ * Measured 2026-10-25: 913,300 real tokens accepted, ~930,000 refused, on a
+ * body of 3,548,858 bytes. The estimate read that body as 985,794.
+ */
+export const CODEX_ESTIMATED_WALL = 985_000;
 
 /**
  * Bytes of request body per token, for sizing a request before it is sent.
@@ -56,8 +76,17 @@ export const CODEX_SESSION_CEILING = 800_000;
  * tokens for. Dividing by too small a number over-states the token count, which
  * errs toward keeping a borderline conversation off a target that could not
  * hold it. Judging fit is all this figure does; nothing bills from it.
+ *
+ * Re-measured 2026-10-25 against the token count the backend reported for the
+ * same body, on real source trees rather than a transcript: 1,825,805 estimated
+ * against 901,280 counted. 2.0 was a floor assumption about missing system
+ * prompt bytes and it does not hold — the body the router forwards keeps those
+ * bytes, so they were not missing after all. 3.6 is the measured ratio, and it
+ * is the figure that keeps the ceiling above from rejecting sessions Codex
+ * would have accepted. It still over-states a little, for the same safety
+ * reason as before.
  */
-export const BYTES_PER_TOKEN = 2;
+export const BYTES_PER_TOKEN = 3.6;
 
 /**
  * Estimated prompt size of a Messages request, from the raw body as received.

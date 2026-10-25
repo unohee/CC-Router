@@ -1,5 +1,6 @@
 import type { OpenAISubscriptionAccount } from "./openai/token-refresher.js";
 import type { Account } from "../proxy/types.js";
+import type { CodexCatalogModel } from "./tier-matching.js";
 
 export const ANTHROPIC_MODELS_ENDPOINT = "https://api.anthropic.com/v1/models";
 export const OPENAI_CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
@@ -46,6 +47,40 @@ export async function fetchOpenAICodexModels(
     },
     signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
   }, fetchImpl);
+}
+
+/**
+ * The Codex catalog with the metadata tier matching reads. Kept apart from
+ * `fetchOpenAICodexModels`, whose callers need only the ids. Empty on failure.
+ */
+export async function fetchOpenAICodexModelCatalog(
+  account: OpenAISubscriptionAccount,
+  fetchImpl: FetchLike = fetch,
+): Promise<CodexCatalogModel[]> {
+  try {
+    const res = await fetchImpl(OPENAI_CODEX_MODELS_ENDPOINT, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${account.accessToken}`,
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+    });
+    if (!res.ok) return [];
+    return getModelValues(await res.json()).flatMap((value): CodexCatalogModel[] => {
+      if (!value || typeof value !== "object") return [];
+      const record = value as Record<string, unknown>;
+      const slug = normalizeId(record.slug);
+      if (!slug || typeof record.priority !== "number" || !Number.isFinite(record.priority)) return [];
+      return [{
+        slug,
+        priority: record.priority,
+        ...(typeof record.visibility === "string" ? { visibility: record.visibility } : {}),
+      }];
+    });
+  } catch {
+    return [];
+  }
 }
 
 async function fetchModels(

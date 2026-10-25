@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { BYTES_PER_TOKEN } from "../providers/openai/context-limits.js";
 
 // The Ollama fallback spans the cross-provider route, the pool, the /v1 proxy
 // and the health endpoint, so it is exercised through a real server. Both
@@ -228,7 +229,7 @@ async function withRouter(
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const countTokensBody = (content: string) => JSON.stringify({ model: "claude-sonnet-4-6", messages: [{ role: "user", content }] });
 /** estimatePromptTokens: raw request bytes / 2, rounded up. */
-const estimateOf = (body: string) => Math.ceil(Buffer.byteLength(body) / 2);
+const estimateOf = (body: string) => Math.ceil(Buffer.byteLength(body) / BYTES_PER_TOKEN);
 const ENABLED = { enabled: true, model: "glm:cloud", tierMap: { opus: "big:cloud" } };
 
 it.concurrent("answers from Ollama when the pool is blocked far into the future, without thinking blocks", async () => {

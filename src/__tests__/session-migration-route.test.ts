@@ -4,13 +4,13 @@ import express, { type Express } from "express";
 import { mountMessagesCrossProviderRoute } from "../proxy/messages-cross-route.js";
 import { CompactAskGuard, type PinBlock } from "../proxy/session-migration.js";
 import { SessionContextTracker } from "../proxy/session-context-tracker.js";
-import type { SessionTarget } from "../proxy/session-router.js";
+import { BYTES_PER_TOKEN } from "../providers/openai/context-limits.js";
 
 const PINNED: SessionTarget = { provider: "anthropic", accountId: "kyte" };
 
-/** A body whose raw size lands above the given token estimate (2 bytes/token). */
+/** A body whose raw size lands above the given token estimate (BYTES_PER_TOKEN bytes each). */
 function bodyOfTokens(tokens: number, turns: number): Record<string, unknown> {
-  const filler = "x".repeat(Math.max(1, tokens * 2));
+  const filler = "x".repeat(Math.max(1, Math.round(tokens * BYTES_PER_TOKEN)));
   const messages = Array.from({ length: turns }, (_, i) => ({
     role: i % 2 === 0 ? "user" : "assistant",
     content: i === 0 ? filler : `turn ${i}`,
