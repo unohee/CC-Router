@@ -1,5 +1,4 @@
 import type {
-  AnthropicContent,
   AnthropicMessagesRequest,
   AnthropicTextBlock,
   AnthropicToolResultBlock,
@@ -34,7 +33,7 @@ function parseArguments(args: string): unknown {
  */
 type InboundContentBlock = OpenAIInputContent | OpenAIFunctionCall | OpenAIFunctionCallOutput;
 
-function messageContentToAnthropic(message: OpenAIInputMessage): AnthropicContent {
+function messageContentToAnthropic(message: OpenAIInputMessage): string | AnthropicBlock[] {
   const blocks: AnthropicBlock[] = [];
 
   for (const block of message.content as InboundContentBlock[]) {
@@ -51,6 +50,8 @@ function messageContentToAnthropic(message: OpenAIInputMessage): AnthropicConten
       blocks.push({ type: "tool_result", tool_use_id: block.call_id, content: block.output });
       continue;
     }
+    // Not translated back: this direction serves Codex clients, which send text.
+    if (block.type === "input_image") continue;
     blocks.push({ type: "text", text: block.text });
   }
 
@@ -80,9 +81,10 @@ function inputItemsToAnthropicMessages(input: OpenAIInputItem[]): AnthropicMessa
     if (blocks.length === 0) return;
     const last = messages.at(-1);
     if (last?.role === role) {
-      const existing = typeof last.content === "string"
+      // Every message here was built by `append`, so its blocks are AnthropicBlock.
+      const existing: AnthropicBlock[] = typeof last.content === "string"
         ? [{ type: "text" as const, text: last.content }]
-        : last.content;
+        : last.content as AnthropicBlock[];
       last.content = [...existing, ...blocks];
       return;
     }
@@ -109,7 +111,7 @@ function inputItemsToAnthropicMessages(input: OpenAIInputItem[]): AnthropicMessa
 
   return messages.map(message => {
     if (Array.isArray(message.content) && message.content.length === 1 && message.content[0].type === "text") {
-      return { ...message, content: message.content[0].text };
+      return { ...message, content: (message.content[0] as AnthropicTextBlock).text };
     }
     return message;
   });

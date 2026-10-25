@@ -1,4 +1,6 @@
-export type AnthropicRole = "user" | "assistant";
+/** Claude Code also sends mid-conversation `system` messages (environment and
+ *  tool-loading notices), observed 2026-10-26 on 2.1.309. */
+export type AnthropicRole = "user" | "assistant" | "system";
 
 export interface AnthropicTextBlock {
   type: "text";
@@ -12,16 +14,41 @@ export interface AnthropicToolUseBlock {
   input: unknown;
 }
 
+export interface AnthropicImageBlock {
+  type: "image";
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "url"; url: string };
+}
+
 export interface AnthropicToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
-  content: string | AnthropicTextBlock[];
+  /** Optional upstream: a tool that returned nothing sends no content at all. */
+  content?: string | Array<AnthropicTextBlock | AnthropicImageBlock>;
   is_error?: boolean;
 }
 
+/**
+ * Any other block Claude Code sends: `thinking` / `redacted_thinking` from
+ * earlier turns, `tool_addition` notices for deferred tools, `server_tool_use`
+ * and its result when a server tool such as the advisor ran. New kinds appear
+ * with client releases, so the converter must not assume the list is closed.
+ */
+export interface AnthropicOtherBlock {
+  type: string;
+  [key: string]: unknown;
+}
+
+export type AnthropicBlock =
+  | AnthropicTextBlock
+  | AnthropicToolUseBlock
+  | AnthropicToolResultBlock
+  | AnthropicImageBlock;
+
 export type AnthropicContent =
   | string
-  | Array<AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock>;
+  | Array<AnthropicBlock | AnthropicOtherBlock>;
 
 export interface AnthropicMessage {
   role: AnthropicRole;
@@ -31,7 +58,10 @@ export interface AnthropicMessage {
 export interface AnthropicTool {
   name: string;
   description?: string;
-  input_schema: Record<string, unknown>;
+  /** Absent on server tools (`type: "advisor_20260301"`, web search, ...),
+   *  which the upstream runs itself and a function-calling target cannot. */
+  input_schema?: Record<string, unknown>;
+  type?: string;
 }
 
 export interface AnthropicMessagesRequest {
