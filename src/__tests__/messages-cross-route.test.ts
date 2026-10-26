@@ -765,6 +765,117 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  // AGT-3898: Codex keeps generating for as long as its stream is read, so a
+  // reader left running after the client leaves spends quota on nobody.
+  describe("when the client hangs up mid-response", () => {
+    const sse = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+
+    /** An upstream that sends an opening and some text, then never finishes. */
+    const endlessUpstream = () => {
+      const state = { cancelled: 0 };
+      const response = () => new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(sse({ type: "response.created", response: { id: "r" } })));
+            controller.enqueue(encoder.encode(sse({ type: "response.output_text.delta", output_index: 0, delta: "Partial" })));
+          },
+          cancel() { state.cancelled++; },
+        }) as BodyInit,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+      return { state, response };
+    };
+
+    const mount = (upstream: ReturnType<typeof endlessUpstream>) => {
+      const onExplicitRoute = vi.fn();
+      const app = express();
+      mountMessagesCrossProviderRoute(app, {
+        onExplicitRoute,
+        getOpenAIAccount: () => ({
+          id: "codex", provider: "openai_subscription", accessToken: "a",
+          refreshToken: "r", expiresAt: Date.now() + 3_600_000, enabled: true,
+        }),
+        modelRouting: { openAIDefaultModel: "gpt-5.6-terra" },
+        forwardOpenAI: async () => upstream.response(),
+      });
+      return { app, onExplicitRoute };
+    };
+
+    const until = async (check: () => boolean) => {
+      for (let i = 0; i < 200 && !check(); i++) await new Promise(r => setTimeout(r, 10));
+    };
+
+    const withServer = async (app: express.Express, run: (port: number) => Promise<void>) => {
+      const server = createServer(app);
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+      try {
+        await run(address.port);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) => {
+          server.close(err => err ? reject(err) : resolve());
+        });
+      }
+    };
+
+    const post = (port: number, stream: boolean, signal: AbortSignal) =>
+      fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-5.6-terra", max_tokens: 8,
+          messages: [{ role: "user", content: "hi" }], stream,
+        }),
+        signal,
+      });
+
+    it("cancels the upstream stream and reports a disconnect, not a failure", async () => {
+      const upstream = endlessUpstream();
+      const { app, onExplicitRoute } = mount(upstream);
+
+      await withServer(app, async port => {
+        const abort = new AbortController();
+        const res = await post(port, true, abort.signal);
+        const reader = res.body!.getReader();
+        const { value } = await reader.read();
+        // The partial answer reached the client before it left.
+        expect(new TextDecoder().decode(value)).toContain("message_start");
+        abort.abort();
+
+        await until(() => onExplicitRoute.mock.calls.length > 0);
+        expect(upstream.state.cancelled).toBe(1);
+        expect(onExplicitRoute).toHaveBeenCalledTimes(1);
+        const info = onExplicitRoute.mock.calls[0]![0];
+        expect(info.clientClosed).toBe(true);
+        // The account did nothing wrong: blaming it would move the session.
+        expect(info.failedAfterStart).toBeUndefined();
+      });
+    });
+
+    it("cancels the upstream while collecting a non-stream answer", async () => {
+      // Codex always streams, so a non-stream request still holds a reader open
+      // until the answer is complete.
+      const upstream = endlessUpstream();
+      const { app, onExplicitRoute } = mount(upstream);
+
+      await withServer(app, async port => {
+        const abort = new AbortController();
+        const pending = post(port, false, abort.signal).catch(() => null);
+        await new Promise(r => setTimeout(r, 50));
+        abort.abort();
+        await pending;
+
+        await until(() => onExplicitRoute.mock.calls.length > 0);
+        expect(upstream.state.cancelled).toBe(1);
+        expect(onExplicitRoute).toHaveBeenCalledWith(expect.objectContaining({ clientClosed: true }));
+        expect(onExplicitRoute.mock.calls[0]![0].failedAfterStart).toBeUndefined();
+      });
+    });
+  });
+
   it("ends an already-started stream with an error event when the tool call turns out invalid", async () => {
     // Past the first byte nothing can be retried. The stream must still carry
     // a terminal error: stopping silently leaves the client unable to tell a
