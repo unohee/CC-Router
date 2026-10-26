@@ -9,6 +9,7 @@ import {
   DASHBOARD_PATH,
   DASHBOARD_SCRIPT,
   USAGE_HISTORY_PATH,
+  USAGE_SERIES_PATH,
   mountWebDashboard,
   renderDashboardHtml,
 } from "../proxy/web-dashboard.js";
@@ -67,7 +68,11 @@ interface Booted {
  * `respond` answers the health poll; `usage` answers the token-history request,
  * and defaults to a valid summary so every test sees the whole page drawn.
  */
-async function boot(respond: () => Promise<unknown>, usage: () => Promise<unknown> = ok(usageSummary())): Promise<Booted> {
+async function boot(
+  respond: () => Promise<unknown>,
+  usage: () => Promise<unknown> = ok(usageSummary()),
+  series: () => Promise<unknown> = ok(usageSeries()),
+): Promise<Booted> {
   const urls: string[] = [];
   const els = new Map<string, FakeEl>();
   const el = (id: string): FakeEl => {
@@ -79,13 +84,16 @@ async function boot(respond: () => Promise<unknown>, usage: () => Promise<unknow
       hidden: false,
       getElementById: el,
       createElement: (tag: string) => new FakeEl(tag),
+      createElementNS: (_ns: string, tag: string) => new FakeEl(tag),
       createTextNode: (t: string) => new FakeText(t),
       addEventListener() {},
     },
     window: { getSelection: () => ({ isCollapsed: true }) },
     fetch: (url: string) => {
       urls.push(String(url));
-      return String(url).startsWith(USAGE_HISTORY_PATH) ? usage() : respond();
+      if (String(url).startsWith(USAGE_HISTORY_PATH)) return usage();
+      if (String(url).startsWith(USAGE_SERIES_PATH)) return series();
+      return respond();
     },
     AbortController,
     // Timers are captured, never run: a real 3-second poll would outlive the test.
@@ -121,12 +129,47 @@ function health(accounts: unknown[], over: Record<string, unknown> = {}) {
     status: "ok", mode: "standalone", target: "https://api.anthropic.com", uptime: 7200,
     totalRequests: 200, totalErrors: 5, totalRefreshes: 3, totalCacheReadTokens: 451_000,
     totalCacheCreationTokens: 0, totalInputTokens: 93, totalOutputTokens: 12_345,
-    accounts, recentLogs: [], ...over,
+    accounts, recentLogs: [], performance: perfSnapshot(), ...over,
   };
   // The router sends its own verdict with health; the fixture asks the real module for it, so the
   // page is exercised against what a router would really send.
   return { severity: computeSeverity(doc.accounts as never, doc.recentLogs as never, Date.now()), ...doc };
 }
+function perfStat(over: Record<string, unknown> = {}) {
+  return {
+    requests: 40, errors: 1, rateLimited: 1, errorRate: 0.025, completed: 38,
+    p50Ms: 12_400, p95Ms: 31_000, outputTokensPerSecond: 61.4, ...over,
+  };
+}
+function perfSnapshot(over: Record<string, unknown> = {}) {
+  return {
+    windowMs: 3_600_000, observedMs: 3_600_000, pool: perfStat(),
+    accounts: { lyra: perfStat() }, models: { "claude-opus-5-5": perfStat() }, ...over,
+  };
+}
+
+/** A 24-hour series: two named models and "other", recording from the fourth hour. */
+function usageSeries(over: Record<string, unknown> = {}) {
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  return {
+    generatedAt: Date.now(), tz: "Asia/Seoul", tzFallback: false, since: hour - 20 * 3_600_000,
+    range: "24h", step: "hour",
+    series: [
+      { model: "claude-opus-5-5", provider: "anthropic" },
+      { model: "gpt-6.1-sol", provider: "openai" },
+      { model: "other", provider: "", other: true },
+    ],
+    points: Array.from({ length: 24 }, (_, i) => ({
+      start: hour - (23 - i) * 3_600_000, date: "2026-10-26", recorded: i >= 3,
+      requests: i >= 3 ? [10 + i, 2, 1] : [0, 0, 0],
+      output: i >= 3 ? [1000, 200, 0] : [0, 0, 0],
+      total: i >= 3 ? [500_000, 80_000, 1000] : [0, 0, 0],
+    })),
+    totals: { requests: 500, input: 10, output: 24_000, cacheRead: 9_000_000, cacheCreation: 10, total: 12_000_000, cacheHitRatio: 0.96 },
+    ...over,
+  };
+}
+
 // ─── Token-history fixtures ───────────────────────────────────────────────────
 
 const totals = (total: number, over: Record<string, unknown> = {}) =>
@@ -184,7 +227,8 @@ describe("dashboard document", () => {
   });
 
   it("reaches nothing but the router it was loaded from", () => {
-    expect(html).not.toMatch(/https?:\/\//);
+    // The SVG namespace is a name, never fetched; any other URL would be a request off the router.
+    expect(html.split("http://www.w3.org/2000/svg").join("")).not.toMatch(/https?:\/\//);
     expect(DASHBOARD_CSP).toContain("default-src 'none'");
     expect(DASHBOARD_CSP).toContain("connect-src 'self'");
     expect(DASHBOARD_CSP).toContain("frame-ancestors 'none'");
@@ -462,36 +506,6 @@ describe("dashboard token history", () => {
     expect(DASHBOARD_SCRIPT).toContain(`"${USAGE_HISTORY_PATH}`);
   });
 
-  it("shows the four rolling totals, with a request count and the share served from cache", async () => {
-    const page = await boot(ok(health([account()])));
-    const tiles = page.rows("wintiles");
-    expect(tiles).toHaveLength(4);
-    expect(tiles[0]).toContain("Last 24 hours");
-    expect(tiles[0]).toContain("1.2M");
-    expect(tiles[0]).toContain("12 requests");
-    expect(tiles[0]).toContain("cache read 99%");
-    expect(tiles.map(t => t.split(" ").slice(0, 2).join(" "))).toEqual(["Last 24", "Last 7", "Last 14", "Last 30"]);
-  });
-
-  it("puts the four-way breakdown and the rolling rule in each tile's tooltip", async () => {
-    const page = await boot(ok(health([account()])));
-    const [first] = page.el("wintiles").children as FakeEl[];
-    expect(first.title).toContain("input 1K");
-    expect(first.title).toContain("output 2K");
-    expect(first.title).toContain("cache read 1.2M");
-    expect(first.title).toContain("cache write 7K");
-    expect(first.title).toContain("rolling window");
-  });
-
-  it("says which windows are not yet a full window, and only those", async () => {
-    const page = await boot(ok(health([account()])));
-    const tiles = page.rows("wintiles");
-    expect(tiles[0]).not.toContain("recording since");
-    expect(tiles[1]).not.toContain("recording since");
-    expect(tiles[2]).toContain("recording since");
-    expect(tiles[3]).toContain("recording since");
-  });
-
   it("says nothing has been recorded rather than showing zeros, before the first sample", async () => {
     const empty = usageSummary({
       since: null,
@@ -502,11 +516,6 @@ describe("dashboard token history", () => {
     });
     const page = await boot(ok(health([account()])), ok(empty));
     expect(page.el("usesum").textContent).toBe("nothing recorded yet");
-    for (const t of page.rows("wintiles")) {
-      expect(t).toContain("–");
-      expect(t).toContain("nothing recorded yet");
-      expect(t).not.toMatch(/\b0\b/);
-    }
     expect(page.el("usestate").hidden).toBe(true);
   });
 
@@ -856,13 +865,274 @@ describe("the status strip", () => {
     ];
     for (const rateLimits of cases) {
       const acct = account({ rateLimits });
-      const page = await boot(ok(health([acct])));
+      // No last-hour figures, so the only percentage on the row is the window's.
+      const page = await boot(ok(health([acct], { performance: perfSnapshot({ accounts: {} }) })));
       const server = windowReading(rateLimits as never, "fiveHour", Date.now());
       const shown = /\b\d+%/.test(page.rows("accbody")[0] ?? "");
       expect(shown, JSON.stringify(rateLimits)).toBe(server.ok);
       const rung = computeSeverity([acct] as never, [], Date.now()).accounts[0].rung;
       expect(rung === "ok", JSON.stringify(rateLimits)).toBe(!(server.ok && server.util >= 0.8));
     }
+  });
+});
+
+// ─── The last hour ────────────────────────────────────────────────────────────
+
+describe("dashboard last hour", () => {
+  const kpis = (page: Booted) => page.rows("kpis");
+
+  it("shows requests, error rate, finish p50 and p95 and output speed for the pool", async () => {
+    const page = await boot(ok(health([account()])));
+    const k = kpis(page);
+    expect(k).toHaveLength(5);
+    expect(k[0]).toContain("Requests");
+    expect(k[0]).toContain("40");
+    expect(k[1]).toContain("2.5%");
+    expect(k[1]).toContain("1× 429");
+    expect(k[2]).toContain("12.4 s");
+    expect(k[3]).toContain("31.0 s");
+    expect(k[4]).toContain("61 tok/s");
+  });
+
+  it("says 'no reading', never zero, for a figure the router has not measured", async () => {
+    const empty = perfStat({ requests: 0, errors: 0, rateLimited: 0, errorRate: null, completed: 0, p50Ms: null, p95Ms: null, outputTokensPerSecond: null });
+    const page = await boot(ok(health([account()], { performance: perfSnapshot({ pool: empty, accounts: {}, models: {} }) })));
+    const k = kpis(page);
+    for (const i of [1, 2, 3, 4]) {
+      expect(k[i]).toContain("no reading");
+      expect(k[i]).not.toMatch(/\b0(\.0)?\s?(%|s|ms|tok)/);
+    }
+    expect(page.rows("perfbody")[0]).toContain("No requests in the last hour");
+  });
+
+  it("says how much of the hour it has seen after a restart", async () => {
+    const page = await boot(ok(health([account()], { performance: perfSnapshot({ observedMs: 12 * 60_000 }) })));
+    expect(page.el("perfsum").textContent).toContain("only 12m observed");
+  });
+
+  it("keeps the page whole when the router sends no performance figures", async () => {
+    const page = await boot(ok(health([account()], { performance: { pool: "broken" } })));
+    expect(page.el("banner").hidden).toBe(true);
+    expect(page.el("perfsum").textContent).toContain("does not report");
+    expect(page.rows("accbody")[0]).toContain("no reading");
+  });
+
+  it("lists each model's figures, and marks errors with a symbol, not colour alone", async () => {
+    const page = await boot(ok(health([account()], { performance: perfSnapshot({
+      models: {
+        "claude-opus-5-5": perfStat({ requests: 30, errors: 0, rateLimited: 0, errorRate: 0 }),
+        "claude-sonnet-5-5": perfStat({ requests: 10, errors: 2, rateLimited: 0, errorRate: 0.2 }),
+      },
+    }) })));
+    const rows = page.rows("perfbody");
+    expect(rows[0]).toMatch(/^claude-opus-5-5/);
+    expect(rows[1]).toContain("■");
+    expect(rows[1]).toContain("20%");
+  });
+
+  it("puts each account's last hour in its row", async () => {
+    const page = await boot(ok(health([account(), account({ id: "vega" })])));
+    const rows = page.rows("accbody");
+    expect(rows[0]).toContain("40 req");
+    expect(rows[0]).toContain("p50 12.4 s");
+    expect(rows[0]).toContain("2.5% errors · 1× 429");
+    // One error in 40 is background, not a problem: no mark.
+    expect(rows[0]).not.toContain("▲");
+    expect(rows[1]).toContain("no requests");
+  });
+});
+
+// ─── Activity over time ───────────────────────────────────────────────────────
+
+describe("dashboard activity chart", () => {
+  const chart = (page: Booted) => page.el("chartbox").children[0] as FakeEl;
+  const rects = (page: Booted) => find(chart(page), e => e.tag === "rect");
+  const press = (page: Booted, id: string) => page.el(id).listeners["click"]!();
+  const key = (page: Booted, k: string) =>
+    (chart(page).listeners["keydown"] as unknown as (e: unknown) => void)({ key: k, preventDefault() {} });
+
+  it("asks for the chart's series in the viewer's zone, as a request of its own", async () => {
+    const page = await boot(ok(health([account()])));
+    const asked = page.urls.filter(u => u.startsWith(USAGE_SERIES_PATH));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("range=24h");
+    expect(asked[0]).toContain("tz=");
+    expect(DASHBOARD_SCRIPT).toContain(`"${USAGE_SERIES_PATH}"`);
+  });
+
+  it("draws a stacked bar per hour, coloured by model through classes, and a mark for hours before recording", async () => {
+    const page = await boot(ok(health([account()])));
+    const all = rects(page);
+    const cls = (r: FakeEl) => r.attrs["class"] ?? "";
+    expect(all.filter(r => cls(r) === "nodata")).toHaveLength(3);
+    expect(all.filter(r => cls(r).startsWith("s0"))).toHaveLength(21);
+    expect(all.filter(r => cls(r).startsWith("s1"))).toHaveLength(21);
+    // "other" takes the neutral, whatever its position.
+    expect(all.filter(r => cls(r).startsWith("so"))).toHaveLength(21);
+    // The current hour is unfinished and drawn as such.
+    expect(all.filter(r => cls(r).includes("partial"))).toHaveLength(3);
+    for (const r of all) expect(r.attrs["style"]).toBeUndefined();
+  });
+
+  it("labels its scale and names every model in a legend with its total and share", async () => {
+    const page = await boot(ok(health([account()])));
+    const legend = page.rows("actlegend");
+    expect(legend).toHaveLength(3);
+    expect(legend[0]).toContain("claude-opus-5-5");
+    expect(legend[1]).toContain("gpt-6.1-sol (OpenAI)");
+    expect(legend[2]).toContain("Other models");
+    const texts = find(chart(page), e => e.tag === "text").map(t => t.textContent);
+    expect(texts).toContain("0");
+    expect(page.el("acttot").textContent).toContain("500 requests");
+    expect(page.el("acttot").textContent).toContain("cache hit 96%");
+  });
+
+  it("reads one hour at a time from the keyboard, and says when the newest one is still going", async () => {
+    const page = await boot(ok(health([account()])));
+    key(page, "End");
+    expect(page.el("actinfo").textContent).toContain("so far this hour");
+    expect(page.el("actinfo").textContent).toContain("36 requests so far this hour: claude-opus-5-5 33");
+    key(page, "Home");
+    expect(page.el("actinfo").textContent).toContain("no data: recording had not started");
+    key(page, "ArrowRight");
+    key(page, "ArrowRight");
+    key(page, "ArrowRight");
+    expect(page.el("actinfo").textContent).toContain("16 requests: claude-opus-5-5 13");
+  });
+
+  it("switches the measure without a new request, and the range with one", async () => {
+    const page = await boot(ok(health([account()])));
+    press(page, "m-output");
+    expect(page.el("m-output").attrs["aria-pressed"]).toBe("true");
+    expect(page.el("actlegend").children.map(textOf)[0]).toContain("21K");
+    expect(page.urls.filter(u => u.startsWith(USAGE_SERIES_PATH))).toHaveLength(1);
+    press(page, "r-7d");
+    expect(page.el("r-7d").attrs["aria-pressed"]).toBe("true");
+    const asked = page.urls.filter(u => u.startsWith(USAGE_SERIES_PATH));
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).toContain("range=7d");
+  });
+
+  it("drops an answer for a range the viewer has already left", async () => {
+    // The first (24h) answer is held back until after the viewer has moved to 7d.
+    let release: () => void = () => {};
+    const held = new Promise<void>(r => { release = r; });
+    let calls = 0;
+    const series = async () => {
+      calls++;
+      if (calls === 1) await held;
+      return ok(calls === 1 ? usageSeries() : usageSeries({ range: "7d" }))();
+    };
+    const page = await boot(ok(health([account()])), ok(usageSummary()), series);
+    press(page, "r-7d");
+    for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r));
+    const drawn = page.el("chartbox").children[0];
+    expect(page.el("acttot").textContent).toContain("Last 7 days");
+    release();
+    for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r));
+    expect(page.el("chartbox").children[0]).toBe(drawn);
+    expect(page.el("acttot").textContent).toContain("Last 7 days");
+    expect(page.el("actstate").hidden).toBe(true);
+  });
+
+  it("refuses a reply of the wrong shape, in its own place, and leaves the rest of the page alone", async () => {
+    const bad = usageSeries({ points: [{ start: 1, date: "x", recorded: true, requests: [1], output: [1], total: [1] }] });
+    const page = await boot(ok(health([account()])), ok(usageSummary()), ok(bad));
+    expect(page.el("actstate").hidden).toBe(false);
+    expect(page.el("actstate").textContent).toContain("unavailable");
+    expect(page.el("banner").hidden).toBe(true);
+    expect(page.el("usestate").hidden).toBe(true);
+  });
+
+  it("offers every bar as a table row, newest first", async () => {
+    const page = await boot(ok(health([account()])));
+    press(page, "acttable");
+    expect(page.el("acttablewrap").hidden).toBe(false);
+    expect(page.el("acttable").attrs["aria-expanded"]).toBe("true");
+    const rows = page.rows("actrows");
+    expect(rows).toHaveLength(24);
+    expect(rows[23]).toContain("no data");
+    expect(page.rows("acthead")).toEqual(["Hour", "claude-opus-5-5", "gpt-6.1-sol (OpenAI)", "Other models", "Total"]);
+  });
+
+  it("puts a hostile model name in the page as text, never as markup", async () => {
+    const page = await boot(ok(health([account()])), ok(usageSummary()), ok(usageSeries({
+      series: [{ model: "<img src=x onerror=alert(1)>", provider: "anthropic" }],
+      points: [{ start: Date.now(), date: "2026-10-26", recorded: true, requests: [1], output: [1], total: [1] }],
+    })));
+    expect(page.el("banner").hidden).toBe(true);
+    expect(page.rows("actlegend")[0]).toContain("<img src=x onerror=alert(1)>");
+  });
+});
+
+// ─── Recent activity, filtered ────────────────────────────────────────────────
+
+describe("dashboard recent activity", () => {
+  const T = Date.now();
+  const logs = [
+    { ts: T - 1000, accountId: "lyra", model: "claude-opus-5-5", type: "route", method: "POST", path: "/messages", statusCode: 200,
+      durationMs: 900, totalMs: 40_000, outputTokens: 800, inputTokens: 2, cacheReadTokens: 90_000, cacheCreationTokens: 10_000, sessionId: "76aa4214-db3b" },
+    { ts: T - 2000, accountId: "vega", model: "claude-sonnet-5-5", type: "error", method: "POST", path: "/messages", statusCode: 429, durationMs: 300, details: "rate limited" },
+    { ts: T - 3000, accountId: "lyra", model: "claude-opus-5-5", type: "route", method: "POST", path: "/messages", statusCode: 200, durationMs: 1200 },
+    { ts: T - 4000, accountId: "ollama", model: "kimi", type: "route", method: "POST", path: "/messages", statusCode: 200, durationMs: 5000, totalMs: 5000, clientClosed: true },
+  ];
+  const page = () => boot(ok(health([account()], { recentLogs: logs })));
+  const change = (p: Booted, id: string, prop: "value" | "checked", v: unknown) => {
+    (p.el(id) as unknown as Record<string, unknown>)[prop] = v;
+    p.el(id).listeners["change"]!();
+  };
+
+  it("shows status, the whole duration when finished, speed, cache share and session", async () => {
+    const rows = (await page()).rows("logbody");
+    expect(rows[0]).toContain("200");
+    expect(rows[0]).toContain("40.0 s");
+    expect(rows[0]).toContain("20 tok/s");
+    expect(rows[0]).toContain("90%");
+    expect(rows[0]).toContain("76aa4214");
+    expect(rows[1]).toContain("▲");
+    expect(rows[1]).toContain("429");
+  });
+
+  it("names an unfinished duration as the wait for headers, not as the response time", async () => {
+    const rows = (await page()).rows("logbody");
+    expect(rows[2]).toContain("headers 1.2 s");
+  });
+
+  it("marks a response slower than the hour's p95, and a client that left", async () => {
+    const rows = (await page()).rows("logbody");
+    expect(rows[0]).toContain("▲"); // 40 s > the fixture's 31 s p95
+    expect(rows[3]).toContain("client left");
+  });
+
+  it("filters by account, by model, to errors and to slow responses", async () => {
+    const p = await page();
+    expect(p.rows("faccount")).toEqual(["All", "lyra", "ollama", "vega"]);
+    change(p, "faccount", "value", "lyra");
+    expect(p.rows("logbody")).toHaveLength(2);
+    expect(p.el("logsum").textContent).toContain("2 of 4 match");
+    change(p, "faccount", "value", "");
+    change(p, "ferr", "checked", true);
+    expect(p.rows("logbody")).toHaveLength(1);
+    expect(p.rows("logbody")[0]).toContain("vega");
+    change(p, "ferr", "checked", false);
+    change(p, "fslow", "checked", true);
+    expect(p.rows("logbody")).toHaveLength(1);
+    change(p, "fmodel", "value", "kimi");
+    expect(p.rows("logbody")[0]).toContain("No events match");
+  });
+
+  it("does not count a client that left as an error", async () => {
+    const p = await page();
+    change(p, "ferr", "checked", true);
+    expect(p.rows("logbody").join(" ")).not.toContain("ollama");
+  });
+
+  it("opens a row for its full details, and keeps it open across a refresh", async () => {
+    const p = await page();
+    const first = p.el("logbody").children[0] as FakeEl;
+    first.listeners["click"]!();
+    expect(first.className).toContain("open");
+    expect(first.attrs["aria-expanded"]).toBe("true");
   });
 });
 

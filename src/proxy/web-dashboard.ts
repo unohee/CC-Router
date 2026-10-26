@@ -5,10 +5,13 @@ import type { Express, Request, Response } from "express";
  * A read-only usage page for the router, served from the router itself.
  *
  * It is one static document that polls `/cc-router/health` — the same JSON the
- * terminal dashboard reads — and, once a minute, `/cc-router/usage-history`, the
- * token history the router keeps (see usage-history.ts). The second is an
- * endpoint of its own, so what it returns is held to the same rule as health: it
- * is readable without the proxy secret, which is why it carries aggregates only.
+ * terminal dashboard reads, including the last hour's latency and error figures
+ * (perf-window.ts) — and, once a minute, `/cc-router/usage-history` and
+ * `/cc-router/usage-series`, the token history the router keeps (see
+ * usage-history.ts) as a summary and as a time series by model. Those two are
+ * endpoints of their own, so what they return is held to the same rule as
+ * health: readable without the proxy secret, which is why they carry aggregates
+ * only.
  * Everything is inlined (no build step reaches non-TS files, and nothing is
  * fetched from a CDN), and the CSP pins that: the only script and style allowed
  * are these two exact blocks, by hash.
@@ -21,6 +24,8 @@ import type { Express, Request, Response } from "express";
 export const DASHBOARD_PATH = "/cc-router/dashboard";
 /** The page's script hard-codes this string; a test keeps the two in step. */
 export const USAGE_HISTORY_PATH = "/cc-router/usage-history";
+/** The activity chart's time series; hard-coded in the script the same way. */
+export const USAGE_SERIES_PATH = "/cc-router/usage-series";
 
 const STYLE = String.raw`
 :root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
@@ -33,7 +38,7 @@ body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-
 header{display:flex;flex-wrap:wrap;gap:8px 24px;align-items:baseline;justify-content:space-between}
 h1{margin:0;font-size:20px;font-weight:600}
 h2{margin:0;font-size:14px;font-weight:600}
-.meta,.sum,.note,.foot,.sub,.label{color:var(--ink2)}
+.meta,.sum,.note,.foot,.sub{color:var(--ink2)}
 .meta{margin:2px 0 0;font-size:13px}
 .updated{font-size:12px;color:var(--ink2)}
 .banner{margin-top:16px;padding:10px 12px;border:1px solid var(--crit);border-radius:6px;background:var(--surface);font-size:13px}
@@ -45,11 +50,7 @@ h2{margin:0;font-size:14px;font-weight:600}
 .strip[data-level="problem"]{border-color:var(--crit);background:var(--surface);background:color-mix(in srgb,var(--crit) 7%,var(--surface))}
 .strip[data-level="problem"] .reasons{color:var(--ink)}
 .since{margin:12px 0 0;font-size:12px;color:var(--ink2)}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
-.tile,.card{background:var(--surface);border:1px solid var(--hair);border-radius:8px}
-.tile{padding:12px 14px}
-.label{font-size:12px}
-.value{font-size:28px;font-weight:600;line-height:1.2;margin-top:4px}
+.card{background:var(--surface);border:1px solid var(--hair);border-radius:8px}
 .sub{font-size:12px;margin-top:2px}
 .card{margin-top:16px;padding:16px}
 .cardhead{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:baseline;justify-content:space-between;margin-bottom:8px}
@@ -137,6 +138,66 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .mrow{grid-template-columns:minmax(0,1fr) auto}
 .mrow .meter{grid-column:1 / -1;order:3}
 }
+/* Activity chart: four categorical hues kept clear of the status colours, and a neutral for "other". Validated for colour-vision deficiency in both schemes. */
+:root{--s0:#2a78d6;--s1:#1baf7a;--s2:#6250d6;--s3:#e87ba4;--so:#c3c2bc;--sel:rgba(11,11,11,.06)}
+@media (prefers-color-scheme:dark){:root{--s0:#3987e5;--s1:#199e70;--s2:#9085e9;--s3:#d55181;--so:#55544f;--sel:rgba(255,255,255,.07)}}
+::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px 24px;margin:4px 0 0}
+.kpi{min-width:0}
+.kpi dt{font-size:12px;color:var(--ink2)}
+.kpi dd{margin:2px 0 0;font-size:18px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums}
+.kpi dd.na{font-size:14px;font-weight:400;color:var(--ink2)}
+.kpi dd.sub{margin-top:0;font-size:12px;font-weight:400;line-height:1.45;color:var(--ink2)}
+.lh{display:block;white-space:nowrap;font-variant-numeric:tabular-nums}
+.lh+.lh{font-size:12px;color:var(--ink2)}
+.subtable{margin-top:16px}
+.controls{display:flex;flex-wrap:wrap;gap:8px}
+.seg{display:inline-flex;border:1px solid var(--hair);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:3px 10px;font-size:12px;color:var(--ink2)}
+.seg button+button{border-left:1px solid var(--hair)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--surface)}
+.seg button:focus-visible{outline-offset:-2px}
+.totline{margin:0 0 12px;font-size:13px;color:var(--ink2);font-variant-numeric:tabular-nums}
+.totline strong{color:var(--ink);font-weight:600}
+.actbody{display:grid;grid-template-columns:minmax(0,1fr) 248px;gap:16px 28px;align-items:start}
+.chartbox{min-width:0;overflow-x:auto}
+.chart{display:block;touch-action:pan-x}
+.chart:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.chart text{font-size:11px;fill:var(--ink2);font-variant-numeric:tabular-nums}
+.chart .grid{stroke:var(--hair);stroke-width:1}
+.chart .base{stroke:var(--muted);stroke-width:1}
+.chart .selcol{fill:var(--sel)}
+.chart .s0{fill:var(--s0)}.chart .s1{fill:var(--s1)}.chart .s2{fill:var(--s2)}.chart .s3{fill:var(--s3)}.chart .so{fill:var(--so)}
+.chart .partial{opacity:.5}
+.chart .nodata{fill:var(--hair)}
+.lgd{gap:8px}
+.lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 8px;align-items:baseline;font-size:13px}
+.lval{font-size:12px;color:var(--ink2);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--so)}
+.sw.s0{background:var(--s0)}.sw.s1{background:var(--s1)}.sw.s2{background:var(--s2)}.sw.s3{background:var(--s3)}
+.actfoot{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin-top:10px;font-size:12px}
+.tablewrap{max-height:320px;overflow:auto;margin-top:12px;border-top:1px solid var(--hair)}
+.tablewrap th{position:sticky;top:0;background:var(--surface);padding-top:8px}
+.filters{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin:0 0 10px;font-size:12px;color:var(--ink2)}
+.filters label{display:inline-flex;gap:6px;align-items:center}
+select{font:inherit;font-size:12px;color:var(--ink);background:var(--surface);border:1px solid var(--hair);border-radius:6px;padding:3px 6px;max-width:220px}
+select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type="checkbox"]{accent-color:var(--accent);margin:0}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--sel)}
+tr.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+tr.open .clip{max-width:none;white-space:normal;overflow:visible;overflow-wrap:anywhere}
+.logs td{padding-top:8px;padding-bottom:8px}
+.logs .nw{white-space:nowrap}
+.logs td.clip{min-width:200px;max-width:320px}
+@media (max-width:720px){
+.actbody{grid-template-columns:1fr}
+/* Stacked rows: two columns that may shrink, so one unbreakable figure cannot widen the page. */
+tr{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+td.mono,.logs .nw,.lh{white-space:normal}
+.logs td.clip{min-width:0;max-width:none}
+}
+@media (forced-colors:active){.chart,.sw{forced-color-adjust:none}.seg button[aria-pressed="true"]{border:2px solid Highlight}}
 @media (forced-colors:active){
 .hx{forced-color-adjust:none;border:1px solid CanvasText}
 .hx.h0{background:Canvas}
@@ -172,17 +233,55 @@ const BODY = String.raw`
             <th scope="col">Account</th><th scope="col">Status</th>
             <th scope="col">5-hour window</th><th scope="col">7-day window</th>
             <th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
-            <th scope="col">Last used</th><th scope="col">Token</th>
+            <th scope="col">Last hour</th><th scope="col">Last used</th><th scope="col">Token</th>
           </tr></thead>
           <tbody id="accbody"></tbody>
         </table>
       </div>
     </section>
     <p id="since" class="since"></p>
+    <section class="card" aria-labelledby="perf-h">
+      <div class="cardhead"><h2 id="perf-h">Last hour</h2><span id="perfsum" class="sum"></span></div>
+      <dl id="kpis" class="kpis"></dl>
+      <div class="scroll subtable">
+        <table>
+          <thead><tr>
+            <th scope="col">Model</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
+            <th scope="col" class="num">Finish p50</th><th scope="col" class="num">Finish p95</th><th scope="col" class="num">Output speed</th>
+          </tr></thead>
+          <tbody id="perfbody"></tbody>
+        </table>
+      </div>
+    </section>
     <section id="usage" aria-labelledby="use-h">
       <div class="cardhead usehead"><h2 id="use-h">Token usage</h2><span id="usesum" class="sum"></span></div>
       <div id="usestate" role="status" hidden></div>
-      <div id="wintiles" class="tiles" aria-label="Rolling token totals"></div>
+      <section class="card" aria-labelledby="act-h">
+        <div class="cardhead">
+          <h2 id="act-h">Activity</h2>
+          <div class="controls">
+            <div class="seg" role="group" aria-label="Range">
+              <button id="r-24h" type="button">24h</button><button id="r-7d" type="button">7d</button><button id="r-30d" type="button">30d</button>
+            </div>
+            <div class="seg" role="group" aria-label="Measure">
+              <button id="m-requests" type="button">Requests</button><button id="m-output" type="button">Output tokens</button><button id="m-total" type="button">All tokens</button>
+            </div>
+          </div>
+        </div>
+        <p id="acttot" class="totline"></p>
+        <div id="actstate" class="note" role="status" hidden></div>
+        <div class="actbody">
+          <div id="chartbox" class="chartbox"></div>
+          <ul id="actlegend" class="mlist lgd" aria-label="Models, totals for this range"></ul>
+        </div>
+        <div class="actfoot">
+          <span id="actinfo" class="note" aria-live="polite">Hover, tap or use the arrow keys on the chart to read an hour.</span>
+          <button id="acttable" type="button" aria-controls="acttablewrap" aria-expanded="false">Show as table</button>
+        </div>
+        <div id="acttablewrap" class="tablewrap" hidden>
+          <table><thead><tr id="acthead"></tr></thead><tbody id="actrows"></tbody></table>
+        </div>
+      </section>
       <section class="card" aria-labelledby="hm-h">
         <div class="cardhead"><h2 id="hm-h">Daily tokens</h2><span id="hmsum" class="sum"></span></div>
         <div class="hmbody">
@@ -219,11 +318,19 @@ const BODY = String.raw`
     </section>
     <section class="card" aria-labelledby="log-h">
       <div class="cardhead"><h2 id="log-h">Recent activity</h2><span id="logsum" class="sum"></span></div>
+      <div class="filters">
+        <label>Account <select id="faccount"></select></label>
+        <label>Model <select id="fmodel"></select></label>
+        <label><input id="ferr" type="checkbox"> Errors only</label>
+        <label><input id="fslow" type="checkbox"> Slower than p95</label>
+      </div>
       <div class="scroll">
-        <table>
+        <table class="logs">
           <thead><tr>
             <th scope="col">Time</th><th scope="col">Account</th><th scope="col">Event</th>
-            <th scope="col">Model</th><th scope="col">Details</th><th scope="col">Tokens</th>
+            <th scope="col">Model</th><th scope="col" class="num">Status</th><th scope="col" class="num">Duration</th>
+            <th scope="col" class="num">Speed</th><th scope="col">Tokens</th><th scope="col" class="num">Cache</th>
+            <th scope="col">Session</th><th scope="col">Details</th>
           </tr></thead>
           <tbody id="logbody"></tbody>
         </table>
@@ -231,7 +338,7 @@ const BODY = String.raw`
       <button id="more" class="more" type="button" hidden></button>
     </section>
   </main>
-  <p class="foot">Read-only. Refreshes every few seconds from <code>/cc-router/health</code>, and token history every minute from <code>/cc-router/usage-history</code>. Usage is read from upstream response headers, so a window shows no reading until that account has served a request since the router started. This page and both of those endpoints are not behind the proxy secret.</p>
+  <p class="foot">Read-only. Refreshes every few seconds from <code>/cc-router/health</code>, and token history every minute from <code>/cc-router/usage-history</code> and <code>/cc-router/usage-series</code>. Last-hour figures are kept in memory and start over when the router restarts. Finish times run from the request to the end of the response, and output speed divides output tokens by that, so it includes the wait for the first token. Usage is read from upstream response headers, so a window shows no reading until that account has served a request since the router started. This page and both of those endpoints are not behind the proxy secret.</p>
 </div>
 `;
 
@@ -262,6 +369,24 @@ const SCRIPT = String.raw`
     return s + "s";
   }
   function ago(ts) { return ts > 0 ? dur(now() - ts) + " ago" : "never"; }
+  // A response time: milliseconds under a second, then seconds to one place.
+  function secs(ms) {
+    if (!isNum(ms) || ms < 0) return "";
+    if (ms < 1000) return Math.round(ms) + " ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+    return dur(ms);
+  }
+  // An error rate keeps one decimal below 10%, where the difference matters.
+  function rate(x) { return x < 0.1 && x > 0 ? (x * 100).toFixed(1) + "%" : Math.round(x * 100) + "%"; }
+  // SVG nodes take their class through setAttribute: className on one is an
+  // SVGAnimatedString, which a plain assignment silently leaves untouched.
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function svg(tag, cls, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    if (cls) n.setAttribute("class", cls);
+    if (attrs) for (var k in attrs) n.setAttribute(k, String(attrs[k]));
+    return n;
+  }
   function glyph(tone, ch) { return el("span", "glyph g-" + tone, ch); }
   // On a phone each row stacks into a card and the header row is hidden, so every
   // cell carries its own label (drawn from data-label by CSS) and the wide ones span.
@@ -416,14 +541,6 @@ const SCRIPT = String.raw`
   }
 
   // ── sections ──────────────────────────────────────────────────────────────
-  function tile(label, value, sub) {
-    var t = el("div", "tile");
-    t.appendChild(el("div", "label", label));
-    t.appendChild(el("div", "value", value));
-    if (sub) t.appendChild(el("div", "sub", sub));
-    return t;
-  }
-
   // What the counters since start used to be six tiles for. They reset on every restart,
   // unlike the history below, so they are context for the accounts, not a headline.
   function renderSince(h) {
@@ -453,6 +570,7 @@ const SCRIPT = String.raw`
       var w7 = lab(el("td"), "7-day window", true); w7.appendChild(windowCell(a, "sevenDay", a.weeklyLimitPercent)); tr.appendChild(w7);
       tr.appendChild(lab(el("td", "num", num(a.requestCount)), "Requests"));
       tr.appendChild(lab(el("td", "num", num(a.errorCount)), "Errors"));
+      tr.appendChild(lastHourCell(a.id));
       tr.appendChild(lab(el("td", "dim mono", ago(a.lastUsedMs)), "Last used"));
       tr.appendChild(lab(el("td", "dim mono", a.expiresInMs > 0 ? "expires in " + dur(a.expiresInMs) : "expired"), "Token"));
       return tr;
@@ -522,10 +640,119 @@ const SCRIPT = String.raw`
     box.appendChild(meter); box.appendChild(text); quotaCell.appendChild(box); tr.appendChild(quotaCell);
     tr.appendChild(lab(el("td", "num", num(a.requests)), "Requests"));
     tr.appendChild(lab(el("td", "num", num(a.errors)), "Errors"));
+    tr.appendChild(lastHourCell("ollama"));
     tr.appendChild(lab(el("td", "dim mono", ago(a.lastServedAt)), "Last used"));
     tr.appendChild(lab(el("td", "dim mono", a.keyRequired ? (a.keyPresent ? "API key set" : "API key missing") : "local endpoint"), "Authentication"));
     return tr;
   }
+
+  // ── the last hour ─────────────────────────────────────────────────────────
+  // Kept by the router in memory (perf-window.ts) and only drawn here. Null
+  // figures are "no reading", never zero: a restart starts the hour empty.
+  function validStat(x) {
+    if (!x || typeof x !== "object" || !isNum(x.requests) || !isNum(x.errors) || !isNum(x.rateLimited) || !isNum(x.completed)) return false;
+    var nullable = ["errorRate", "p50Ms", "p95Ms", "outputTokensPerSecond"];
+    for (var i = 0; i < nullable.length; i++) if (x[nullable[i]] !== null && !isNum(x[nullable[i]])) return false;
+    return true;
+  }
+  function validPerf(p) {
+    if (!p || typeof p !== "object" || !isNum(p.windowMs) || !isNum(p.observedMs) || !validStat(p.pool)) return false;
+    if (!p.accounts || typeof p.accounts !== "object" || !p.models || typeof p.models !== "object") return false;
+    for (var a in p.accounts) if (!validStat(p.accounts[a])) return false;
+    for (var m in p.models) if (!validStat(p.models[m])) return false;
+    return true;
+  }
+  function perfOf(group, id) {
+    var p = S.perf;
+    return p && Object.prototype.hasOwnProperty.call(p[group], id) ? p[group][id] : null;
+  }
+
+  // A few errors an hour are normal background on a busy pool; marking every
+  // one would make a healthy pool look like a failing one. One in twenty is not.
+  var ERR_LOUD = 0.05;
+  function errMark(x) {
+    if (!x.errorRate || x.errorRate < ERR_LOUD) return null;
+    return x.errors === x.rateLimited ? { tone: "warn", glyph: "▲" } : { tone: "crit", glyph: "■" };
+  }
+
+  function lastHourCell(id) {
+    var td = lab(el("td"), "Last hour");
+    var x = perfOf("accounts", id);
+    if (!S.perf) { td.appendChild(el("span", "note", "no reading")); return td; }
+    if (!x || x.requests === 0) { td.appendChild(el("span", "note", "no requests")); return td; }
+    td.appendChild(el("span", "lh", num(x.requests) + " req · " + (x.p50Ms === null ? "p50 –" : "p50 " + secs(x.p50Ms))));
+    var errLine = el("span", "lh");
+    var m = errMark(x);
+    if (m) errLine.appendChild(glyph(m.tone, m.glyph));
+    errLine.appendChild(document.createTextNode(rate(x.errorRate || 0) + " errors" + (x.rateLimited > 0 ? " · " + num(x.rateLimited) + "× 429" : "")));
+    td.appendChild(errLine);
+    td.title = num(x.errors) + " errors (" + num(x.rateLimited) + " of them 429) in " + num(x.requests) + " requests over the last hour"
+      + (x.p95Ms === null ? "" : "; finish p95 " + secs(x.p95Ms));
+    return td;
+  }
+
+  function kpi(label, value, sub, tip) {
+    var box = el("div", "kpi");
+    box.appendChild(el("dt", "", label));
+    var dd = el("dd", value === null ? "na" : "", value === null ? "no reading" : value);
+    box.appendChild(dd);
+    if (sub) box.appendChild(el("dd", "sub", sub));
+    if (tip) box.title = tip;
+    return box;
+  }
+
+  function renderPerf() {
+    var p = S.perf;
+    var dl = $("kpis");
+    if (!p) {
+      $("perfsum").textContent = "this router does not report it";
+      dl.replaceChildren(kpi("Requests", null, "", ""));
+      $("perfbody").replaceChildren();
+      return;
+    }
+    var x = p.pool;
+    $("perfsum").textContent = p.observedMs < p.windowMs
+      ? "only " + dur(p.observedMs) + " observed — the router restarted within the hour"
+      : "rolling, kept in memory";
+    var errSub = x.requests === 0 ? "" : num(x.errors) + (x.errors === 1 ? " error" : " errors")
+      + (x.rateLimited > 0 ? " · " + num(x.rateLimited) + "× 429" : "");
+    dl.replaceChildren(
+      kpi("Requests", num(x.requests), x.completed < x.requests ? num(x.completed) + " finished" : "", "Requests that reached an upstream in the last hour."),
+      kpi("Error rate", x.errorRate === null ? null : rate(x.errorRate), errSub,
+        "Status 400 and above, 429 included, and responses that failed partway. A client that hung up is not counted."),
+      kpi("Finish p50", x.p50Ms === null ? null : secs(x.p50Ms), "", "Half of the finished requests took less than this, from request to the end of the response."),
+      kpi("Finish p95", x.p95Ms === null ? null : secs(x.p95Ms), "", "One in twenty finished requests took longer than this."),
+      kpi("Output speed", x.outputTokensPerSecond === null ? null : Math.round(x.outputTokensPerSecond) + " tok/s", x.outputTokensPerSecond === null ? "" : "median, wait included",
+        "Output tokens divided by the whole response time, so the wait for the first token is included.")
+    );
+    var models = Object.keys(p.models).sort(function (a, b) { return p.models[b].requests - p.models[a].requests || (a < b ? -1 : 1); });
+    var rows = models.map(function (m) {
+      var r = p.models[m];
+      var tr = el("tr");
+      tr.appendChild(el("td", "", m));
+      tr.appendChild(lab(el("td", "num", num(r.requests)), "Requests"));
+      var e = lab(el("td", "num"), "Errors");
+      var mk = errMark(r);
+      if (mk) e.appendChild(glyph(mk.tone, mk.glyph));
+      e.appendChild(document.createTextNode(r.errors > 0 ? num(r.errors) + " · " + rate(r.errorRate || 0) : "0"));
+      tr.appendChild(e);
+      tr.appendChild(lab(el("td", "num", r.p50Ms === null ? "–" : secs(r.p50Ms)), "Finish p50"));
+      tr.appendChild(lab(el("td", "num", r.p95Ms === null ? "–" : secs(r.p95Ms)), "Finish p95"));
+      tr.appendChild(lab(el("td", "num", r.outputTokensPerSecond === null ? "–" : Math.round(r.outputTokensPerSecond) + " tok/s"), "Output speed"));
+      return tr;
+    });
+    if (rows.length === 0) {
+      var none = el("tr");
+      var td = el("td", "note", "No requests in the last hour.");
+      td.setAttribute("colspan", "6");
+      none.appendChild(td);
+      rows.push(none);
+    }
+    $("perfbody").replaceChildren.apply($("perfbody"), rows);
+  }
+
+  // ── recent activity ───────────────────────────────────────────────────────
+  var F = { account: "", model: "", errors: false, slow: false, open: {} };
 
   function tokensText(l) {
     var parts = [];
@@ -534,28 +761,115 @@ const SCRIPT = String.raw`
     if (l.cacheReadTokens) parts.push(num(l.cacheReadTokens) + " cached");
     return parts.join(" · ");
   }
+  // Share of the prompt served from cache, when the response said.
+  function cacheText(l) {
+    var read = l.cacheReadTokens || 0, write = l.cacheCreationTokens || 0, fresh = l.inputTokens || 0;
+    var all = read + write + fresh;
+    return l.cacheReadTokens === undefined && l.cacheCreationTokens === undefined || all <= 0 ? "" : Math.round(read / all * 100) + "%";
+  }
+  function isError(l) { return !l.clientClosed && (l.type === "error" || (l.statusCode || 0) >= 400); }
+  function logKey(l) { return l.ts + "|" + l.accountId + "|" + (l.sessionId || "") + "|" + (l.path || ""); }
+
+  // Choices come from what is in the buffer; a choice that has scrolled out
+  // stays listed, so the filter does not silently reset under the reader.
+  function fillSelect(id, label, values, current) {
+    var sel = $(id);
+    if (current && values.indexOf(current) < 0) values.push(current);
+    var opts = [el("option", "", "All")];
+    opts[0].value = "";
+    values.forEach(function (v) {
+      var o = el("option", "", v);
+      o.value = v;
+      if (v === current) o.selected = true;
+      opts.push(o);
+    });
+    sel.replaceChildren.apply(sel, opts);
+    sel.setAttribute("aria-label", label);
+  }
+  function distinct(list, key) {
+    var seen = {}, out = [];
+    list.forEach(function (l) { var v = key(l); if (v && !seen[v]) { seen[v] = 1; out.push(v); } });
+    return out.sort();
+  }
 
   function renderLogs(h) {
-    var logs = (h.recentLogs || []).slice().sort(function (a, b) { return b.ts - a.ts; });
+    var all = (h.recentLogs || []).slice().sort(function (a, b) { return b.ts - a.ts; });
+    fillSelect("faccount", "Filter by account", distinct(all, function (l) { return l.accountId; }), F.account);
+    fillSelect("fmodel", "Filter by model", distinct(all, function (l) { return l.model && l.model !== "-" ? l.model : ""; }), F.model);
+    var p95 = S.perf ? S.perf.pool.p95Ms : null;
+    var slow = function (l) { return p95 !== null && isNum(l.totalMs) && l.totalMs > p95; };
+    var logs = all.filter(function (l) {
+      if (F.account && l.accountId !== F.account) return false;
+      if (F.model && l.model !== F.model) return false;
+      if (F.errors && !isError(l)) return false;
+      if (F.slow && !slow(l)) return false;
+      return true;
+    });
     var shown = S.showAll ? logs : logs.slice(0, LOG_ROWS);
     var rows = shown.map(function (l) {
-      var tr = el("tr");
+      var key = logKey(l);
+      var tr = el("tr", "row" + (F.open[key] ? " open" : ""));
+      tr.setAttribute("tabindex", "0");
+      tr.setAttribute("aria-expanded", F.open[key] ? "true" : "false");
+      var toggle = function () {
+        F.open[key] = !F.open[key];
+        tr.className = "row" + (F.open[key] ? " open" : "");
+        tr.setAttribute("aria-expanded", F.open[key] ? "true" : "false");
+      };
+      tr.addEventListener("click", function () { if (!selecting()) toggle(); });
+      tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+
       tr.appendChild(lab(el("td", "dim mono", new Date(l.ts).toLocaleTimeString("en-GB", { hour12: false })), "Time"));
-      tr.appendChild(lab(el("td", "", l.accountId), "Account"));
+      tr.appendChild(lab(el("td", "nw", l.accountId), "Account"));
       var kind = l.type === "error" ? { tone: "crit", glyph: "■", text: "error" }
         : l.type === "refresh" ? { tone: "muted", glyph: "↻", text: "refresh" }
         : { tone: "good", glyph: "→", text: "route" };
-      var kc = lab(el("td"), "Event"); kc.appendChild(glyph(kind.tone, kind.glyph)); kc.appendChild(document.createTextNode(kind.text));
+      if (l.clientClosed) kind = { tone: "muted", glyph: "–", text: "client left" };
+      var kc = lab(el("td", "nw"), "Event"); kc.appendChild(glyph(kind.tone, kind.glyph)); kc.appendChild(document.createTextNode(kind.text));
       tr.appendChild(kc);
-      tr.appendChild(lab(el("td", "dim", l.model && l.model !== "-" ? l.model : ""), "Model"));
+      tr.appendChild(lab(el("td", "dim nw", l.model && l.model !== "-" ? l.model : ""), "Model"));
+
+      var st = lab(el("td", "num mono"), "Status");
+      if (isNum(l.statusCode) && l.statusCode > 0) {
+        if (l.statusCode === 429) st.appendChild(glyph("warn", "▲"));
+        else if (l.statusCode >= 400) st.appendChild(glyph("crit", "■"));
+        st.appendChild(document.createTextNode(String(l.statusCode)));
+      }
+      tr.appendChild(st);
+
+      // The whole response when it has finished; before that, or for a client
+      // that left, only the wait for the headers is known, and is named so.
+      var du = lab(el("td", "num mono"), "Duration");
+      if (isNum(l.totalMs)) {
+        if (slow(l)) { du.appendChild(glyph("warn", "▲")); du.title = "Slower than the last hour's p95 (" + secs(p95) + ")"; }
+        du.appendChild(document.createTextNode(secs(l.totalMs)));
+      } else if (isNum(l.durationMs)) {
+        du.appendChild(el("span", "note", "headers " + secs(l.durationMs)));
+        du.title = "Time until the response headers arrived; the response had not finished when this was read.";
+      }
+      tr.appendChild(du);
+      tr.appendChild(lab(el("td", "num mono dim", isNum(l.totalMs) && l.totalMs > 0 && l.outputTokens ? Math.round(l.outputTokens / (l.totalMs / 1000)) + " tok/s" : ""), "Speed"));
+      tr.appendChild(lab(el("td", "dim mono", tokensText(l)), "Tokens"));
+      tr.appendChild(lab(el("td", "num mono dim", cacheText(l)), "Cache"));
+      var sess = lab(el("td", "dim mono", l.sessionId ? l.sessionId.slice(0, 8) : ""), "Session");
+      if (l.sessionId) sess.title = l.sessionId;
+      tr.appendChild(sess);
       var d = lab(el("td", "clip", l.details || ""), "Details", true);
-      d.title = (l.details || "") + (l.sessionId ? "  [session " + l.sessionId.slice(0, 8) + "]" : "");
+      d.title = l.details || "";
       tr.appendChild(d);
-      tr.appendChild(lab(el("td", "dim mono", tokensText(l)), "Tokens", true));
       return tr;
     });
+    if (rows.length === 0 && all.length > 0) {
+      var none = el("tr");
+      var td = el("td", "note", "No events match these filters.");
+      td.setAttribute("colspan", "11");
+      none.appendChild(td);
+      rows.push(none);
+    }
     $("logbody").replaceChildren.apply($("logbody"), rows);
-    $("logsum").textContent = logs.length ? "newest first" : "nothing yet";
+    var filtered = F.account || F.model || F.errors || F.slow;
+    $("logsum").textContent = all.length === 0 ? "nothing yet"
+      : filtered ? logs.length + " of " + all.length + " match · newest first" : "newest first · select a row for its details";
     var more = $("more");
     if (logs.length > LOG_ROWS) {
       more.hidden = false;
@@ -580,11 +894,13 @@ const SCRIPT = String.raw`
     var h = S.data;
     if (!h) return;
     S.sev = validSeverity(h.severity) ? h.severity : null;
+    S.perf = validPerf(h.performance) ? h.performance : null;
     renderHeader(h);
     renderStrip();
     renderSince(h);
     if (!selecting() || !S.rendered) {
       renderAccounts(h);
+      renderPerf();
       renderLogs(h);
       S.rendered = true;
     }
@@ -619,7 +935,7 @@ const SCRIPT = String.raw`
   var USAGE_MS = 60000;
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  var WINDOWS = [["1d", "Last 24 hours"], ["7d", "Last 7 days"], ["14d", "Last 14 days"], ["30d", "Last 30 days"]];
+  var WINDOWS = [["1d"], ["7d"], ["14d"], ["30d"]];
   var U = { data: null, okAt: 0, inflight: false, picked: "", pickedNode: null, scrolled: false };
 
   function validTotals(t) {
@@ -705,24 +1021,6 @@ const SCRIPT = String.raw`
     li.appendChild(bar(share, name));
     li.appendChild(el("div", "mval", value));
     return li;
-  }
-
-  function renderWindows(d, none) {
-    var box = $("wintiles");
-    var tiles = WINDOWS.map(function (w) {
-      var t = d.windows[w[0]];
-      var parts = [];
-      if (none) parts.push("nothing recorded yet");
-      else {
-        parts.push(plural(t.requests, "request"));
-        if (t.total > 0) parts.push("cache read " + pct(t.cacheRead / t.total));
-      }
-      var node = tile(w[1], none ? "–" : num(t.total), parts.join(" · "));
-      node.title = breakdown(t) + ". A rolling window ending now, counted by the hour.";
-      if (!none && t.partial) node.appendChild(el("div", "sub", "recording since " + sinceLabel(d)));
-      return node;
-    });
-    box.replaceChildren.apply(box, tiles);
   }
 
   function dayText(c) {
@@ -851,7 +1149,6 @@ const SCRIPT = String.raw`
     $("usesum").textContent = none
       ? "nothing recorded yet"
       : "recording since " + sinceLabel(d) + (d.tzFallback ? " · your time zone was not recognised, showing UTC" : "");
-    renderWindows(d, none);
     renderHeatmap(d);
     renderModels(d);
     renderDetails(d);
@@ -888,6 +1185,308 @@ const SCRIPT = String.raw`
         clearTimeout(to);
         U.inflight = false;
       });
+  }
+
+
+  // ── activity over time ───────────────────────────────────────────────────
+  // From /cc-router/usage-series, a request of its own like the history above.
+  // Series arrive in a fixed order (the top models over 30 days, then "other"),
+  // so a model keeps its colour when the range changes.
+  var SERIES_PATH = "/cc-router/usage-series";
+  var RANGES = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 30 days" };
+  var METRICS = { requests: "requests", output: "output tokens", total: "tokens" };
+  var A = { range: "24h", metric: "requests", data: null, okAt: 0, inflight: 0, sel: -1, table: false, geo: null, drawnWidth: 0 };
+
+  function validSeries(d) {
+    if (!d || typeof d !== "object" || !RANGES.hasOwnProperty(d.range) || (d.step !== "hour" && d.step !== "day")) return false;
+    if (!Array.isArray(d.series) || d.series.length > 8 || !Array.isArray(d.points) || d.points.length > 400) return false;
+    for (var i = 0; i < d.series.length; i++) {
+      var x = d.series[i];
+      if (!x || typeof x.model !== "string" || typeof x.provider !== "string") return false;
+    }
+    var w = d.series.length;
+    for (var j = 0; j < d.points.length; j++) {
+      var p = d.points[j];
+      if (!p || !isNum(p.start) || typeof p.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(p.date) || typeof p.recorded !== "boolean") return false;
+      var lists = [p.requests, p.output, p.total];
+      for (var k = 0; k < 3; k++) {
+        if (!Array.isArray(lists[k]) || lists[k].length !== w) return false;
+        for (var q = 0; q < w; q++) if (!isNum(lists[k][q]) || lists[k][q] < 0) return false;
+      }
+    }
+    var t = d.totals;
+    if (!t || !isNum(t.requests) || !isNum(t.output) || !isNum(t.total) || (t.cacheHitRatio !== null && !isNum(t.cacheHitRatio))) return false;
+    return true;
+  }
+
+  function seriesClass(d, i) { return d.series[i].other || i > 3 ? "so" : "s" + i; }
+  function seriesName(x) {
+    if (x.other) return "Other models";
+    return x.provider === "openai" ? x.model + " (OpenAI)" : x.provider === "ollama" ? x.model + " (Ollama)" : x.model;
+  }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  // Hours are instants, shown in this browser's zone, which is the zone the
+  // series was asked for. Days are calendar dates already resolved by the
+  // router, so they are read from their parts and never shifted.
+  function stepLabel(d, p, long) {
+    if (d.step === "day") return dayLabel(p.date);
+    var t = new Date(p.start);
+    var hh = pad2(t.getHours()) + ":00";
+    return long ? DAYS[t.getDay()] + ", " + MONTHS[t.getMonth()] + " " + t.getDate() + " · " + hh : hh;
+  }
+  function metricValue(v) { return A.metric === "requests" ? num(v) + (v === 1 ? " request" : " requests") : num(v) + " " + METRICS[A.metric]; }
+  function stack(p) { var n = 0; p[A.metric].forEach(function (v) { n += v; }); return n; }
+  function niceMax(v) {
+    if (!(v > 0)) return 1;
+    var mag = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+    var steps = [1, 2, 2.5, 5, 10];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * mag >= v) return steps[i] * mag;
+    return 10 * mag;
+  }
+
+  function pointText(d, i) {
+    var p = d.points[i];
+    var label = stepLabel(d, p, true);
+    if (!p.recorded) return label + " — no data: recording had not started";
+    var total = stack(p);
+    var partial = i === d.points.length - 1 ? (d.step === "hour" ? " so far this hour" : " so far today") : "";
+    if (total === 0) return label + " — nothing recorded" + partial;
+    var parts = [];
+    d.series.forEach(function (x, k) { if (p[A.metric][k] > 0) parts.push(seriesName(x) + " " + num(p[A.metric][k])); });
+    return label + " — " + metricValue(total) + partial + ": " + parts.join(" · ");
+  }
+
+  function select(i) {
+    var d = A.data;
+    if (!d || i < 0 || i >= d.points.length) return;
+    A.sel = d.points[i].start;
+    $("actinfo").textContent = pointText(d, i);
+    var col = $("chartbox").selcol;
+    if (col && A.geo) {
+      col.setAttribute("x", String(A.geo.left + i * A.geo.slot));
+      col.setAttribute("visibility", "visible");
+    }
+  }
+  function selectedIndex(d) {
+    for (var i = 0; i < d.points.length; i++) if (d.points[i].start === A.sel) return i;
+    return -1;
+  }
+
+  function renderChart(d) {
+    var box = $("chartbox");
+    var n = d.points.length;
+    var avail = box.clientWidth || 720;
+    var left = 46, right = 4, top = 10, bottom = 24, height = 208;
+    // At least 4px per step: 168 hours become a sideways scroll on a phone
+    // rather than bars too thin to aim at.
+    var width = Math.max(avail, left + right + n * 4, 300);
+    var plot = height - top - bottom;
+    var slot = (width - left - right) / Math.max(1, n);
+    var gap = slot >= 8 ? 2 : 1;
+    var peak = 0;
+    d.points.forEach(function (p) { if (p.recorded) peak = Math.max(peak, stack(p)); });
+    var max = niceMax(peak);
+    A.geo = { left: left, slot: slot };
+    A.drawnWidth = avail;
+
+    var root = svg("svg", "chart", { width: width, height: height, viewBox: "0 0 " + width + " " + height });
+    root.setAttribute("tabindex", "0");
+    root.setAttribute("role", "group");
+    root.setAttribute("aria-roledescription", "chart");
+    root.setAttribute("aria-label", METRICS[A.metric].charAt(0).toUpperCase() + METRICS[A.metric].slice(1) + " per " + d.step + " by model, " + RANGES[d.range]
+      + ". Left and right arrow keys read one " + d.step + " at a time; the table view lists them all.");
+
+    // Three gridlines, labelled at the left: zero, half and the top.
+    [0, 0.5, 1].forEach(function (f) {
+      var y = top + plot - f * plot;
+      root.appendChild(svg("line", f === 0 ? "base" : "grid", { x1: left, x2: width - right, y1: y, y2: y }));
+      var t = svg("text", "", { x: left - 6, y: y + 4, "text-anchor": "end" });
+      t.textContent = f === 0 ? "0" : num(max * f);
+      root.appendChild(t);
+    });
+
+    var col = svg("rect", "selcol", { x: 0, y: top, width: slot, height: plot, visibility: "hidden" });
+    root.appendChild(col);
+    box.selcol = col;
+
+    d.points.forEach(function (p, i) {
+      var x = left + i * slot + gap / 2, w = Math.max(1, slot - gap);
+      if (!p.recorded) {
+        root.appendChild(svg("rect", "nodata", { x: x, y: top + plot - 2, width: w, height: 2 }));
+        return;
+      }
+      var base = top + plot;
+      var segs = [];
+      p[A.metric].forEach(function (v, k) { if (v > 0) segs.push([k, v / max * plot]); });
+      var partial = i === n - 1 ? " partial" : "";
+      segs.forEach(function (sg, j) {
+        var h = sg[1];
+        // A surface-coloured gap between stacked segments, where there is room for one.
+        var drawn = j < segs.length - 1 && h > 3 ? h - 1 : h;
+        root.appendChild(svg("rect", seriesClass(d, sg[0]) + partial, { x: x, y: base - h, width: w, height: Math.max(0.5, drawn) }));
+        base -= h;
+      });
+    });
+
+    // Step labels along the bottom, spaced so they never touch.
+    var lastX = -1e9;
+    d.points.forEach(function (p, i) {
+      var want;
+      if (d.step === "day") want = (n - 1 - i) % 5 === 0;
+      else {
+        var hr = new Date(p.start).getHours();
+        want = d.range === "24h" ? hr % 3 === 0 : hr === 0;
+      }
+      if (!want) return;
+      var cx = left + i * slot + slot / 2;
+      if (cx - lastX < 44) return;
+      var text = d.step === "day" ? MONTHS[+p.date.split("-")[1] - 1] + " " + (+p.date.split("-")[2])
+        : d.range === "24h" ? stepLabel(d, p, false)
+        : DAYS[new Date(p.start).getDay()] + " " + new Date(p.start).getDate();
+      var t = svg("text", "", { x: cx, y: height - 6, "text-anchor": i === 0 ? "start" : "middle" });
+      t.textContent = text;
+      root.appendChild(t);
+      lastX = cx;
+    });
+
+    var at = function (e) {
+      var r = root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+      var px = r ? (e.clientX - r.left) * (width / (r.width || width)) : e.offsetX;
+      return Math.floor((px - left) / slot);
+    };
+    root.addEventListener("pointermove", function (e) { select(Math.max(0, Math.min(n - 1, at(e)))); });
+    root.addEventListener("click", function (e) { select(Math.max(0, Math.min(n - 1, at(e)))); });
+    root.addEventListener("keydown", function (e) {
+      var i = selectedIndex(d);
+      var next = e.key === "ArrowLeft" ? (i < 0 ? n - 1 : i - 1) : e.key === "ArrowRight" ? (i < 0 ? n - 1 : i + 1)
+        : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : null;
+      if (next === null) return;
+      e.preventDefault();
+      select(Math.max(0, Math.min(n - 1, next)));
+    });
+    box.replaceChildren(root);
+  }
+
+  function renderLegend(d) {
+    var sums = d.series.map(function () { return 0; }), all = 0;
+    d.points.forEach(function (p) { p[A.metric].forEach(function (v, k) { sums[k] += v; all += v; }); });
+    var kids = d.series.map(function (x, k) {
+      var li = el("li", "lrow");
+      li.appendChild(el("span", "sw " + seriesClass(d, k)));
+      var name = el("span", "clip", seriesName(x));
+      name.title = seriesName(x);
+      li.appendChild(name);
+      li.appendChild(el("span", "lval", num(sums[k]) + (all > 0 ? " · " + pct(sums[k] / all) : "")));
+      return li;
+    });
+    if (kids.length === 0) kids.push(el("li", "note", "No model has been used yet."));
+    var list = $("actlegend");
+    list.replaceChildren.apply(list, kids);
+  }
+
+  function renderSeriesTable(d) {
+    var head = [el("th", "", d.step === "day" ? "Day" : "Hour")];
+    d.series.forEach(function (x) { head.push(el("th", "num", seriesName(x))); });
+    head.push(el("th", "num", "Total"));
+    head.forEach(function (th) { th.setAttribute("scope", "col"); });
+    $("acthead").replaceChildren.apply($("acthead"), head);
+    var rows = d.points.slice().reverse().map(function (p) {
+      var tr = el("tr");
+      tr.appendChild(el("td", "mono", stepLabel(d, p, true)));
+      if (!p.recorded) {
+        var td = el("td", "note", "no data");
+        td.setAttribute("colspan", String(d.series.length + 1));
+        tr.appendChild(td);
+        return tr;
+      }
+      p[A.metric].forEach(function (v) { tr.appendChild(el("td", "num", num(v))); });
+      tr.appendChild(el("td", "num", num(stack(p))));
+      return tr;
+    });
+    $("actrows").replaceChildren.apply($("actrows"), rows);
+  }
+
+  function renderActivity() {
+    ["24h", "7d", "30d"].forEach(function (r) { $("r-" + r).setAttribute("aria-pressed", A.range === r ? "true" : "false"); });
+    ["requests", "output", "total"].forEach(function (m) { $("m-" + m).setAttribute("aria-pressed", A.metric === m ? "true" : "false"); });
+    var d = A.data;
+    if (!d || d.range !== A.range) return;
+    var t = d.totals;
+    var tot = $("acttot");
+    var line = [num(t.requests) + " requests", num(t.output) + " output tokens", num(t.total) + " tokens in all"];
+    if (t.cacheHitRatio !== null) line.push("cache hit " + pct(t.cacheHitRatio));
+    tot.replaceChildren(el("strong", "", RANGES[d.range].charAt(0).toUpperCase() + RANGES[d.range].slice(1)), document.createTextNode(" · " + line.join(" · ")));
+    renderChart(d);
+    renderLegend(d);
+    if (A.table) renderSeriesTable(d);
+    var i = selectedIndex(d);
+    if (i >= 0) select(i);
+    else $("actinfo").textContent = "Hover, tap or use the arrow keys on the chart to read " + (d.step === "hour" ? "an hour." : "a day.");
+  }
+
+  function seriesState(msg) {
+    var b = $("actstate");
+    b.hidden = !msg;
+    if (msg) b.textContent = msg;
+  }
+
+  function fetchSeries() {
+    var ticket = ++A.inflight;
+    var range = A.range;
+    var ctrl = new AbortController();
+    var to = setTimeout(function () { ctrl.abort(); }, 8000);
+    var zone = viewerZone();
+    fetch(SERIES_PATH + "?range=" + range + (zone ? "&tz=" + encodeURIComponent(zone) : ""), { cache: "no-store", signal: ctrl.signal })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        // A slower answer for a range the viewer has since left is dropped.
+        if (ticket !== A.inflight || range !== A.range) return;
+        if (!validSeries(data) || data.range !== range) throw new Error("unexpected response");
+        A.data = data;
+        A.okAt = Date.now();
+        seriesState(null);
+        renderActivity();
+      })
+      .catch(function (err) {
+        if (ticket !== A.inflight) return;
+        seriesState("The activity chart is unavailable (" + err.message + ")." + (A.okAt ? " Showing data from " + dur(Date.now() - A.okAt) + " ago." : ""));
+      })
+      .then(function () { clearTimeout(to); });
+  }
+
+  ["24h", "7d", "30d"].forEach(function (r) {
+    $("r-" + r).addEventListener("click", function () {
+      if (A.range === r) return;
+      A.range = r;
+      A.sel = -1;
+      renderActivity();
+      fetchSeries();
+    });
+  });
+  ["requests", "output", "total"].forEach(function (m) {
+    $("m-" + m).addEventListener("click", function () {
+      A.metric = m;
+      renderActivity();
+    });
+  });
+  $("acttable").addEventListener("click", function () {
+    A.table = !A.table;
+    $("acttablewrap").hidden = !A.table;
+    $("acttable").textContent = A.table ? "Hide table" : "Show as table";
+    $("acttable").setAttribute("aria-expanded", A.table ? "true" : "false");
+    if (A.table && A.data) renderSeriesTable(A.data);
+  });
+  if (window.addEventListener) {
+    var resizeTimer = 0;
+    window.addEventListener("resize", function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () {
+        if (A.data && $("chartbox").clientWidth !== A.drawnWidth) renderActivity();
+      }, 150);
+    });
   }
 
   // ── polling ───────────────────────────────────────────────────────────────
@@ -929,15 +1528,26 @@ const SCRIPT = String.raw`
     S.showAll = !S.showAll;
     if (S.data) renderLogs(S.data);
   });
+  function refilter() {
+    F.account = $("faccount").value || "";
+    F.model = $("fmodel").value || "";
+    F.errors = !!$("ferr").checked;
+    F.slow = !!$("fslow").checked;
+    if (S.data) renderLogs(S.data);
+  }
+  ["faccount", "fmodel", "ferr", "fslow"].forEach(function (id) { $(id).addEventListener("change", refilter); });
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;
     poll();
     if (Date.now() - U.okAt > 30000) fetchUsage();
+    if (Date.now() - A.okAt > 30000) fetchSeries();
   });
   setInterval(tickUpdated, 1000);
-  setInterval(function () { if (!document.hidden) fetchUsage(); }, USAGE_MS);
+  setInterval(function () { if (!document.hidden) { fetchUsage(); fetchSeries(); } }, USAGE_MS);
+  renderActivity();
   poll();
   fetchUsage();
+  fetchSeries();
 })();
 `;
 
@@ -983,6 +1593,23 @@ export function renderDashboardHtml(): string {
 export interface WebDashboardOptions {
   /** Summary of recorded token usage for a viewer's time zone. Omit to leave the endpoint unmounted. */
   usage?: (tz: string | undefined) => unknown;
+  /** Usage over time by model, for a range and a viewer's time zone. Omit to leave the endpoint unmounted. */
+  series?: (range: string | undefined, tz: string | undefined) => unknown;
+}
+
+/** Serve a JSON aggregate on an open route; the failure says nothing about why. */
+function sendAggregate(res: Response, build: () => unknown, failure: string): void {
+  res.set({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  try {
+    res.send(JSON.stringify(build()));
+  } catch {
+    // Say nothing about why: the caller is unauthenticated.
+    res.status(500).send(JSON.stringify({ error: failure }));
+  }
 }
 
 /**
@@ -993,28 +1620,23 @@ export interface WebDashboardOptions {
  * the same reason. Mounting them later would not protect anything: it would only
  * make the page unusable.
  *
- * That makes the usage-history response public on the router's port, exactly as
- * health is. It is therefore aggregates only — totals per window, day and model —
- * with no account ids, session ids or credentials in it.
+ * That makes the usage-history and usage-series responses public on the router's
+ * port, exactly as health is. They are therefore aggregates only — totals per
+ * window, day, hour and model — with no account ids, session ids or credentials.
  */
 export function mountWebDashboard(app: Express, opts: WebDashboardOptions = {}): void {
   const html = renderDashboardHtml();
-  const { usage } = opts;
+  const { usage, series } = opts;
+  // `?tz=a&tz=b` parses to an array; only a single string is a value.
+  const one = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   if (usage) {
     app.get(USAGE_HISTORY_PATH, (req: Request, res: Response) => {
-      // `?tz=a&tz=b` parses to an array; only a single string is a zone name.
-      const tz = typeof req.query["tz"] === "string" ? req.query["tz"] : undefined;
-      res.set({
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store",
-        "x-content-type-options": "nosniff",
-      });
-      try {
-        res.send(JSON.stringify(usage(tz)));
-      } catch {
-        // Say nothing about why: the caller is unauthenticated.
-        res.status(500).send(JSON.stringify({ error: "usage history is unavailable" }));
-      }
+      sendAggregate(res, () => usage(one(req.query["tz"])), "usage history is unavailable");
+    });
+  }
+  if (series) {
+    app.get(USAGE_SERIES_PATH, (req: Request, res: Response) => {
+      sendAggregate(res, () => series(one(req.query["range"]), one(req.query["tz"])), "usage series is unavailable");
     });
   }
   app.get(DASHBOARD_PATH, (_req: Request, res: Response) => {

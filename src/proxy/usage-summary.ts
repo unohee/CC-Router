@@ -125,7 +125,7 @@ function inWindow(b: UsageBucket, now: number, days: number): boolean {
 }
 
 /** Local calendar date (YYYY-MM-DD) of an instant in a zone. */
-function localDateFn(tz: string): (ms: number) => string {
+export function localDateFn(tz: string): (ms: number) => string {
   const f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
   return ms => {
     let y = "", m = "", d = "";
