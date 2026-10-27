@@ -5,6 +5,8 @@ import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
+import type { OllamaDailyBudgetConfig } from "../providers/ollama/daily-budget.js";
+import type { CodexFiveHourBudgetConfig } from "../providers/openai/five-hour-budget.js";
 import { DEFAULT_THROTTLE } from "../proxy/throttle.js";
 import type { ThrottleConfig } from "../proxy/throttle.js";
 
@@ -231,6 +233,9 @@ export interface OllamaFallbackConfig {
   autoTierMap?: boolean;
   /** Largest estimated prompt the fallback model is asked to carry. */
   contextTokens?: number;
+  /** Daily USD budget for Ollama Cloud (providers/ollama/daily-budget.ts). Opt-in.
+   *  `monthlyUsd` is the period's included allowance; `reserveUsd` is a hard floor. */
+  dailyBudget?: OllamaDailyBudgetConfig;
 }
 
 export interface ClientConfig {
@@ -284,6 +289,8 @@ export interface ProxyConfig {
    *  minWaitSeconds 900, contextTokens 1048576 (compared against the bytes/2
    *  estimate, which runs about twice the real token count). */
   ollamaFallback?: OllamaFallbackConfig;
+  /** Router-defined cap on the Codex 5h quota window (providers/openai/five-hour-budget.ts). Opt-in. */
+  codexFiveHourBudget?: CodexFiveHourBudgetConfig;
   /** How an upstream 429 reaches the client. "retryable" (default) withholds the
    *  anthropic-ratelimit-unified-* headers and sends a short Retry-After so the
    *  client retries and is routed to another account, instead of Claude Code
