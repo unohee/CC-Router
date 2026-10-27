@@ -46,7 +46,8 @@ type CodexFamily = typeof CODEX_FAMILIES[number];
 
 /** First family present wins; the second is the nearest substitute. */
 const CODEX_TIER_FAMILIES: Record<ClaudeTier, CodexFamily[]> = {
-  opus: ["astra", "sol"],
+  frontier: ["astra", "sol"],
+  opus: ["sol"],
   sonnet: ["sol", "terra"],
   haiku: ["luna", "terra"],
 };

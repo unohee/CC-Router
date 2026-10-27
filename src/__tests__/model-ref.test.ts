@@ -66,9 +66,9 @@ describe("claudeTierOf", () => {
     expect(claudeTierOf("claude-opus-5")).toBe("opus");
     expect(claudeTierOf("claude-opus-4-8")).toBe("opus");
     expect(claudeTierOf("anthropic/claude-opus-4-6")).toBe("opus");
-    // Fable and Mythos are Anthropic's most capable lines — top tier with Opus.
-    expect(claudeTierOf("claude-fable-5")).toBe("opus");
-    expect(claudeTierOf("claude-mythos-5")).toBe("opus");
+    // Frontier families must not promote ordinary Opus requests.
+    expect(claudeTierOf("claude-fable-5")).toBe("frontier");
+    expect(claudeTierOf("claude-mythos-5")).toBe("frontier");
     expect(claudeTierOf("claude-sonnet-5")).toBe("sonnet");
     expect(claudeTierOf("claude-sonnet-4-5-20250929")).toBe("sonnet");
     expect(claudeTierOf("claude-haiku-4-5-20251001")).toBe("haiku");
@@ -86,9 +86,36 @@ describe("openAIModelForClaudeModel", () => {
   it("maps each tier through the configured tier map", () => {
     const config = { openAITierMap: SUGGESTED_TIER_MODELS };
 
-    expect(openAIModelForClaudeModel("claude-opus-5", config)).toBe("gpt-5.6-sol");
+    expect(openAIModelForClaudeModel("claude-opus-5", config)).toBe("gpt-6.1-sol");
     expect(openAIModelForClaudeModel("claude-sonnet-5", config)).toBe("gpt-5.6-terra");
     expect(openAIModelForClaudeModel("claude-haiku-4-5", config)).toBe("gpt-5.6-luna");
+  });
+
+  it("maps both frontier families and resolves aliases before choosing the tier", () => {
+    const config = {
+      openAITierMap: SUGGESTED_TIER_MODELS,
+      anthropicAliases: { strongest: "claude-mythos-5" },
+    };
+    for (const model of ["claude-fable-5-1", "anthropic/claude-mythos-5", "strongest"]) {
+      expect(openAIModelForClaudeModel(model, config)).toBe("gpt-6-astra");
+    }
+  });
+
+  it("preserves legacy explicit Opus overrides until frontier is explicitly configured", () => {
+    const matched = { frontier: "gpt-6-astra", opus: "gpt-6.1-sol" };
+    const config = { openAITierMap: { opus: "operator-choice" } };
+    for (const model of ["claude-fable-5-1", "claude-mythos-5"]) {
+      expect(openAIModelForClaudeModel(model, config, matched)).toBe("operator-choice");
+      expect(openAIModelForClaudeModel(model, {
+        openAITierMap: { ...config.openAITierMap, frontier: "frontier-choice" },
+      }, matched)).toBe("frontier-choice");
+      expect(openAIModelForClaudeModel(model, {
+        openAITierMap: { opus: "  " }, openAIDefaultModel: "default",
+      }, matched)).toBe("gpt-6-astra");
+      expect(openAIModelForClaudeModel(model, {
+        openAIDefaultModel: "default",
+      }, { opus: "gpt-6.1-sol" })).toBe("default");
+    }
   });
 
   it("leaves the configured default untouched when tier routing is not enabled", () => {

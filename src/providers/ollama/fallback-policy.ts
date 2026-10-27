@@ -122,7 +122,9 @@ export function ollamaModelFor(
   config: Pick<ResolvedOllamaFallbackConfig, "model" | "tierMap">,
   matched: TierModels = {},
 ): string {
-  const tier = claudeTierOf(claudeModel);
+  const classified = claudeTierOf(claudeModel);
+  // Frontier is a Codex distinction; preserve Ollama's existing top-tier policy.
+  const tier = classified === "frontier" ? "opus" : classified;
   return (tier ? config.tierMap[tier] ?? matched[tier] : undefined) ?? config.model;
 }
 

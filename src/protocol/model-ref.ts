@@ -22,22 +22,20 @@ export interface ModelRoutingConfig {
 }
 
 /** Capability tier of a Claude model, used to pick a comparable OpenAI model. */
-export type ClaudeTier = "opus" | "sonnet" | "haiku";
+export type ClaudeTier = "frontier" | "opus" | "sonnet" | "haiku";
 
 /**
- * Suggested Claude tier -> Codex model, from the backend's own ordering
- * (`priority` 1/2/3) and descriptions, verified 2026-08-20:
- *   sol   — "Latest frontier agentic coding model"
- *   terra — "Balanced agentic coding model for everyday..."
- *   luna  — "Fast and affordable agentic coding model"
+ * CLI suggestions: frontier uses Astra, Opus uses Sol; the existing fixed
+ * Sonnet/Terra and Haiku/Luna choices stay unchanged. Auto discovery follows
+ * the live catalog separately (providers/tier-matching.ts).
  *
- * This is a *suggestion the CLI writes into config*, not an implicit default.
- * Tier routing only applies once `openAITierMap` exists, so an operator who
- * configured `openAIDefaultModel` keeps getting exactly that model until they
- * opt in — otherwise this table would silently override their choice.
+ * This is a suggestion the CLI writes into config, not an implicit default.
+ * An operator who configured only `openAIDefaultModel` keeps that model until
+ * they opt into an explicit map or automatic tier discovery.
  */
 export const SUGGESTED_TIER_MODELS: Record<ClaudeTier, string> = {
-  opus: "gpt-5.6-sol",
+  frontier: "gpt-6-astra",
+  opus: "gpt-6.1-sol",
   sonnet: "gpt-5.6-terra",
   haiku: "gpt-5.6-luna",
 };
@@ -46,15 +44,16 @@ export const SUGGESTED_TIER_MODELS: Record<ClaudeTier, string> = {
  * Classify a Claude model name by capability tier.
  *
  * Matches on the family word rather than an exact id so new dated snapshots and
- * point releases keep working without a table edit. Fable and Mythos are
- * Anthropic's most capable lines, so they share the top tier with Opus.
+ * point releases keep working without a table edit. Fable and Mythos use a
+ * separate frontier tier rather than promoting ordinary Opus requests.
  * Returns null for anything unrecognised — the caller then falls back to its
  * configured default rather than guessing a tier.
  */
 export function claudeTierOf(model: string | undefined): ClaudeTier | null {
   const name = cleanModel(model)?.toLowerCase().replace(/^anthropic\//, "");
   if (!name) return null;
-  if (name.includes("opus") || name.includes("fable") || name.includes("mythos")) return "opus";
+  if (name.includes("fable") || name.includes("mythos")) return "frontier";
+  if (name.includes("opus")) return "opus";
   if (name.includes("sonnet")) return "sonnet";
   if (name.includes("haiku")) return "haiku";
   return null;
@@ -85,7 +84,10 @@ export function openAIModelForClaudeModel(
     ? claudeTierOf(parsed.upstreamModel)
     : null;
   if (tier) {
-    const mapped = cleanModel(config.openAITierMap?.[tier]) ?? cleanModel(matched[tier]);
+    // Preserve explicit pre-frontier overrides, but never inherit auto-matched Opus.
+    const mapped = cleanModel(config.openAITierMap?.[tier])
+      ?? (tier === "frontier" ? cleanModel(config.openAITierMap?.opus) : undefined)
+      ?? cleanModel(matched[tier]);
     if (mapped) return mapped;
   }
   return cleanModel(config.openAIDefaultModel);

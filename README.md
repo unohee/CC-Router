@@ -452,7 +452,8 @@ With `--enable-model-tiers`, tier is preserved across the bridge:
 
 | Requested | Answered by |
 |---|---|
-| `claude-opus-*`, `claude-fable-*` | `gpt-5.6-sol` |
+| `claude-fable-*`, `claude-mythos-*` (`frontier`) | `gpt-6-astra` |
+| `claude-opus-*` | `gpt-6.1-sol` |
 | `claude-sonnet-*` | `gpt-5.6-terra` |
 | `claude-haiku-*` | `gpt-5.6-luna` |
 
@@ -461,10 +462,18 @@ Unmapped or unrecognised models fall back to the configured OpenAI default. Edit
 
 To follow the live Codex catalog instead of a fixed table, set
 `modelRouting.openAIAutoTierMap: true`. Every six hours the router reads
-`codex/models` and matches by family — `astra` (frontier) for opus and fable,
-`sol` (workhorse) for sonnet, `luna` (fast) for haiku — taking the newest model
-of each. It only fills tiers `openAITierMap` leaves unset. A failed read keeps
-the last match, and the router logs the match each time it changes.
+`codex/models` and matches by family — `astra` for the `frontier` tier (Fable
+and Mythos), `sol` for Opus and Sonnet, `luna` for Haiku — taking the newest
+model of each. If Astra is absent, frontier can use Sol; Opus does not
+implicitly upgrade to Astra when Sol is absent and instead uses the configured
+default. Sonnet can use Terra, and Haiku can use Terra if Luna is absent.
+It only fills tiers `openAITierMap` leaves unset. For compatibility, an explicit
+`opus` override also applies to frontier until an explicit `frontier` override
+is set; auto-matched Opus is never inherited by frontier. A failed read keeps
+the last match, and the router logs the match each time it changes. This split
+does not change reasoning effort: `openAIReasoningEffort` still applies to
+Claude fallback/session routes, while explicit OpenAI requests keep their effort.
+Ollama retains its existing shared top tier for Fable, Mythos, and Opus.
 
 ---
 
