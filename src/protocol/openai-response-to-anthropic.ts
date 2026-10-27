@@ -1,4 +1,4 @@
-import { openAIUsageToAnthropic } from "./openai-usage.js";
+import { openAIUsageToAnthropic, type BridgeUsage } from "./openai-usage.js";
 import type { OpenAIResponseCompleted } from "./openai-responses-types.js";
 import { OpenAIProtocolError, parseOpenAIFunctionArguments } from "./openai-function-call.js";
 
@@ -14,11 +14,7 @@ export interface AnthropicMessageResponse {
   content: AnthropicResponseContentBlock[];
   stop_reason: "end_turn" | "tool_use" | "refusal";
   stop_sequence: null;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_read_input_tokens?: number;
-  };
+  usage: BridgeUsage;
 }
 
 export function openAIResponseToAnthropicMessage(response: OpenAIResponseCompleted): AnthropicMessageResponse {

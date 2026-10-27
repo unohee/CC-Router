@@ -60,6 +60,24 @@ async function withRouter(
 }
 
 describe("Codex first fallback with a fixed effort", () => {
+  it("forgets a fallback account once it refuses, so rotation can pick again", async () => {
+    const preferred: Array<string | undefined> = [];
+    let refuse = false;
+    await withRouter({
+      getOpenAIAccount: id => { preferred.push(id); return account; },
+      forwardOpenAI: async () => refuse ? new Response("too large", { status: 400 }) : codexResponse(),
+    }, async send => {
+      await (await send("claude-opus-5-5")).json();
+      refuse = true;
+      await (await send("claude-opus-5-5")).json();
+      refuse = false;
+      await (await send("claude-opus-5-5")).json();
+    });
+    // Second request still prefers the remembered account; after it refused,
+    // the third starts from rotation again.
+    expect(preferred).toEqual([undefined, "codex", undefined]);
+  });
+
   it("reuses fallback accounts and stable cache identity without discarding cache hits", async () => {
     const preferred: Array<string | undefined> = [];
     const bodies: OpenAIResponsesRequest[] = [];
