@@ -55,6 +55,9 @@ type OpenAIRouteInfo = OpenAIActivity & {
   /** The response started and then the upstream failed. Its bytes are already
    *  gone, so it still counts as served, but not as a success. */
   failedAfterStart?: boolean;
+  /** The client hung up before the response finished. Served, but neither a
+   *  success nor an upstream error. */
+  clientClosed?: boolean;
 };
 
 export type OllamaRouteInfo = OpenAIActivity & {
@@ -179,7 +182,7 @@ type OpenAIForwardOutcome =
    *  serve the session?". Once bytes are out nothing may be retried, but the
    *  account can still have failed — `failedAfterStart` carries that apart so
    *  the caller can move the session without touching the response. */
-  | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage; failedAfterStart?: true }
+  | { ok: true; account: OpenAISubscriptionAccount; usage?: OpenAIUsage; failedAfterStart?: true; clientClosed?: true }
   | { ok: false; reason: "no_account" | "prepare_failed" | "request_failed" };
 
 /**
@@ -259,12 +262,10 @@ async function forwardAnthropicRequestAsOpenAI(
       return { ok: false, reason: "request_failed" };
     }
 
-    const failedAfterStart = await sendOpenAIAsAnthropic(upstream, res, requestedStream, publicModel, usage => {
+    const ended = await sendOpenAIAsAnthropic(upstream, res, requestedStream, publicModel, usage => {
       observedUsage = usage;
     });
-    return failedAfterStart
-      ? { ok: true, account, usage: observedUsage, failedAfterStart: true }
-      : { ok: true, account, usage: observedUsage };
+    return { ok: true, account, usage: observedUsage, ...ended };
   } catch (err) {
     if (err instanceof UpstreamStreamFailure) {
       // Reported inside a 200 stream, before anything was written — treat it
@@ -308,32 +309,58 @@ function openAIActivity(req: Request, res: Response, startedAt: number, sessionI
   };
 }
 
-/** True when the response was delivered but ended abnormally partway through. */
+/** How a delivered response ended, when it did not end cleanly. */
+type ResponseEnd = { failedAfterStart?: true; clientClosed?: true };
+
+/**
+ * Cancels `reader` once the client hangs up before the response is complete.
+ * Codex keeps generating for as long as its stream is read, so a reader left
+ * running spends quota on an answer nobody will receive. Cancelling resolves
+ * the pending read as done, which ends the read loop.
+ */
+function cancelOnClientClose(
+  res: Response,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): { clientGone: () => boolean; detach: () => void } {
+  let gone = false;
+  const onClose = () => {
+    if (res.writableEnded || gone) return;
+    gone = true;
+    reader.cancel().catch(() => {});
+  };
+  res.on("close", onClose);
+  // The client may already have gone while the upstream request was in flight,
+  // in which case "close" has fired and will not fire again.
+  if (res.destroyed) onClose();
+  return { clientGone: () => gone, detach: () => res.off("close", onClose) };
+}
+
 async function sendOpenAIAsAnthropic(
   upstream: globalThis.Response,
   res: Response,
   requestedStream: boolean,
   publicModel?: string,
   onUsage?: (usage: OpenAIUsage) => void,
-): Promise<boolean> {
+): Promise<ResponseEnd> {
   const contentType = upstream.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
     if (requestedStream) {
       return await sendOpenAIStreamAsAnthropic(upstream, res, publicModel, onUsage);
     }
 
-    const collected = await collectOpenAIStreamAsAnthropicMessage(upstream);
+    const collected = await collectOpenAIStreamAsAnthropicMessage(upstream, res);
+    if (!collected) return { clientClosed: true };
     if (publicModel) collected.model = publicModel;
     onUsage?.({ input_tokens: collected.usage.input_tokens, output_tokens: collected.usage.output_tokens });
     res.status(upstream.status).json(collected);
-    return false;
+    return {};
   }
 
   if (!contentType.includes("application/json")) {
     res.status(upstream.status);
     res.setHeader("content-type", contentType || "text/plain");
     res.send(await upstream.text());
-    return false;
+    return {};
   }
 
   const json = await upstream.json() as OpenAIResponseCompleted;
@@ -341,16 +368,32 @@ async function sendOpenAIAsAnthropic(
   if (publicModel) message.model = publicModel;
   onUsage?.({ input_tokens: message.usage.input_tokens, output_tokens: message.usage.output_tokens });
   res.status(upstream.status).json(message);
-  return false;
+  return {};
 }
 
-async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Response): Promise<ReturnType<typeof openAIResponseToAnthropicMessage>> {
+/** Null when the client hung up before the stream finished. */
+async function collectOpenAIStreamAsAnthropicMessage(
+  upstream: globalThis.Response,
+  res: Response,
+): Promise<ReturnType<typeof openAIResponseToAnthropicMessage> | null> {
   // Throws UpstreamStreamFailure when the 200 stream carried a rejection, so
   // the caller degrades instead of returning an empty message.
   const reader = upstream.body?.getReader();
   if (!reader) {
     return openAIResponseToAnthropicMessage({ id: "", model: "", output: [], usage: {} });
   }
+  const { clientGone, detach } = cancelOnClientClose(res, reader);
+  try {
+    return await collectOpenAIStream(reader, clientGone);
+  } finally {
+    detach();
+  }
+}
+
+async function collectOpenAIStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  clientGone: () => boolean,
+): Promise<ReturnType<typeof openAIResponseToAnthropicMessage> | null> {
 
   const decoder = new TextDecoder();
   let remainder = "";
@@ -416,14 +459,22 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
     if (failure) collectedFailure ??= failure;
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done || clientGone()) break;
 
-    const parsed = parseSseLines(remainder + decoder.decode(value, { stream: true }));
-    remainder = parsed.remainder;
-    parsed.events.forEach(applyEvent);
+      const parsed = parseSseLines(remainder + decoder.decode(value, { stream: true }));
+      remainder = parsed.remainder;
+      parsed.events.forEach(applyEvent);
+    }
+  } catch (err) {
+    if (clientGone()) return null;
+    throw err;
   }
+  // Checked before the failure below: a rejection nobody is waiting for must
+  // not send the caller off to retry it on Anthropic.
+  if (clientGone()) return null;
 
   const tail = decoder.decode();
   if (tail || remainder) {
@@ -448,17 +499,20 @@ async function collectOpenAIStreamAsAnthropicMessage(upstream: globalThis.Respon
 }
 
 /**
- * Returns true when the stream ended abnormally after bytes had already gone
- * out. The response itself is unsalvageable at that point, but the caller still
- * needs to know the account failed — otherwise a session stays pinned to an
- * upstream that dies mid-generation on every turn.
+ * Reports `failedAfterStart` when the stream ended abnormally after bytes had
+ * already gone out. The response itself is unsalvageable at that point, but the
+ * caller still needs to know the account failed — otherwise a session stays
+ * pinned to an upstream that dies mid-generation on every turn.
+ *
+ * Reports `clientClosed` when the client hung up first. The upstream is
+ * cancelled, nothing more is written, and the account is not blamed.
  */
 async function sendOpenAIStreamAsAnthropic(
   upstream: globalThis.Response,
   res: Response,
   publicModel?: string,
   onUsage?: (usage: OpenAIUsage) => void,
-): Promise<boolean> {
+): Promise<ResponseEnd> {
   res.status(upstream.status);
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
@@ -469,13 +523,31 @@ async function sendOpenAIStreamAsAnthropic(
   const reader = upstream.body?.getReader();
   if (!reader) {
     res.end();
-    return false;
+    return {};
   }
+  const { clientGone, detach } = cancelOnClientClose(res, reader);
+  try {
+    return await relayOpenAIStream(reader, res, normalizer, clientGone);
+  } finally {
+    detach();
+  }
+}
 
+async function relayOpenAIStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  res: Response,
+  normalizer: ReturnType<typeof createOpenAIStreamToAnthropicNormalizer>,
+  clientGone: () => boolean,
+): Promise<ResponseEnd> {
   const decoder = new TextDecoder();
   let remainder = "";
   let wroteAnything = false;
   let failedMidStream = false;
+  // A failure the upstream already reported still counts against the account,
+  // even if the client left afterwards.
+  const clientLeft = (): ResponseEnd => failedMidStream
+    ? { failedAfterStart: true, clientClosed: true }
+    : { clientClosed: true };
 
   // message_start is emitted from response.created, which always precedes the
   // response.failed that reports a rejection. Writing it immediately would
@@ -504,7 +576,7 @@ async function sendOpenAIStreamAsAnthropic(
   try {
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done || clientGone()) break;
 
       const parsed = parseSseLines(remainder + decoder.decode(value, { stream: true }));
       remainder = parsed.remainder;
@@ -527,6 +599,13 @@ async function sendOpenAIStreamAsAnthropic(
       }
     }
 
+    // Nobody is reading: the cancelled stream's remains are not worth
+    // converting, and writing them would go to a closed socket.
+    if (clientGone()) {
+      res.end();
+      return clientLeft();
+    }
+
     const tail = decoder.decode();
     if (tail || remainder) {
       const parsed = parseSseLines(remainder + tail + "\n");
@@ -544,6 +623,12 @@ async function sendOpenAIStreamAsAnthropic(
     // A stream that produced nothing but an opening still has to be delivered.
     flushPending();
   } catch (err) {
+    // The client hung up; whatever the read raised after that is not the
+    // upstream's fault, and there is nobody to fall back for.
+    if (clientGone()) {
+      res.end();
+      return clientLeft();
+    }
     // Nothing written means nothing committed: no header has been flushed, so
     // the caller can still degrade to Anthropic. Ending the response here
     // instead would hand the client an empty 200 and report it as served.
@@ -562,10 +647,10 @@ async function sendOpenAIStreamAsAnthropic(
       }));
     }
     res.end();
-    return true;
+    return { failedAfterStart: true };
   }
   res.end();
-  return failedMidStream;
+  return failedMidStream ? { failedAfterStart: true } : {};
 }
 
 export function mountMessagesCrossProviderRoute(
@@ -666,6 +751,7 @@ export function mountMessagesCrossProviderRoute(
             upstreamModel: route.upstreamModel,
             usage: outcome.usage,
             failedAfterStart: outcome.failedAfterStart,
+            clientClosed: outcome.clientClosed,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
         }
@@ -834,6 +920,7 @@ export function mountMessagesCrossProviderRoute(
             upstreamModel: tieredModel,
             usage: outcome.usage,
             failedAfterStart: outcome.failedAfterStart,
+            clientClosed: outcome.clientClosed,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
           // The response is spent either way, but a failure means this account
@@ -885,6 +972,7 @@ export function mountMessagesCrossProviderRoute(
             upstreamModel: tieredModel,
             usage: outcome.usage,
             failedAfterStart: outcome.failedAfterStart,
+            clientClosed: outcome.clientClosed,
             ...openAIActivity(req, res, startedAt, sessionId),
           });
           return;
