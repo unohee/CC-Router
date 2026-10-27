@@ -7,6 +7,7 @@ import {
 } from "../proxy/messages-cross-route.js";
 import { resolveOllamaFallbackConfig } from "../providers/ollama/fallback-policy.js";
 import type { OpenAIResponsesRequest } from "../protocol/openai-responses-types.js";
+import { matchCodexTiers } from "../providers/tier-matching.js";
 
 const account = {
   id: "codex", provider: "openai_subscription" as const,
@@ -59,6 +60,34 @@ async function withRouter(
 }
 
 describe("Codex first fallback with a fixed effort", () => {
+  it.each([false, true])("separates frontier from Opus through HTTP (pinned=%s)", async pinned => {
+    const bodies: OpenAIResponsesRequest[] = [];
+    const matched = matchCodexTiers([
+      { slug: "gpt-6-astra", priority: 2 },
+      { slug: "gpt-6.1-sol", priority: 1 },
+      { slug: "gpt-6-luna", priority: 5 },
+    ]);
+    await withRouter({
+      modelRouting: { ...modelRouting, openAIAutoTierMap: true },
+      matchedOpenAITiers: () => matched,
+      ...(pinned ? { resolveSessionTarget: () => ({ provider: "openai" as const, accountId: "codex" }) } : {}),
+      forwardOpenAI: async ({ body }) => { bodies.push(body); return codexResponse(); },
+    }, async send => {
+      for (const model of ["claude-fable-5-1", "claude-mythos-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+        const response = await send(model, "xhigh");
+        expect(response.status).toBe(200);
+        expect((await response.json()).model).toBe(model);
+      }
+      await (await send("openai/gpt-6-astra", "xhigh")).json();
+    });
+    expect(bodies.map(body => body.model)).toEqual([
+      "gpt-6-astra", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra",
+    ]);
+    expect(bodies.map(body => body.reasoning?.effort)).toEqual([
+      "medium", "medium", "medium", "medium", "medium", "xhigh",
+    ]);
+  });
+
   it("uses the configured model and medium for every Claude tier, overriding or supplying effort", async () => {
     const bodies: OpenAIResponsesRequest[] = [];
     await withRouter({ forwardOpenAI: async ({ body }) => { bodies.push(body); return codexResponse(); } }, async send => {

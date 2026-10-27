@@ -41,7 +41,8 @@ describe("matchCodexTiers", () => {
   it("ranks by family, not by the backend's priority", () => {
     // priority 1 is the workhorse; the frontier model is astra at priority 2.
     expect(matchCodexTiers(CODEX_CATALOG)).toEqual({
-      opus: "gpt-6-astra",
+      frontier: "gpt-6-astra",
+      opus: "gpt-6.1-sol",
       sonnet: "gpt-6.1-sol",
       haiku: "gpt-6-luna",
     });
@@ -50,9 +51,16 @@ describe("matchCodexTiers", () => {
   it("falls back to the nearest family when the preferred one is absent", () => {
     const older = CODEX_CATALOG.filter(m => m.slug.startsWith("gpt-5.6"));
     expect(matchCodexTiers(older)).toEqual({
+      frontier: "gpt-5.6-sol",
       opus: "gpt-5.6-sol",
       sonnet: "gpt-5.6-sol",
       haiku: "gpt-5.6-luna",
+    });
+  });
+
+  it("never promotes Opus to Astra when Sol is absent", () => {
+    expect(matchCodexTiers([{ slug: "gpt-6-astra", priority: 2 }])).toEqual({
+      frontier: "gpt-6-astra",
     });
   });
 
@@ -96,7 +104,7 @@ describe("ollamaCloudName", () => {
 });
 
 describe("tier resolution order", () => {
-  const matched = { opus: "gpt-6-astra", sonnet: "gpt-6.1-sol", haiku: "gpt-6-luna" };
+  const matched = { frontier: "gpt-6-astra", opus: "gpt-6.1-sol", sonnet: "gpt-6.1-sol", haiku: "gpt-6-luna" };
 
   it("Codex: explicit map, then matched, then default", () => {
     const routing = { openAIDefaultModel: "gpt-6.1-sol", openAITierMap: { haiku: "gpt-5.6-luna" } };
@@ -237,7 +245,8 @@ describe("createTierDiscovery", () => {
       await discovery.refresh();
       fail = true;
       await discovery.refresh();
-      expect(discovery.openAI().opus).toBe("gpt-6-astra");
+      expect(discovery.openAI().frontier).toBe("gpt-6-astra");
+      expect(discovery.openAI().opus).toBe("gpt-6.1-sol");
       expect(discovery.ollama().opus).toBe("kimi-k3:cloud");
       expect(onChange).toHaveBeenCalledTimes(2);
     } finally {
@@ -255,7 +264,8 @@ describe("createTierDiscovery", () => {
       expect(discovery.openAI()).toEqual({});
       // A catalog that was down at boot must not wait six hours to be retried.
       await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
-      expect(discovery.openAI().opus).toBe("gpt-6-astra");
+      expect(discovery.openAI().frontier).toBe("gpt-6-astra");
+      expect(discovery.openAI().opus).toBe("gpt-6.1-sol");
       // Once matched, the short tick no longer re-reads it.
       await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
       expect(catalog).toHaveBeenCalledTimes(2);
