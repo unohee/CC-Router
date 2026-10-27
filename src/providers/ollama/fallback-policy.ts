@@ -1,6 +1,7 @@
 import { claudeTierOf } from "../../protocol/model-ref.js";
 import type { OllamaFallbackConfig } from "../../config/manager.js";
 import type { TierModels } from "../tier-matching.js";
+import type { OllamaDailyBudgetConfig, OllamaBudgetVerdict } from "./daily-budget.js";
 
 /**
  * When an Anthropic request may be answered by Ollama instead.
@@ -37,6 +38,8 @@ export interface ResolvedOllamaFallbackConfig {
   keyRequired: boolean;
   /** Fill unset tiers from the live catalog (providers/tier-matching.ts). */
   autoTierMap: boolean;
+  /** Daily USD budget gate (daily-budget.ts). */
+  dailyBudget?: OllamaDailyBudgetConfig;
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -86,6 +89,7 @@ export function resolveOllamaFallbackConfig(
     contextTokens: cleanNumber(raw.contextTokens, OLLAMA_DEFAULT_CONTEXT_TOKENS, 1),
     keyRequired: ollamaKeyRequired(baseUrl),
     autoTierMap: raw.autoTierMap === true,
+    dailyBudget: raw.dailyBudget,
   };
 }
 
@@ -130,6 +134,9 @@ export function ollamaModelFor(
 
 export type OllamaSkipReason =
   | "disabled"
+  | "budget-exhausted"
+  | "reserve-exhausted"
+  | "balance-unknown"
   | "no-model"
   | "anthropic-available"
   | "anthropic-will-serve"
@@ -154,6 +161,8 @@ export interface OllamaDecisionInput {
   apiKey: () => string | undefined;
   /** Catalog-matched tiers; read only once Ollama is chosen. */
   matchedTiers?: () => TierModels;
+  /** Daily-budget verdict; null verdicts (feature off) skip the check. */
+  budget?: () => OllamaBudgetVerdict | null;
 }
 
 export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision {
@@ -183,6 +192,13 @@ export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision
   }
 
   if (config.keyRequired && !input.apiKey()) return { use: false, reason: "no-api-key" };
+
+  const b = input.budget?.();
+  if (b && !b.allow) {
+    const detail = b.budgetUsd === null ? undefined
+      : `$${b.spentUsd.toFixed(2)} of $${b.budgetUsd.toFixed(2)} spent${b.remainingUsd === null ? "" : `, $${b.remainingUsd.toFixed(2)} left`} (day ${b.day})`;
+    return { use: false, reason: b.reason as "budget-exhausted" | "reserve-exhausted" | "balance-unknown", detail };
+  }
 
   return { use: true, model: ollamaModelFor(input.claudeModel, config, input.matchedTiers?.()), waitSeconds: wait };
 }

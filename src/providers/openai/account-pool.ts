@@ -1,4 +1,5 @@
 import type { OpenAISubscriptionAccount } from "./token-refresher.js";
+import { fiveHourWithinBudget, type ResolvedCodexFiveHourBudget } from "./five-hour-budget.js";
 
 /**
  * How long an exhausted account waits before being retried when its headers
@@ -29,8 +30,10 @@ function exhaustionHasLapsed(limits: NonNullable<OpenAISubscriptionAccount["rate
  * Shared so the picker and session affinity cannot drift apart: a session must
  * never be pinned to an account the picker would skip.
  */
-export function canServeOpenAI(account: OpenAISubscriptionAccount): boolean {
+export function canServeOpenAI(account: OpenAISubscriptionAccount, budget?: ResolvedCodexFiveHourBudget): boolean {
   if (!account.enabled) return false;
+  // The router's cap applies on top of Codex's 5h window, at a lower threshold.
+  if (budget && !fiveHourWithinBudget(account.rateLimits, budget)) return false;
   const limits = account.rateLimits;
   if (!limits || limits.status !== "rate_limited") return true;
   return exhaustionHasLapsed(limits);
@@ -38,11 +41,12 @@ export function canServeOpenAI(account: OpenAISubscriptionAccount): boolean {
 
 export function createOpenAIAccountPicker(
   accounts: OpenAISubscriptionAccount[],
+  budget?: ResolvedCodexFiveHourBudget,
 ): () => OpenAISubscriptionAccount | null {
   let index = 0;
 
   return () => {
-    const usable = accounts.filter(canServeOpenAI);
+    const usable = accounts.filter(a => canServeOpenAI(a, budget));
     if (usable.length === 0) return null;
 
     const account = usable[index % usable.length];

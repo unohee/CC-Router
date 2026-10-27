@@ -678,6 +678,47 @@ cc-router configure --disable-ollama-fallback
   uses the configured API key. Missing, failed, stale, or unsupported readings
   show `quota unavailable`; request counts are never treated as a credit quota.
 
+### Daily spend cap for Ollama Cloud (opt-in)
+
+Ollama Cloud is billed monthly (`$300` included). The router reads the balance every
+60 seconds and can stop serving when its own daily allowance runs out — so all of
+Claude's fallback paths stopping is still the safe direction, because a whole month
+is never spent in the first days.
+
+```json
+{
+  "ollamaFallback": {
+    "dailyBudget": { "enabled": true, "monthlyUsd": 300, "tz": "Asia/Seoul", "reserveUsd": 0 }
+  }
+}
+```
+
+- Today's allowance is the remaining credit spread over the budget days left in the
+  period; a running-low month slows down rather than stopping outright, and the spend
+  resets with the budget day in `tz` (default: the router's own zone).
+- Spending is the balance going down, measured on consecutive polls — `includedUsd`,
+  not tokens priced by the router. Two consumers sharing the account each see the
+  other's drop charged to their day, which is the safe direction.
+- `balance-unknown` refuses to fall back: the router cannot check a cap it cannot see.
+  A bad zone or a missing figure resolves to "off", never "free".
+- Today's spend survives a restart in `ollama-budget.json` beside `accounts.json`.
+
+### Router cap on Codex five-hour quota (opt-in)
+
+Codex already stops at its own 5-hour plan window. The router can stop earlier, so a
+window never closes at the worst moment of the month.
+
+```json
+{ "codexFiveHourBudget": { "enabled": true, "fiveHourPercent": 80 } }
+```
+
+Below the cap Codex keeps serving; at or above it `canServeOpenAI` returns false for
+the picker, session pins and retry decisions, and the request falls through to
+Anthropic or Ollama as if the account were exhausted. The cap and the plan's own
+"exhausted at 100%" state are separate checks: the cap is a schedule the router
+chose, the plan state is what Codex reported. A five-hour reading the plan has not
+published yet is treated as room.
+
 ---
 
 ## Session soft cap (opt-in)

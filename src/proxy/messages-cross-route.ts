@@ -11,6 +11,7 @@ import { encodeSseEvent, parseSseLines } from "../protocol/sse.js";
 import { forwardOpenAICodexResponse } from "../providers/openai/codex-transport.js";
 import { codexCanHold, estimatePromptTokens } from "../providers/openai/context-limits.js";
 import { decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
+import type { OllamaBudgetVerdict } from "../providers/ollama/daily-budget.js";
 import type { OllamaDecision, ResolvedOllamaFallbackConfig } from "../providers/ollama/fallback-policy.js";
 import { forwardToOllama } from "../providers/ollama/transport.js";
 import type { OllamaUsage } from "../providers/ollama/transport.js";
@@ -86,6 +87,8 @@ export interface OllamaFallbackRouteOptions {
   fetchImpl?: typeof fetch;
   /** Ollama tiers matched from the live catalog; empty unless `autoTierMap` is on. */
   matchedTiers?: () => TierModels;
+  /** Daily-budget verdict the request path reads before falling back. Null means off. */
+  budget?: () => OllamaBudgetVerdict | null;
 }
 
 export interface MessagesCrossProviderRouteOptions {
@@ -673,6 +676,7 @@ export function mountMessagesCrossProviderRoute(
       estimatedPromptTokens,
       apiKey: () => ollama?.apiKey(),
       matchedTiers: ollama?.matchedTiers,
+      ...(ollama?.budget ? { budget: ollama.budget } : {}),
     });
     // Only a decision taken against a blocked pool is worth surfacing; the
     // everyday "Anthropic can serve" answer would bury it.
