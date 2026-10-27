@@ -1104,6 +1104,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `session ${sessionId.slice(0, 8)} → ${openAIAccountId} — client disconnected`
           : `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1119,6 +1120,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `explicit openai/* → ${openAIAccountId} — client disconnected`
           : `explicit openai/* → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        // A hang-up is neither an error nor a completion in the last-hour figures.
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1180,6 +1183,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         details: failedAfterStart ? `${msg} — upstream failed mid-response`
           : clientClosed ? `${msg} — client disconnected` : msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
