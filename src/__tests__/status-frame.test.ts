@@ -279,10 +279,8 @@ describe("the frame", () => {
     //    (Every combination at every cell was 18k frames, too slow for a loaded suite.)
     for (let rows = 3; rows <= 60; rows++) {
       edgeCols.forEach((cols, ci) => {
-        for (let k = 0; k < 1; k++) {
-          const c = (rows * edgeCols.length + ci + k) % 24;
-          check(datas[c % 4]!, cols, rows, c % 8 >= 4, foci[c % 3]!, "");
-        }
+        const c = (rows * edgeCols.length + ci) % 24;
+        check(datas[c % 4]!, cols, rows, c % 8 >= 4, foci[c % 3]!, "");
       });
     }
     // 2. The worst content in full at the small heights, where folding and
