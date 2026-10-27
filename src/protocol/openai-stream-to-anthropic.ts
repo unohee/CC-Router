@@ -1,3 +1,4 @@
+import { openAIUsageToAnthropic, type BridgeUsage } from "./openai-usage.js";
 import { OpenAIProtocolError, parseOpenAIFunctionArguments } from "./openai-function-call.js";
 
 interface OpenAIStreamEventItem {
@@ -25,6 +26,7 @@ interface OpenAIStreamEvent {
     error?: { message?: string; code?: string } | null;
     usage?: {
       input_tokens?: number;
+      input_tokens_details?: { cached_tokens?: number };
       output_tokens?: number;
     };
   };
@@ -61,7 +63,7 @@ export interface OpenAIStreamNormalizerOptions {
    */
   modelOverride?: string;
   /** Called once per response with the usage carried by response.completed. */
-  onUsage?: (usage: { input_tokens: number; output_tokens: number }) => void;
+  onUsage?: (usage: BridgeUsage) => void;
 }
 
 interface OpenBlock {
@@ -262,9 +264,8 @@ export function createOpenAIStreamToAnthropicNormalizer(
         // events) is closed here, in the order the blocks were opened.
         const prefix = [...blocks.keys()].flatMap(closeBlock);
         const stopReason = sawToolUse ? "tool_use" : sawRefusal ? "refusal" : "end_turn";
-        const inputTokens = usage.input_tokens ?? 0;
-        const outputTokens = usage.output_tokens ?? 0;
-        opts.onUsage?.({ input_tokens: inputTokens, output_tokens: outputTokens });
+        const bridgedUsage = openAIUsageToAnthropic(usage);
+        opts.onUsage?.(bridgedUsage);
         reset();
         return [
           ...prefix,
@@ -274,7 +275,7 @@ export function createOpenAIStreamToAnthropicNormalizer(
             // Codex only reveals input_tokens at completion, so message_start
             // necessarily reported 0. Carrying the real figure here gives the
             // client its only accurate reading of context size this turn.
-            usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+            usage: bridgedUsage,
           },
           { type: "message_stop" },
         ];

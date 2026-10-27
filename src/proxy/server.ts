@@ -997,9 +997,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // OpenAI responses never pass the Anthropic proxy middleware, so their
   // usage has to be folded into the aggregates here or the totals only ever
   // count one provider.
-  const recordOpenAIUsage = (usage: { input_tokens: number; output_tokens: number } | undefined, model: string): void => {
+  const recordOpenAIUsage = (usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number } | undefined, model: string): void => {
     if (!usage) return;
     stats.totalInputTokens += usage.input_tokens;
+    stats.totalCacheReadTokens += usage.cache_read_input_tokens ?? 0;
     stats.totalOutputTokens += usage.output_tokens;
     const sample = openAISample(usage, model, Date.now());
     if (sample) usageHistory.record(sample);
@@ -1104,6 +1105,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `session ${sessionId.slice(0, 8)} → ${openAIAccountId} — client disconnected`
           : `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
+        cacheReadTokens: usage?.cache_read_input_tokens,
         ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
@@ -1120,6 +1122,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `explicit openai/* → ${openAIAccountId} — client disconnected`
           : `explicit openai/* → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        cacheReadTokens: usage?.cache_read_input_tokens,
         // A hang-up is neither an error nor a completion in the last-hour figures.
         ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
@@ -1183,6 +1186,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         details: failedAfterStart ? `${msg} — upstream failed mid-response`
           : clientClosed ? `${msg} — client disconnected` : msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        cacheReadTokens: usage?.cache_read_input_tokens,
         ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });

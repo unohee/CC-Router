@@ -21,6 +21,9 @@ export async function forwardOpenAICodexResponse(
       authorization: `Bearer ${opts.account.accessToken}`,
       "content-type": "application/json",
       accept: "text/event-stream",
+      // The Codex backend uses this header for cache affinity, independently
+      // of the prompt_cache_key in the Responses body (official Codex client).
+      ...(opts.body.prompt_cache_key ? { "session-id": opts.body.prompt_cache_key } : {}),
     },
     body: JSON.stringify(body),
   });

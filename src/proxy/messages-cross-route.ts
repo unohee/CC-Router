@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import { selectRoute } from "../providers/route-selector.js";
@@ -172,6 +173,7 @@ export interface MessagesCrossProviderRouteOptions {
 export interface OpenAIUsage {
   input_tokens: number;
   output_tokens: number;
+  cache_read_input_tokens?: number;
 }
 
 /** Raised when an HTTP 200 stream carries a failure before any byte reached the client. */
@@ -230,6 +232,7 @@ async function forwardAnthropicRequestAsOpenAI(
    *  Code treat the model as unrecognised and clamp its assumed context window
    *  to 200k, which drives long conversations into autocompact thrashing. */
   publicModel?: string,
+  sessionId?: string,
 ): Promise<OpenAIForwardOutcome> {
   // Every way this gives up is logged. The fallback chain treats any failure as
   // "Codex unavailable" and moves on, so without a line here a converter that
@@ -250,6 +253,7 @@ async function forwardAnthropicRequestAsOpenAI(
     }
 
     const body = anthropicToOpenAIResponses(reqBody, modelRouting);
+    if (sessionId) body.prompt_cache_key = createHash("sha256").update("cc-router:" + sessionId).digest("hex");
     const upstream = await forwardOpenAI({
       account,
       body,
@@ -351,7 +355,7 @@ async function sendOpenAIAsAnthropic(
     const collected = await collectOpenAIStreamAsAnthropicMessage(upstream, res);
     if (!collected) return { clientClosed: true };
     if (publicModel) collected.model = publicModel;
-    onUsage?.({ input_tokens: collected.usage.input_tokens, output_tokens: collected.usage.output_tokens });
+    onUsage?.(collected.usage);
     res.status(upstream.status).json(collected);
     return {};
   }
@@ -366,7 +370,7 @@ async function sendOpenAIAsAnthropic(
   const json = await upstream.json() as OpenAIResponseCompleted;
   const message = openAIResponseToAnthropicMessage(json);
   if (publicModel) message.model = publicModel;
-  onUsage?.({ input_tokens: message.usage.input_tokens, output_tokens: message.usage.output_tokens });
+  onUsage?.(message.usage);
   res.status(upstream.status).json(message);
   return {};
 }
@@ -660,6 +664,8 @@ export function mountMessagesCrossProviderRoute(
   const forwardOpenAI = opts.forwardOpenAI ?? forwardOpenAICodexResponse;
   const prepareOpenAIAccount = opts.prepareOpenAIAccount ?? (async () => true);
   const ollama = opts.ollamaFallback;
+  // Separate from provider pins: fallback must still yield to a recovered Claude pool.
+  const fallbackAccounts = new Map<string, string>();
 
   const decideOllama = (claudeModel: string, estimatedPromptTokens: number | null): OllamaDecision => {
     const decision = decideOllamaFallback({
@@ -744,6 +750,7 @@ export function mountMessagesCrossProviderRoute(
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ true,
           pinned?.provider === "openai" ? pinned.accountId : undefined,
+          undefined, sessionId,
         );
         if (outcome.ok) {
           opts.onExplicitRoute?.({
@@ -912,6 +919,7 @@ export function mountMessagesCrossProviderRoute(
           /* passThroughUpstreamErrors */ false,
           sessionTarget.accountId,
           /* publicModel */ req.body.model,
+          sessionId,
         );
         if (outcome.ok) {
           opts.onSessionRoute?.({
@@ -963,10 +971,16 @@ export function mountMessagesCrossProviderRoute(
           crossProviderBody, res, requestedStream,
           opts.getOpenAIAccount, prepareOpenAIAccount, forwardOpenAI, opts.modelRouting,
           /* passThroughUpstreamErrors */ false,
-          /* preferredAccountId */ undefined,
+          /* preferredAccountId */ sessionId ? fallbackAccounts.get(sessionId) : undefined,
           /* publicModel */ req.body.model,
+          sessionId,
         );
         if (outcome.ok) {
+          if (sessionId) {
+            fallbackAccounts.delete(sessionId);
+            fallbackAccounts.set(sessionId, outcome.account.id);
+            if (fallbackAccounts.size > 10_000) fallbackAccounts.delete(fallbackAccounts.keys().next().value!);
+          }
           opts.onFallback?.({
             openAIAccountId: outcome.account.id,
             upstreamModel: tieredModel,

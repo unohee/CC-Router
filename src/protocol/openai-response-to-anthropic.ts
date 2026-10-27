@@ -1,3 +1,4 @@
+import { openAIUsageToAnthropic } from "./openai-usage.js";
 import type { OpenAIResponseCompleted } from "./openai-responses-types.js";
 import { OpenAIProtocolError, parseOpenAIFunctionArguments } from "./openai-function-call.js";
 
@@ -16,6 +17,7 @@ export interface AnthropicMessageResponse {
   usage: {
     input_tokens: number;
     output_tokens: number;
+    cache_read_input_tokens?: number;
   };
 }
 
@@ -61,9 +63,6 @@ export function openAIResponseToAnthropicMessage(response: OpenAIResponseComplet
         ? "refusal"
         : "end_turn",
     stop_sequence: null,
-    usage: {
-      input_tokens: response.usage?.input_tokens ?? 0,
-      output_tokens: response.usage?.output_tokens ?? 0,
-    },
+    usage: openAIUsageToAnthropic(response.usage),
   };
 }

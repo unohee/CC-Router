@@ -3,6 +3,17 @@ import { createOpenAIStreamToAnthropicNormalizer, openAIStreamEventToAnthropicEv
 import { OpenAIProtocolError } from "../protocol/openai-function-call.js";
 
 describe("openAIStreamEventToAnthropicEvents", () => {
+  it("preserves completion cache reads in both the callback and client delta", () => {
+    let observed: unknown;
+    const normalizer = createOpenAIStreamToAnthropicNormalizer({ onUsage: usage => { observed = usage; } });
+    const events = normalizer.convert({ type: "response.completed", response: {
+      usage: { input_tokens: 10000, output_tokens: 5, input_tokens_details: { cached_tokens: 9000 } },
+    } });
+    const expected = { input_tokens: 1000, output_tokens: 5, cache_read_input_tokens: 9000 };
+    expect(observed).toEqual(expected);
+    expect(events.find(e => e.type === "message_delta")?.usage).toEqual(expected);
+  });
+
   it("converts common Responses stream events to Anthropic message stream events", () => {
     const events = [
       ...openAIStreamEventToAnthropicEvents({

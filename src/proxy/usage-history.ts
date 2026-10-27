@@ -231,26 +231,25 @@ export class UsageHistory {
 /**
  * The sample for one OpenAI response, or null when it reported no usage.
  *
- * OpenAI reports no cache fields, and its `input_tokens` already include any
- * cached tokens, so none are passed on: the summary leaves OpenAI rows out of
- * the cache ratio for that reason, and recording a made-up 0 here would only
- * look like a measurement.
+ * The bridge has already split inclusive OpenAI input into fresh input and
+ * cache reads. Preserve the optional reading without inventing a measured zero.
+ * Historical rows recorded before this split cannot be backfilled.
  */
 export function openAISample(
-  usage: { input_tokens: number; output_tokens: number } | undefined,
+  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number } | undefined,
   model: unknown,
   ts: number,
 ): UsageSample | null {
   if (!usage) return null;
-  return { ts, provider: "openai", model, input: usage.input_tokens, output: usage.output_tokens, request: true };
+  return { ts, provider: "openai", model, input: usage.input_tokens, output: usage.output_tokens,
+    ...(usage.cache_read_input_tokens !== undefined ? { cacheRead: usage.cache_read_input_tokens } : {}), request: true };
 }
 
 /**
  * A request answered by the Ollama fallback, as a usage-history sample.
  *
  * Its own provider, so these tokens are never counted against a Claude account
- * or read as OpenAI traffic. Unlike Codex, Ollama reports cache reads, so they
- * are kept.
+ * or read as OpenAI traffic. Provider-reported cache reads are preserved.
  */
 export function ollamaSample(
   usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined,

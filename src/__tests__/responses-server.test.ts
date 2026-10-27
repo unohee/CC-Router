@@ -23,7 +23,7 @@ describe("forwardOpenAICodexResponse", () => {
         expiresAt: Date.now() + 60 * 60 * 1000,
         enabled: true,
       },
-      body: { model: "gpt-5.5", input: [] },
+      body: { model: "gpt-5.5", input: [], prompt_cache_key: "stable-session-cache" },
       stream: false,
     });
 
@@ -36,6 +36,7 @@ describe("forwardOpenAICodexResponse", () => {
         headers: expect.objectContaining({
           authorization: "Bearer access",
           "content-type": "application/json",
+          "session-id": "stable-session-cache",
         }),
       }),
     );
@@ -55,7 +56,7 @@ describe("forwardOpenAICodexResponse", () => {
         expiresAt: Date.now() + 60 * 60 * 1000,
         enabled: true,
       },
-      body: { model: "gpt-5.5", input: [] },
+      body: { model: "gpt-5.5", input: [], prompt_cache_key: "stable-session-cache" },
       stream: false,
     });
 
