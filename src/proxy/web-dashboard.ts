@@ -138,7 +138,7 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .mrow{grid-template-columns:minmax(0,1fr) auto}
 .mrow .meter{grid-column:1 / -1;order:3}
 }
-/* Activity chart: four categorical hues kept clear of the status colours, and a neutral for "other". Validated for colour-vision deficiency in both schemes. */
+/* Activity chart: four categorical hues and indexed neutral textures for additional models. Validated for colour-vision deficiency in both schemes. */
 :root{--s0:#2a78d6;--s1:#1baf7a;--s2:#6250d6;--s3:#e87ba4;--so:#c3c2bc;--sel:rgba(11,11,11,.06)}
 @media (prefers-color-scheme:dark){:root{--s0:#3987e5;--s1:#199e70;--s2:#9085e9;--s3:#d55181;--so:#55544f;--sel:rgba(255,255,255,.07)}}
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
@@ -167,7 +167,10 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .chart .grid{stroke:var(--hair);stroke-width:1}
 .chart .base{stroke:var(--muted);stroke-width:1}
 .chart .selcol{fill:var(--sel)}
-.chart .s0{fill:var(--s0)}.chart .s1{fill:var(--s1)}.chart .s2{fill:var(--s2)}.chart .s3{fill:var(--s3)}.chart .so{fill:var(--so)}
+.chart .s0,.sw .s0{fill:var(--s0)}.chart .s1,.sw .s1{fill:var(--s1)}.chart .s2,.sw .s2{fill:var(--s2)}.chart .s3,.sw .s3{fill:var(--s3)}
+.chart .so:not([fill]),.sw .so:not([fill]),.texture-base{fill:var(--so)}
+.texture-line{stroke:var(--ink2)}
+.model-name{overflow-wrap:anywhere;min-width:0}
 .chart .partial{opacity:.5}
 .chart .nodata{fill:var(--hair)}
 .lgd{gap:8px}
@@ -1190,8 +1193,8 @@ const SCRIPT = String.raw`
 
   // ── activity over time ───────────────────────────────────────────────────
   // From /cc-router/usage-series, a request of its own like the history above.
-  // Series arrive in a fixed order (the top models over 30 days, then "other"),
-  // so a model keeps its colour when the range changes.
+  // Every model arrives separately. Style slots follow provider/model identity
+  // so a refresh or range change cannot repaint a surviving model.
   var SERIES_PATH = "/cc-router/usage-series";
   var RANGES = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 30 days" };
   var METRICS = { requests: "requests", output: "output tokens", total: "tokens" };
@@ -1199,7 +1202,7 @@ const SCRIPT = String.raw`
 
   function validSeries(d) {
     if (!d || typeof d !== "object" || !RANGES.hasOwnProperty(d.range) || (d.step !== "hour" && d.step !== "day")) return false;
-    if (!Array.isArray(d.series) || d.series.length > 8 || !Array.isArray(d.points) || d.points.length > 400) return false;
+    if (!Array.isArray(d.series) || !Array.isArray(d.points) || d.points.length > 400) return false;
     for (var i = 0; i < d.series.length; i++) {
       var x = d.series[i];
       if (!x || typeof x.model !== "string" || typeof x.provider !== "string") return false;
@@ -1219,7 +1222,18 @@ const SCRIPT = String.raw`
     return true;
   }
 
-  function seriesClass(d, i) { return d.series[i].other || i > 3 ? "so" : "s" + i; }
+  var modelStyles = new Map();
+  function seriesSlot(d, i) {
+    var x = d.series[i], key = x.provider + "\u0000" + x.model;
+    if (!modelStyles.has(key)) modelStyles.set(key, modelStyles.size);
+    return modelStyles.get(key);
+  }
+  function seriesClass(d, i) {
+    var slot = seriesSlot(d, i);
+    return d.series[i].other || slot > 3 ? "so" : "s" + slot;
+  }
+  function modelLabel(d, i) { return (seriesSlot(d, i) + 1) + ". " + seriesName(d.series[i]); }
+  function patternFill(d, i) { return "url(#model-pattern-" + seriesSlot(d, i) + ")"; }
   function seriesName(x) {
     if (x.other) return "Other models";
     return x.provider === "openai" ? x.model + " (OpenAI)" : x.provider === "ollama" ? x.model + " (Ollama)" : x.model;
@@ -1296,6 +1310,18 @@ const SCRIPT = String.raw`
     root.setAttribute("aria-label", METRICS[A.metric].charAt(0).toUpperCase() + METRICS[A.metric].slice(1) + " per " + d.step + " by model, " + RANGES[d.range]
       + ". Left and right arrow keys read one " + d.step + " at a time; the table view lists them all.");
 
+    // Beyond four hues, separate models with indexed textures, not reused hues.
+    var defs = svg("defs", "");
+    d.series.forEach(function (x, i) {
+      if (seriesSlot(d, i) < 4 || x.other) return;
+      var slot = seriesSlot(d, i), size = 6 + slot;
+      var pattern = svg("pattern", "", { id: "model-pattern-" + slot, patternUnits: "userSpaceOnUse", width: size, height: size });
+      pattern.appendChild(svg("rect", "texture-base", { width: size, height: size }));
+      pattern.appendChild(svg("path", "texture-line", { d: "M0 " + size + "L" + size + " 0", "stroke-width": 1 }));
+      defs.appendChild(pattern);
+    });
+    root.appendChild(defs);
+
     // Three gridlines, labelled at the left: zero, half and the top.
     [0, 0.5, 1].forEach(function (f) {
       var y = top + plot - f * plot;
@@ -1323,7 +1349,12 @@ const SCRIPT = String.raw`
         var h = sg[1];
         // A surface-coloured gap between stacked segments, where there is room for one.
         var drawn = j < segs.length - 1 && h > 3 ? h - 1 : h;
-        root.appendChild(svg("rect", seriesClass(d, sg[0]) + partial, { x: x, y: base - h, width: w, height: Math.max(0.5, drawn) }));
+        var mark = svg("rect", seriesClass(d, sg[0]) + partial, { x: x, y: base - h, width: w, height: Math.max(0.5, drawn) });
+        if (seriesSlot(d, sg[0]) >= 4 && !d.series[sg[0]].other) mark.setAttribute("fill", patternFill(d, sg[0]));
+        var title = svg("title", "");
+        title.textContent = modelLabel(d, sg[0]) + " — " + metricValue(p[A.metric][sg[0]]);
+        mark.appendChild(title);
+        root.appendChild(mark);
         base -= h;
       });
     });
@@ -1372,8 +1403,12 @@ const SCRIPT = String.raw`
     d.points.forEach(function (p) { p[A.metric].forEach(function (v, k) { sums[k] += v; all += v; }); });
     var kids = d.series.map(function (x, k) {
       var li = el("li", "lrow");
-      li.appendChild(el("span", "sw " + seriesClass(d, k)));
-      var name = el("span", "clip", seriesName(x));
+      var swatch = svg("svg", "sw", { width: 10, height: 10, "aria-hidden": "true" });
+      var tile = svg("rect", seriesClass(d, k), { width: 10, height: 10 });
+      if (seriesSlot(d, k) >= 4 && !x.other) tile.setAttribute("fill", patternFill(d, k));
+      swatch.appendChild(tile);
+      li.appendChild(swatch);
+      var name = el("span", "model-name", modelLabel(d, k));
       name.title = seriesName(x);
       li.appendChild(name);
       li.appendChild(el("span", "lval", num(sums[k]) + (all > 0 ? " · " + pct(sums[k] / all) : "")));

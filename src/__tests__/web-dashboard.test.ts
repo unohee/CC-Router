@@ -157,7 +157,7 @@ function usageSeries(over: Record<string, unknown> = {}) {
     series: [
       { model: "claude-opus-5-5", provider: "anthropic" },
       { model: "gpt-6.1-sol", provider: "openai" },
-      { model: "other", provider: "", other: true },
+      { model: "gpt-6-luna", provider: "openai" },
     ],
     points: Array.from({ length: 24 }, (_, i) => ({
       start: hour - (23 - i) * 3_600_000, date: "2026-10-26", recorded: i >= 3,
@@ -967,11 +967,28 @@ describe("dashboard activity chart", () => {
     expect(all.filter(r => cls(r) === "nodata")).toHaveLength(3);
     expect(all.filter(r => cls(r).startsWith("s0"))).toHaveLength(21);
     expect(all.filter(r => cls(r).startsWith("s1"))).toHaveLength(21);
-    // "other" takes the neutral, whatever its position.
-    expect(all.filter(r => cls(r).startsWith("so"))).toHaveLength(21);
+    // Every named model gets a separate segment.
+    expect(all.filter(r => cls(r).startsWith("s2"))).toHaveLength(21);
     // The current hour is unfinished and drawn as such.
     expect(all.filter(r => cls(r).includes("partial"))).toHaveLength(3);
     for (const r of all) expect(r.attrs["style"]).toBeUndefined();
+  });
+
+  it("renders more than eight models individually with textures, names and table columns", async () => {
+    const models = Array.from({ length: 12 }, (_, i) => ({ model: "model-" + i, provider: "openai" }));
+    const data = usageSeries();
+    const page = await boot(ok(health([account()])), ok(usageSummary()), ok(usageSeries({
+      series: models,
+      points: data.points.map(p => ({ ...p, requests: models.map(() => 1), output: models.map(() => 2), total: models.map(() => 3) })),
+    })));
+    const legend = page.rows("actlegend");
+    expect(legend).toHaveLength(12);
+    models.forEach((m, i) => expect(legend[i]).toContain(m.model + " (OpenAI)"));
+    expect(legend.join(" ")).not.toContain("Other models");
+    expect(find(chart(page), e => e.tag === "pattern")).toHaveLength(8);
+    expect(rects(page).some(r => r.attrs.fill === "url(#model-pattern-11)")).toBe(true);
+    press(page, "acttable");
+    expect(page.rows("acthead")).toHaveLength(14);
   });
 
   it("labels its scale and names every model in a legend with its total and share", async () => {
@@ -980,7 +997,7 @@ describe("dashboard activity chart", () => {
     expect(legend).toHaveLength(3);
     expect(legend[0]).toContain("claude-opus-5-5");
     expect(legend[1]).toContain("gpt-6.1-sol (OpenAI)");
-    expect(legend[2]).toContain("Other models");
+    expect(legend[2]).toContain("gpt-6-luna (OpenAI)");
     const texts = find(chart(page), e => e.tag === "text").map(t => t.textContent);
     expect(texts).toContain("0");
     expect(page.el("acttot").textContent).toContain("500 requests");
@@ -1052,7 +1069,7 @@ describe("dashboard activity chart", () => {
     const rows = page.rows("actrows");
     expect(rows).toHaveLength(24);
     expect(rows[23]).toContain("no data");
-    expect(page.rows("acthead")).toEqual(["Hour", "claude-opus-5-5", "gpt-6.1-sol (OpenAI)", "Other models", "Total"]);
+    expect(page.rows("acthead")).toEqual(["Hour", "claude-opus-5-5", "gpt-6.1-sol (OpenAI)", "gpt-6-luna (OpenAI)", "Total"]);
   });
 
   it("puts a hostile model name in the page as text, never as markup", async () => {

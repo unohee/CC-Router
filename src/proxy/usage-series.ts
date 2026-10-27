@@ -8,7 +8,7 @@
  *
  * Series are the models with the most tokens over the last 30 days whatever
  * range is asked for, so a model keeps its place (and its colour) when the
- * viewer switches range. The rest fold into one "other" series.
+ * viewer switches range. Every model is kept as a separate series.
  */
 
 import { DAY_MS, HOUR_MS, type UsageBucket } from "./usage-history.js";
@@ -20,8 +20,6 @@ export const SERIES_RANGES: Record<SeriesRange, { step: "hour" | "day"; count: n
   "7d": { step: "hour", count: 168 },
   "30d": { step: "day", count: 30 },
 };
-/** Named series. The page draws them in four hues that stay apart under colour-vision deficiency and are not the green, amber and red it spends on status. */
-export const SERIES_LIMIT = 4;
 const RANKING_DAYS = 30;
 
 export interface SeriesInfo {
@@ -95,20 +93,17 @@ export function summarizeSeries(
   const order = [...ranked.values()]
     .filter(r => r.total > 0)
     .sort((a, b) => b.total - a.total || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0));
-  const named = order.slice(0, SERIES_LIMIT);
+  const named = order;
   const series: SeriesInfo[] = named.map(r => ({ model: r.model, provider: r.provider }));
   const index = new Map(named.map((r, i) => [keyOf(r), i]));
-  // Anything outside the named series lands in "other", including a model used
-  // in this range but not in the ranking window.
-  let otherIndex = -1;
+  // A calendar-day range may include a bucket just outside the ranking window.
   const slotOf = (b: UsageBucket): number => {
-    const i = index.get(keyOf(b));
-    if (i !== undefined) return i;
-    if (otherIndex < 0) {
-      otherIndex = series.length;
-      series.push({ model: "other", provider: "", other: true });
-    }
-    return otherIndex;
+    const existing = index.get(keyOf(b));
+    if (existing !== undefined) return existing;
+    const slot = series.length;
+    series.push({ model: b.model, provider: b.provider });
+    index.set(keyOf(b), slot);
+    return slot;
   };
 
   // Steps. Hours are whole UTC hours ending with the current one; days are the
@@ -147,7 +142,7 @@ export function summarizeSeries(
     }
   }
 
-  // Pass one decides the series list (an "other" may appear), pass two fills.
+  // Pass one completes the model list, pass two fills the aligned arrays.
   const hits: Array<{ b: UsageBucket; at: number; slot: number }> = [];
   for (const b of buckets) {
     const at = stepOfBucket.get(b.hour);

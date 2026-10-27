@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HOUR_MS, DAY_MS, type UsageBucket } from "../proxy/usage-history.js";
-import { createUsageSeriesProvider, parseSeriesRange, summarizeSeries, SERIES_LIMIT } from "../proxy/usage-series.js";
+import { createUsageSeriesProvider, parseSeriesRange, summarizeSeries } from "../proxy/usage-series.js";
 
 const NOW = Date.parse("2026-10-26T12:30:00Z");
 const HOUR = Math.floor(NOW / HOUR_MS) * HOUR_MS;
@@ -42,18 +42,19 @@ describe("summarizeSeries", () => {
     expect(hit.date).toBe("2026-10-26");
   });
 
-  it("names the top models by 30-day tokens, folds the rest into other, and keeps that order on every range", () => {
-    const models = Array.from({ length: SERIES_LIMIT + 2 }, (_, i) => `m${i}`);
+  it("names every model by 30-day tokens and keeps that order on every range", () => {
+    const models = Array.from({ length: 12 }, (_, i) => `m${i}`);
     // m0 is the biggest over 30 days but was idle today.
     const buckets = models.map((m, i) => bucket(i === 0 ? 48 : 1, m, { cacheRead: (100 - i) * 1000 }));
     const day = summarizeSeries(source(buckets), { now: NOW, range: "24h", tz: "UTC" });
     const month = summarizeSeries(source(buckets), { now: NOW, range: "30d", tz: "UTC" });
     expect(day.series.map(s => s.model)).toEqual(month.series.map(s => s.model));
-    expect(day.series).toHaveLength(SERIES_LIMIT + 1);
+    expect(day.series).toHaveLength(12);
     expect(day.series[0].model).toBe("m0");
-    expect(day.series[SERIES_LIMIT]).toMatchObject({ model: "other", other: true });
+    expect(day.series.map(s => s.model)).toEqual(models);
+    expect(day.series.every(s => !s.other)).toBe(true);
     const last = day.points[22];
-    expect(last.requests[SERIES_LIMIT]).toBe(4);
+    expect(last.requests.slice(1)).toEqual(Array(11).fill(2));
   });
 
   it("marks steps before recording began as unrecorded, not zero", () => {
