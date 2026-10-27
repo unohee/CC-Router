@@ -985,7 +985,7 @@ describe("dashboard activity chart", () => {
     expect(legend).toHaveLength(12);
     models.forEach((m, i) => expect(legend[i]).toContain(m.model + " (OpenAI)"));
     expect(legend.join(" ")).not.toContain("Other models");
-    expect(find(chart(page), e => e.tag === "pattern")).toHaveLength(8);
+    expect(find(chart(page), e => e.tag === "pattern")).toHaveLength(4);
     expect(rects(page).some(r => r.attrs.fill === "url(#model-pattern-11)")).toBe(true);
     press(page, "acttable");
     expect(page.rows("acthead")).toHaveLength(14);

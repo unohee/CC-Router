@@ -42,6 +42,14 @@ function runWhole(text: string) {
 }
 
 describe("Ollama stream transformer", () => {
+  it("replaces estimated input with final fully cached usage", () => {
+    const t = createOllamaStreamTransformer();
+    t.push(ev("message_start", { message: { usage: { input_tokens: 12000, output_tokens: 0 } } }));
+    t.push(ev("message_delta", { usage: { input_tokens: 0, output_tokens: 2, cache_read_input_tokens: 12000 } }));
+    t.push(ev("message_stop", {}));
+    expect(t.usage()).toEqual({ input_tokens: 0, output_tokens: 2, cache_read_input_tokens: 12000 });
+  });
+
   it("strips thinking, renumbers later blocks and rewrites the model", () => {
     const { out, t } = runWhole(UPSTREAM);
     const events = parse(out);

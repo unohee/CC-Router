@@ -60,6 +60,31 @@ async function withRouter(
 }
 
 describe("Codex first fallback with a fixed effort", () => {
+  it("reuses fallback accounts and stable cache identity without discarding cache hits", async () => {
+    const preferred: Array<string | undefined> = [];
+    const bodies: OpenAIResponsesRequest[] = [];
+    const usages: unknown[] = [];
+    await withRouter({
+      getOpenAIAccount: id => { preferred.push(id); return account; },
+      forwardOpenAI: async ({ body }) => {
+        bodies.push(body);
+        return Response.json({ id: "r", output: [], usage: {
+          input_tokens: 10000, output_tokens: 2, input_tokens_details: { cached_tokens: 9000 },
+        } });
+      },
+      onFallback: info => usages.push(info.usage),
+    }, async send => {
+      for (let i = 0; i < 2; i++) {
+        const json = await (await send("claude-opus-5-5")).json();
+        expect(json.usage).toEqual({ input_tokens: 1000, output_tokens: 2, cache_read_input_tokens: 9000 });
+      }
+    });
+    expect(preferred).toEqual([undefined, "codex"]);
+    expect(bodies[0].prompt_cache_key).toMatch(/^[a-f0-9]{64}$/);
+    expect(bodies[1].prompt_cache_key).toBe(bodies[0].prompt_cache_key);
+    expect(usages).toEqual(Array(2).fill({ input_tokens: 1000, output_tokens: 2, cache_read_input_tokens: 9000 }));
+  });
+
   it.each([false, true])("separates frontier from Opus through HTTP (pinned=%s)", async pinned => {
     const bodies: OpenAIResponsesRequest[] = [];
     const matched = matchCodexTiers([

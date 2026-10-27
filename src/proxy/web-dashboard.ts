@@ -138,9 +138,9 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .mrow{grid-template-columns:minmax(0,1fr) auto}
 .mrow .meter{grid-column:1 / -1;order:3}
 }
-/* Activity chart: four categorical hues and indexed neutral textures for additional models. Validated for colour-vision deficiency in both schemes. */
-:root{--s0:#2a78d6;--s1:#1baf7a;--s2:#6250d6;--s3:#e87ba4;--so:#c3c2bc;--sel:rgba(11,11,11,.06)}
-@media (prefers-color-scheme:dark){:root{--s0:#3987e5;--s1:#199e70;--s2:#9085e9;--s3:#d55181;--so:#55544f;--sel:rgba(255,255,255,.07)}}
+/* Activity chart: explicit model colours with indexed textures for additional models. Validated for colour-vision deficiency in both schemes. */
+:root{--s0:#2a78d6;--s1:#eb6834;--s2:#1baf7a;--s3:#eda100;--s4:#e87ba4;--s5:#008300;--s6:#6250d6;--s7:#e34948;--so:#c3c2bc;--sel:rgba(11,11,11,.06)}
+@media (prefers-color-scheme:dark){:root{--s0:#3987e5;--s1:#d95926;--s2:#199e70;--s3:#c98500;--s4:#d55181;--s5:#008300;--s6:#9085e9;--s7:#e66767;--so:#55544f;--sel:rgba(255,255,255,.07)}}
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px 24px;margin:4px 0 0}
 .kpi{min-width:0}
@@ -169,9 +169,10 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .chart .selcol{fill:var(--sel)}
 .chart .s0,.sw .s0{fill:var(--s0)}.chart .s1,.sw .s1{fill:var(--s1)}.chart .s2,.sw .s2{fill:var(--s2)}.chart .s3,.sw .s3{fill:var(--s3)}
 .chart .so:not([fill]),.sw .so:not([fill]),.texture-base{fill:var(--so)}
-.texture-line{stroke:var(--ink2)}
+.chart .s4,.sw .s4{fill:var(--s4)}.chart .s5,.sw .s5{fill:var(--s5)}.chart .s6,.sw .s6{fill:var(--s6)}.chart .s7,.sw .s7{fill:var(--s7)}
+.texture-line{stroke:var(--surface)}
 .model-name{overflow-wrap:anywhere;min-width:0}
-.chart .partial{opacity:.5}
+.chart .partial{opacity:1}
 .chart .nodata{fill:var(--hair)}
 .lgd{gap:8px}
 .lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 8px;align-items:baseline;font-size:13px}
@@ -1230,7 +1231,7 @@ const SCRIPT = String.raw`
   }
   function seriesClass(d, i) {
     var slot = seriesSlot(d, i);
-    return d.series[i].other || slot > 3 ? "so" : "s" + slot;
+    return d.series[i].other ? "so" : "s" + (slot < 8 ? slot : [0, 2, 4, 6, 1, 3, 5, 7][(slot - 8) % 8]);
   }
   function modelLabel(d, i) { return (seriesSlot(d, i) + 1) + ". " + seriesName(d.series[i]); }
   function patternFill(d, i) { return "url(#model-pattern-" + seriesSlot(d, i) + ")"; }
@@ -1310,13 +1311,13 @@ const SCRIPT = String.raw`
     root.setAttribute("aria-label", METRICS[A.metric].charAt(0).toUpperCase() + METRICS[A.metric].slice(1) + " per " + d.step + " by model, " + RANGES[d.range]
       + ". Left and right arrow keys read one " + d.step + " at a time; the table view lists them all.");
 
-    // Beyond four hues, separate models with indexed textures, not reused hues.
+    // Each model has an opaque colour; textures provide secondary identity.
     var defs = svg("defs", "");
     d.series.forEach(function (x, i) {
-      if (seriesSlot(d, i) < 4 || x.other) return;
+      if (seriesSlot(d, i) < 8 || x.other) return;
       var slot = seriesSlot(d, i), size = 6 + slot;
       var pattern = svg("pattern", "", { id: "model-pattern-" + slot, patternUnits: "userSpaceOnUse", width: size, height: size });
-      pattern.appendChild(svg("rect", "texture-base", { width: size, height: size }));
+      pattern.appendChild(svg("rect", seriesClass(d, i), { width: size, height: size }));
       pattern.appendChild(svg("path", "texture-line", { d: "M0 " + size + "L" + size + " 0", "stroke-width": 1 }));
       defs.appendChild(pattern);
     });
@@ -1350,7 +1351,10 @@ const SCRIPT = String.raw`
         // A surface-coloured gap between stacked segments, where there is room for one.
         var drawn = j < segs.length - 1 && h > 3 ? h - 1 : h;
         var mark = svg("rect", seriesClass(d, sg[0]) + partial, { x: x, y: base - h, width: w, height: Math.max(0.5, drawn) });
-        if (seriesSlot(d, sg[0]) >= 4 && !d.series[sg[0]].other) mark.setAttribute("fill", patternFill(d, sg[0]));
+        if (seriesSlot(d, sg[0]) >= 8 && !d.series[sg[0]].other) {
+          mark.setAttribute("class", "textured" + partial);
+          mark.setAttribute("fill", patternFill(d, sg[0]));
+        }
         var title = svg("title", "");
         title.textContent = modelLabel(d, sg[0]) + " — " + metricValue(p[A.metric][sg[0]]);
         mark.appendChild(title);
@@ -1405,7 +1409,10 @@ const SCRIPT = String.raw`
       var li = el("li", "lrow");
       var swatch = svg("svg", "sw", { width: 10, height: 10, "aria-hidden": "true" });
       var tile = svg("rect", seriesClass(d, k), { width: 10, height: 10 });
-      if (seriesSlot(d, k) >= 4 && !x.other) tile.setAttribute("fill", patternFill(d, k));
+      if (seriesSlot(d, k) >= 8 && !x.other) {
+        tile.setAttribute("class", "textured");
+        tile.setAttribute("fill", patternFill(d, k));
+      }
       swatch.appendChild(tile);
       li.appendChild(swatch);
       var name = el("span", "model-name", modelLabel(d, k));
