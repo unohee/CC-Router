@@ -113,6 +113,15 @@ export interface OllamaFallbackView {
     resetsAt: number | null;
     reason?: string;
   };
+  /** Router-defined daily budget, while enabled. allow: false means Ollama stopped for today. */
+  budget?: {
+    allow: boolean;
+    reason: "ok" | "budget-exhausted" | "reserve-exhausted" | "balance-unknown";
+    budgetUsd: number | null;
+    spentUsd: number;
+    remainingUsd: number | null;
+    day: string;
+  } | null;
 }
 
 export type Focus = "logs" | "accounts" | "models";

@@ -31,6 +31,11 @@ export const USAGE_PATH =
   process.env["USAGE_PATH"] ||
   path.join(path.dirname(ACCOUNTS_PATH), "usage.json");
 
+/** Ollama daily-budget spend, so a restart does not reset the day. */
+export const OLLAMA_BUDGET_PATH =
+  process.env["OLLAMA_BUDGET_PATH"] ??
+  path.join(path.dirname(ACCOUNTS_PATH), "ollama-budget.json");
+
 export const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), ".claude", "settings.json");
 
 export const PROXY_PORT = parseInt(process.env["PORT"] ?? "3456", 10);

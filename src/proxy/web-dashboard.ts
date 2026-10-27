@@ -635,6 +635,14 @@ const SCRIPT = String.raw`
       text.appendChild(el("span", "note", unavailable));
       if (q && q.reason) text.appendChild(el("span", "note", q.reason));
     }
+    if (a.budget && a.budget.budgetUsd !== null) {
+      var bb = a.budget;
+      text.appendChild(el("span", "note", "today $" + bb.spentUsd.toFixed(2) + " / $" + bb.budgetUsd.toFixed(2)
+        + (bb.allow ? "" : " — daily cap reached, Ollama stopped"), ));
+      if (!bb.allow) text.children[text.children.length - 1].className = "note red";
+    } else if (a.budget && !a.budget.allow) {
+      text.appendChild(el("span", "note red", "daily cap: balance unknown — Ollama stopped"));
+    }
     if (q && q.checkedAt) text.appendChild(el("span", "note", "checked " + ago(q.checkedAt)));
     if (q && q.source) {
       var source = el("span", "note", "Ollama balance API");

@@ -287,8 +287,13 @@ export function ollamaLine(a: OllamaFallbackView, fit: number, now: number): Seg
     && [b.includedUsd, b.allowanceUsd, b.purchasedUsd].every(Number.isFinite)
     && !reset;
   const exhausted = known && b && Math.max(0, b.includedUsd) + Math.max(0, b.purchasedUsd) <= 0;
-  const state = exhausted ? "credits exhausted" : a.serving ? "serving" : a.ready ? "ready" : a.inactiveReason === "no-api-key" ? "needs key" : "inactive";
-  const color = exhausted ? "red" : a.ready ? "cyan" : "yellow";
+  const budgetStopped = a.budget !== null && a.budget !== undefined && !a.budget.allow;
+  const state = exhausted ? "credits exhausted"
+    : budgetStopped
+      ? (a.budget!.budgetUsd === null ? "daily cap: balance unknown"
+        : `daily cap $${a.budget!.spentUsd.toFixed(2)}/$${a.budget!.budgetUsd.toFixed(2)}`)
+    : a.serving ? "serving" : a.ready ? "ready" : a.inactiveReason === "no-api-key" ? "needs key" : "inactive";
+  const color = exhausted || budgetStopped ? "red" : a.ready ? "cyan" : "yellow";
   const quota: Seg[] = [];
   if (known && b) {
     quota.push(seg(`monthly $${b.includedUsd.toFixed(2)}/$${b.allowanceUsd.toFixed(2)} left`, "white"));
@@ -301,6 +306,9 @@ export function ollamaLine(a: OllamaFallbackView, fit: number, now: number): Seg
   } else {
     quota.push(seg(reset ? "quota reset; refresh pending" : "quota unavailable", "gray"));
     if (q?.reason) quota.push(seg(` (${terminalSafeText(q.reason)})`, "gray"));
+  }
+  if (a.budget && a.budget.budgetUsd !== null && !budgetStopped) {
+    quota.push(seg(` today $${a.budget.spentUsd.toFixed(2)}/$${a.budget.budgetUsd.toFixed(2)}`, a.budget.allow ? "gray" : "red"));
   }
   if (q?.checkedAt) quota.push(seg(` read ${formatAgo(q.checkedAt, now)}`, "gray"));
   return fitSegs([

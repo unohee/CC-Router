@@ -21,11 +21,13 @@ import { logOllamaFallback, logOllamaTransition } from "./logger.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
-import { PROXY_PORT, LITELLM_URL, USAGE_PATH } from "../config/paths.js";
+import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH } from "../config/paths.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
 import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
+import { OllamaDailyBudget, resolveOllamaDailyBudgetConfig } from "../providers/ollama/daily-budget.js";
+
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { createUsageSeriesProvider } from "./usage-series.js";
@@ -34,6 +36,7 @@ import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
 import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
+import { resolveCodexFiveHourBudget } from "../providers/openai/five-hour-budget.js";
 import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../providers/openai/context-limits.js";
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -330,8 +333,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   }
 
   const pool = new TokenPool(accounts);
-  const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts);
   const initialConfig = readConfig();
+  const codexBudget = resolveCodexFiveHourBudget(initialConfig.codexFiveHourBudget);
+  const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts, codexBudget ?? undefined);
   const modelRouting = initialConfig.modelRouting ?? {};
 
   // Ollama fallback — opt-in, null unless enabled. Problems that make it
@@ -341,6 +345,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     config: ollamaConfig,
     apiKey: () => readOllamaApiKey(ollamaConfig),
   }) : null;
+  const ollamaBudget = resolveOllamaDailyBudgetConfig(ollamaConfig?.dailyBudget)
+    ? new OllamaDailyBudget({
+        config: resolveOllamaDailyBudgetConfig(ollamaConfig?.dailyBudget)!,
+        statePath: OLLAMA_BUDGET_PATH,
+      })
+    : null;
   const upstream429Relay = resolveUpstream429Relay(initialConfig.upstream429Relay);
   if (ollamaConfig) {
     if (!ollamaConfig.model) {
@@ -352,6 +362,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       console.log(chalk.gray(`  Ollama fallback: ${ollamaConfig.model} via ${ollamaConfig.baseUrl} when every account is blocked for over ${ollamaConfig.minWaitSeconds}s`));
     }
   }
+  /** The latest balance the monitor has, as the budget wants it. */
+  const latestBalance = () => {
+    const snap = ollamaQuota?.snapshot();
+    return snap?.status === "known" && snap.balance && snap.resetsAt !== null && snap.checkedAt !== null
+      ? { includedUsd: snap.balance.includedUsd, resetsAt: snap.resetsAt, checkedAt: snap.checkedAt }
+      : null;
+  };
+  /** Latest budget verdict as health wants it. */
+  const budgetSnapshot = () => ollamaBudget?.verdict(latestBalance()) ?? null;
+
   /** What /cc-router/health reports about the Ollama fallback. `serving` is
    *  true from an Ollama answer until the next successful Anthropic one. */
   const ollamaStatus = {
@@ -455,14 +475,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const sessionTargetRetainable = (t: SessionTarget, model?: string): boolean =>
     t.provider === "anthropic"
       ? pool.canRetain(t.accountId, model)
-      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
+      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a, codexBudget ?? undefined));
 
   const sessionTargetUsable = (t: SessionTarget, model?: string): boolean =>
     t.provider === "anthropic"
       ? pool.canServe(t.accountId, model)
       // Same predicate the OpenAI picker applies, so a session is never pinned
       // to an account the picker would refuse.
-      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a));
+      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a, codexBudget ?? undefined));
 
   /**
    * How full a target's quota is, as the worst of its two windows, and when
@@ -750,6 +770,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           lastSkipReason: ollamaStatus.lastSkipReason,
           lastSkipAt: ollamaStatus.lastSkipAt,
           quota: ollamaQuota?.snapshot(),
+          budget: ollamaBudget ? budgetSnapshot() : null,
           matchedTiers: ollamaConfig.autoTierMap ? tierDiscovery?.ollama() ?? {} : null,
         }
         : { enabled: false },
@@ -1012,7 +1033,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Honour the session pin while that account can still serve; otherwise
       // fall back to plain rotation.
       if (preferredAccountId) {
-        const pinned = openAIAccounts.find(a => a.id === preferredAccountId && canServeOpenAI(a));
+        const pinned = openAIAccounts.find(a => a.id === preferredAccountId && canServeOpenAI(a, codexBudget ?? undefined));
         if (pinned) return pinned;
       }
       return pickOpenAIAccount();
@@ -1136,6 +1157,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         apiKey: () => readOllamaApiKey(ollamaConfig),
         timeoutMs: proxyRequestTimeoutMs,
         matchedTiers: () => tierDiscovery?.ollama() ?? {},
+        ...(ollamaBudget ? { budget: budgetSnapshot } : {}),
       },
     } : {}),
     onOllamaSkip: (reason) => {
@@ -1149,6 +1171,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       }
       ollamaStatus.requests++;
       ollamaStatus.lastServedAt = Date.now();
+      // A completed response is where the provider will have spent its credit:
+      // fold the balance drop since the last reading into today's budget.
+      ollamaBudget?.observe(latestBalance());
       logOllamaFallback(upstreamModel, poolWaitSeconds,
         failedAfterStart ? "— failed mid-response" : clientClosed ? "— client disconnected" : undefined);
       // Its own provider in the history, and never an Anthropic account's
@@ -1348,7 +1373,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
             const fallbackServes = () =>
               (initialConfig.crossProviderFallback === true
                 && Boolean(modelRouting.openAIDefaultModel)
-                && openAIAccounts.some(canServeOpenAI)
+                && openAIAccounts.some(a => canServeOpenAI(a, codexBudget ?? undefined))
                 && codexCanHold(estimated))
               || decideOllamaFallback({
                 config: ollamaConfig,
