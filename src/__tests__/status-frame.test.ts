@@ -104,19 +104,24 @@ describe("planLayout", () => {
   });
 
   it("never spends more than rows - 1 lines, in any pane", () => {
+    // Exhaustive and cheap, as long as violations are collected: one expect()
+    // per case made this sweep alone outlast the 5 s timeout under a loaded suite.
+    const violations: string[] = [];
     for (let rows = 1; rows <= 70; rows++) {
       for (let cols = 1; cols <= 200; cols += 7) {
         for (const accountCount of [0, 1, 5, 12, 40]) {
           for (const region of ["activity", "models"] as const) {
             for (const detailsOpen of [false, true]) {
               const p = planLayout({ rows, cols, accountCount, region, detailsOpen });
-              expect(p.lines, `${cols}x${rows} a=${accountCount} ${region} d=${detailsOpen}`).toBeLessThanOrEqual(p.budget);
-              expect(p.fit).toBe(Math.max(1, cols - 1));
+              const label = `${cols}x${rows} a=${accountCount} ${region} d=${detailsOpen}`;
+              if (p.lines > p.budget) violations.push(`${label}: ${p.lines} lines > budget ${p.budget}`);
+              if (p.fit !== Math.max(1, cols - 1)) violations.push(`${label}: fit ${p.fit}`);
             }
           }
         }
       }
     }
+    expect(violations.slice(0, 5)).toEqual([]);
   });
 
   it("shows the strip, every account and a useful log at 80x20 with five accounts", () => {
@@ -249,27 +254,62 @@ describe("the frame", () => {
       log({ accountId: "한글계정이름이아주긴계정", details: "line\u001b[31mred\u0007 bell" }),
     ];
     const bad = account("rigel", { coolingUntil: NOW + 4 * MIN });
-    // Violations are collected, not asserted one by one: this runs tens of thousands of frames.
+    const datas = [pool(1), pool(5), [bad, ...pool(11)], [] as AccountStat[]].map(a => health(a, logs));
+    const foci = ["logs", "accounts", "models"] as const;
+    // Width-tier edges: each pair straddles a point where the layout changes.
+    const edgeCols = [24, 30, 40, 59, 60, 66, 79, 80, 100, 109, 110, 140, 200];
+    // Violations are collected, not asserted one by one: thousands of frames run here.
     const violations: string[] = [];
-    let frames = 0;
-    for (const accounts of [pool(1), pool(5), [bad, ...pool(11)], [] as AccountStat[]]) {
-      const data = health(accounts, logs);
-      for (let rows = 3; rows <= 60; rows += 1) {
-        for (const cols of [24, 30, 40, 59, 60, 66, 79, 80, 100, 109, 110, 140, 200]) {
-          for (const detailsOpen of [false, true]) {
-            for (const focus of ["logs", "accounts", "models"] as const) {
-              const { lines } = buildFrame(frameInput(data, { cols, rows, detailsOpen, focus }));
-              frames++;
-              const label = `${cols}x${rows} accounts=${accounts.length} ${focus} d=${detailsOpen}`;
-              if (lines.length > rows - 1 || lines.length < 1) violations.push(`${label}: ${lines.length} lines`);
-              for (const l of lines) if (segsWidth(l) > cols - 1) violations.push(`${label}: wide line ${text(l)}`);
-              if (!/CC-Router|CC-R|…/.test(text(lines[0]!))) violations.push(`${label}: strip is not first: ${text(lines[0]!)}`);
-            }
-          }
+    const seen = new Set<string>();
+    const combos = new Set<string>();
+    const check = (data: HealthData, cols: number, rows: number, detailsOpen: boolean, focus: typeof foci[number], tag: string) => {
+      const label = `${cols}x${rows} accounts=${data.accounts.length} ${focus} d=${detailsOpen}${tag}`;
+      if (seen.has(label)) return;
+      seen.add(label);
+      const fixture = datas.indexOf(data);
+      if (fixture >= 0) combos.add(`${fixture} ${focus} ${detailsOpen}`);
+      const { lines } = buildFrame(frameInput(data, { cols, rows, detailsOpen, focus }));
+      if (lines.length > rows - 1 || lines.length < 1) violations.push(`${label}: ${lines.length} lines`);
+      for (const l of lines) if (segsWidth(l) > cols - 1) violations.push(`${label}: wide line ${text(l)}`);
+      if (!/CC-Router|CC-R|…/.test(text(lines[0]!))) violations.push(`${label}: strip is not first: ${text(lines[0]!)}`);
+    };
+
+    // 1. Every height at every edge width, three of the 24 content/focus/details
+    //    combinations per cell, rotated so each combination recurs across sizes.
+    //    (Every combination at every cell was 18k frames, too slow for a loaded suite.)
+    for (let rows = 3; rows <= 60; rows++) {
+      edgeCols.forEach((cols, ci) => {
+        for (let k = 0; k < 3; k++) {
+          const c = ((rows * edgeCols.length + ci) * 3 + k) % 24;
+          check(datas[c % 4]!, cols, rows, c % 8 >= 4, foci[c % 3]!, "");
         }
+      });
+    }
+    // 2. The worst content in full at the small heights, where folding and
+    //    details decisions change from one row to the next.
+    for (let rows = 3; rows <= 24; rows++) {
+      for (const cols of edgeCols) for (const detailsOpen of [false, true]) for (const focus of foci) {
+        check(datas[2]!, cols, rows, detailsOpen, focus, "");
       }
     }
-    expect(frames).toBeGreaterThan(10_000);
+    // 3. A seeded sample of sizes and pool sizes the grid never names.
+    const seed = 0x5eed_cc01;
+    let state = seed;
+    const rnd = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (let i = 0; i < 800; i++) {
+      const n = Math.floor(rnd() * 41);
+      const accounts = Array.from({ length: n }, (_, j) => account(`a${j}`, j % 7 === 3 ? { coolingUntil: NOW + 4 * MIN } : {}));
+      const data = health(accounts, logs);
+      check(data, 24 + Math.floor(rnd() * 237), 3 + Math.floor(rnd() * 78), rnd() < 0.5, foci[Math.floor(rnd() * 3)]!, ` seed=${seed.toString(16)}#${i}`);
+    }
+
+    expect(combos.size).toBe(24);
+    expect(seen.size).toBeGreaterThan(3_500);
     expect(violations.slice(0, 5)).toEqual([]);
   }, 60_000);
 

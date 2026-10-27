@@ -28,6 +28,15 @@ import type { Seg } from "./term-text.js";
 
 const MODEL_VISIBLE_ROWS = 16;
 
+// Built once: Date#toLocale*String builds a new formatter on every call
+// (~44µs), which made a 30-row log cost over 1ms per frame. Same options, same
+// output; the local zone is fixed when the module loads.
+const LOG_TIME = new Intl.DateTimeFormat("en-GB", { hour12: false, hour: "numeric", minute: "numeric", second: "numeric" });
+const DETAIL_TIME = new Intl.DateTimeFormat("en-GB", {
+  hour12: false, year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+
 export type UsageDetailMode = "cache" | "basic" | "none";
 
 export function usageDetailMode(log: LogEntry): UsageDetailMode {
@@ -363,7 +372,7 @@ export function logLine(
   selected: boolean,
   plan: Pick<LayoutPlan, "width" | "fit">,
 ): Seg[] {
-  const time = new Date(log.ts).toLocaleTimeString("en-GB", { hour12: false });
+  const time = LOG_TIME.format(log.ts);
   const isError = log.type === "error";
   const isRefresh = log.type === "refresh";
   const typeColor = isError ? "red" : isRefresh ? "yellow" : "gray";
@@ -430,10 +439,7 @@ function field(label: string, value: string, color = "white"): Seg[] {
 }
 
 export function detailLines(log: LogEntry, fit: number): Seg[][] {
-  const time = new Date(log.ts).toLocaleString("en-GB", {
-    hour12: false, year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
+  const time = DETAIL_TIME.format(log.ts);
   const isError = log.type === "error";
   const statusLabel = log.statusCode === undefined ? "—"
     : log.statusCode === 0 ? "connection error"

@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitForListening } from "./helpers/router-process.js";
 
 it("isolates Fable 429 across the actual proxy, session routing and health endpoint", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cc-router-model-test-"));
@@ -50,13 +51,7 @@ it("isolates Fable 429 across the actual proxy, session routing and health endpo
   child.stderr.on("data", b => { logs += b; });
   const base = `http://127.0.0.1:${port}`;
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => {clearInterval(timer); reject(new Error(logs || "startup timeout"));}, 5000);
-    });
+    await waitForListening(child, () => logs);
     const send = (model: string) => fetch(base + "/v1/messages", {
       method: "POST", headers: {"content-type": "application/json", "x-claude-code-session-id": "same-session"},
       body: JSON.stringify({model, max_tokens: 8, messages: [{role: "user", content: "OK"}]}),
@@ -86,4 +81,4 @@ it("isolates Fable 429 across the actual proxy, session routing and health endpo
     await new Promise<void>(r => upstream.close(() => r()));
     rmSync(dir, {recursive: true, force: true});
   }
-}, 12000);
+});

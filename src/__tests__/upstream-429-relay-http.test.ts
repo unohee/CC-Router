@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitForListening } from "./helpers/router-process.js";
 
 // An upstream plan-limit 429 belongs to one pool account. These tests run the
 // real router in front of a fake upstream that answers per account token, and
@@ -77,13 +78,7 @@ async function withRouter(
   child.stdout.on("data", b => { logs += b; });
   child.stderr.on("data", b => { logs += b; });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     await run({
       // One session throughout: the retry must leave the refusing account even
       // though the session was pinned to it.

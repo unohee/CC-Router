@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { BYTES_PER_TOKEN } from "../providers/openai/context-limits.js";
+import { waitFor, waitForListening } from "./helpers/router-process.js";
 
 // The Ollama fallback spans the cross-provider route, the pool, the /v1 proxy
 // and the health endpoint, so it is exercised through a real server. Both
@@ -193,13 +194,7 @@ async function withRouter(
   };
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     await run({
       send: ({ stream = false, model = "claude-sonnet-4-6", content = "hi", signal } = {}) => fetch(`${base}/v1/messages`, {
         method: "POST", signal: signal ?? AbortSignal.timeout(5000), headers,
@@ -235,7 +230,7 @@ const ENABLED = { enabled: true, model: "glm:cloud", tierMap: { opus: "big:cloud
 it.concurrent("answers from Ollama when the pool is blocked far into the future, without thinking blocks", async () => {
   await withRouter({ anthropic: [limited(7200)], ollamaConfig: ENABLED }, async ({ send, health, ollamaSeen, anthropicSeen, logs, base }) => {
     expect((await send()).status).toBe(429); // upstream's own 429 cools the only account
-    await sleep(50);
+    await waitFor(async () => (await health()).recentLogs.some(l => l.statusCode === 429), "the upstream 429 to be recorded");
 
     const streamed = await send({ stream: true });
     expect(streamed.status).toBe(200);
@@ -279,7 +274,7 @@ it.concurrent("answers from Ollama when the pool is blocked far into the future,
     const history = JSON.stringify(await (await fetch(`${base()}/cc-router/usage-history`, { signal: AbortSignal.timeout(3000) })).json());
     expect(history).toMatch(/"model":"glm:cloud","provider":"ollama"|"provider":"ollama","model":"glm:cloud"/);
   });
-}, 30_000);
+});
 
 it.concurrent("keeps the router's 429 when the reset is near, and does not call Ollama", async () => {
   await withRouter({ anthropic: [limited(30)], ollamaConfig: ENABLED }, async ({ send, health, ollamaSeen }) => {
@@ -293,7 +288,7 @@ it.concurrent("keeps the router's 429 when the reset is near, and does not call 
     expect(ollamaSeen).toHaveLength(0);
     expect((await health()).ollamaFallback.lastSkipReason).toMatch(/^reset-near/);
   });
-}, 30_000);
+});
 
 it.concurrent("falls through to the router's 429 when Ollama refuses before the first byte", async () => {
   await withRouter({
@@ -315,7 +310,7 @@ it.concurrent("falls through to the router's 429 when Ollama refuses before the 
     expect(h.ollamaFallback.requests).toBe(0);
     expect(h.ollamaFallback.lastSkipReason).toMatch(/^ollama-failed \(upstream_status 500/);
   });
-}, 30_000);
+});
 
 it.concurrent("answers count_tokens locally only while requests go to Ollama", async () => {
   await withRouter({ anthropic: [limited(7200)], ollamaConfig: ENABLED }, async ({ send, countTokens, anthropicSeen, ollamaSeen }) => {
@@ -333,7 +328,7 @@ it.concurrent("answers count_tokens locally only while requests go to Ollama", a
     expect(anthropicSeen.filter(u => u.startsWith("/v1/messages/count_tokens"))).toHaveLength(1);
     expect(ollamaSeen).toHaveLength(0);
   });
-}, 30_000);
+});
 
 it.concurrent("never calls Ollama while the feature is disabled", async () => {
   await withRouter({ anthropic: [limited(7200)], ollamaConfig: { ...ENABLED, enabled: false } }, async ({ send, countTokens, health, ollamaSeen }) => {
@@ -346,7 +341,7 @@ it.concurrent("never calls Ollama while the feature is disabled", async () => {
     expect(ollamaSeen).toHaveLength(0);
     expect((await health()).ollamaFallback).toEqual({ enabled: false });
   });
-}, 30_000);
+});
 
 it.concurrent("returns to Anthropic on the first request after the cooldown expires", async () => {
   await withRouter({ anthropic: [limited(3)], ollamaConfig: { ...ENABLED, minWaitSeconds: 0 } }, async ({ send, health, ollamaSeen, anthropicSeen, logs }) => {
@@ -361,11 +356,10 @@ it.concurrent("returns to Anthropic on the first request after the cooldown expi
     expect(((await back.json()) as { content: { text: string }[] }).content[0].text).toBe("from anthropic");
     expect(ollamaSeen).toHaveLength(1);
     expect(anthropicSeen.filter(u => u.startsWith("/v1/messages"))).toHaveLength(2);
-    await sleep(50);
-    expect((await health()).ollamaFallback.serving).toBe(false);
+    await waitFor(async () => (await health()).ollamaFallback.serving === false, "Ollama to stop serving");
     expect(logs()).toContain("serving back on Anthropic");
   });
-}, 30_000);
+});
 
 it.concurrent("falls through to the router's 429 on a refused connection, an empty stream or a dropped socket", async () => {
   const closedPort = await freePort();
@@ -398,7 +392,7 @@ it.concurrent("falls through to the router's 429 on a refused connection, an emp
     expect(ollamaSeen).toHaveLength(2);
     expect((await health()).ollamaFallback.requests).toBe(0);
   });
-}, 30_000);
+});
 
 it.concurrent("counts a stream that Ollama cuts mid-way as an error, after the client got a 200", async () => {
   await withRouter({ anthropic: [limited(7200)], ollama: [{ status: 200, mode: "truncate" }], ollamaConfig: ENABLED }, async ({ send, health }) => {
@@ -409,7 +403,7 @@ it.concurrent("counts a stream that Ollama cuts mid-way as an error, after the c
     const text = await res.text().catch(() => "");
     expect(text).toContain("from ollama");
     expect(text).not.toContain("message_stop");
-    await sleep(50);
+    await waitFor(async () => (await health()).ollamaFallback.errors === 1, "the mid-stream failure to be counted");
     const h = await health();
     expect(h.ollamaFallback).toMatchObject({ requests: 1, errors: 1 });
     expect(h.totalErrors).toBe(before + 1);
@@ -417,7 +411,7 @@ it.concurrent("counts a stream that Ollama cuts mid-way as an error, after the c
     expect(entry.type).toBe("error");
     expect(entry.details).toMatch(/failed mid-response/);
   });
-}, 30_000);
+});
 
 it.concurrent("keeps a conversation known to be too large for the Ollama model on the router's 429", async () => {
   await withRouter({ anthropic: [limited(7200)], ollamaConfig: { ...ENABLED, contextTokens: 100 } }, async ({ send, health, ollamaSeen }) => {
@@ -432,7 +426,7 @@ it.concurrent("keeps a conversation known to be too large for the Ollama model o
     expect((await send()).status).toBe(200);
     expect(ollamaSeen).toHaveLength(1);
   });
-}, 30_000);
+});
 
 it.concurrent("aborts Ollama when the client hangs up, without logging a pool 429 or an Ollama failure", async () => {
   await withRouter({ anthropic: [limited(7200)], ollama: [{ status: 200, mode: "hang" }], ollamaConfig: ENABLED }, async ({ send, health, ollamaSeen, ollamaAbandoned }) => {
@@ -444,14 +438,13 @@ it.concurrent("aborts Ollama when the client hangs up, without logging a pool 42
     while (ollamaSeen.length === 0) await sleep(10);
     controller.abort();
     await pending;
-    await sleep(200);
-    expect(ollamaAbandoned()).toBe(1);
+    await waitFor(() => ollamaAbandoned() === 1, "the router to abandon the Ollama request");
     const after = await health();
     expect(after.recentLogs.filter(l => l.accountId === "pool")).toHaveLength(poolBefore);
     expect(after.totalErrors).toBe(before.totalErrors);
     expect(after.ollamaFallback.lastSkipReason ?? "").not.toMatch(/^ollama-failed/);
   });
-}, 30_000);
+});
 
 it.concurrent("reports a missing Ollama Cloud key on the health endpoint before the pool is blocked", async () => {
   // ollama.com is never contacted: the account is free, so no request reaches the fallback.
@@ -462,4 +455,4 @@ it.concurrent("reports a missing Ollama Cloud key on the health endpoint before 
     expect((await send()).status).toBe(200);
     expect(ollamaSeen).toHaveLength(0);
   });
-}, 30_000);
+});

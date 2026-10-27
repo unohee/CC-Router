@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitForListening } from "./helpers/router-process.js";
 
 // A blocked client must be turned away before the router picks an account, so the
 // proof is on the far side: the fake upstream counts what actually reaches it and
@@ -73,13 +74,7 @@ async function withRouter(config: Record<string, unknown>, run: (ctx: Ctx) => Pr
     { accounts: { id: string; requestCount: number; coolingUntil?: number }[]; recentLogs: { details?: string }[] };
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     await run({
       send: (userAgent, headers = {}) => fetch(`${base}/v1/messages`, {
         method: "POST", signal: AbortSignal.timeout(5000),
@@ -119,7 +114,7 @@ it.concurrent("turns a blocked client away with a 403 that says why, touching no
     expect(acct.coolingUntil ?? 0).toBeLessThanOrEqual(Date.now());
     expect(logs()).toContain('[BLOCKED] omp/: refused a request from "omp/18.9.1"');
   });
-}, 20_000);
+});
 
 it.concurrent("lets Claude Code and other clients through untouched", async () => {
   await withRouter({ blockedUserAgents: ["omp/"] }, async ({ send, upstreamHits, logs }) => {
@@ -129,14 +124,14 @@ it.concurrent("lets Claude Code and other clients through untouched", async () =
     expect(upstreamHits()).toBe(3);
     expect(logs()).not.toContain("[BLOCKED]");
   });
-}, 20_000);
+});
 
 it.concurrent("does nothing unless configured", async () => {
   await withRouter({}, async ({ send, upstreamHits }) => {
     expect((await send("omp/18.9.1")).status).toBe(200);
     expect(upstreamHits()).toBe(1);
   });
-}, 20_000);
+});
 
 it.concurrent("logs a retry storm once instead of once per attempt", async () => {
   await withRouter({ blockedUserAgents: ["omp/"] }, async ({ send, activity, logs }) => {
@@ -144,7 +139,7 @@ it.concurrent("logs a retry storm once instead of once per attempt", async () =>
     expect(logs().match(/\[BLOCKED\]/g)?.length).toBe(1);
     expect((await activity()).filter(d => d.startsWith("blocked client omp/")).length).toBe(1);
   });
-}, 20_000);
+});
 
 it.concurrent("asks for the secret before it reveals what is blocked", async () => {
   await withRouter({ blockedUserAgents: ["omp/"], proxySecret: "s3cret-for-the-test" }, async ({ send, upstreamHits }) => {
@@ -153,17 +148,17 @@ it.concurrent("asks for the secret before it reveals what is blocked", async () 
     expect(authed.status).toBe(403);
     expect(upstreamHits()).toBe(0);
   });
-}, 20_000);
+});
 
 it.concurrent("keeps health reachable for a blocked client, so monitoring that shares its user-agent still works", async () => {
   await withRouter({ blockedUserAgents: ["omp/"] }, async ({ get }) => {
     expect((await get("/cc-router/health", { "user-agent": "omp/18.9.1" })).status).toBe(200);
   });
-}, 20_000);
+});
 
 it.concurrent("ignores an unusable config value instead of blocking everything", async () => {
   await withRouter({ blockedUserAgents: ["", "   ", 5] }, async ({ send, upstreamHits }) => {
     expect((await send("claude-cli/2.1.300")).status).toBe(200);
     expect(upstreamHits()).toBe(1);
   });
-}, 20_000);
+});
