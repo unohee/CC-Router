@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitForListening } from "./helpers/router-process.js";
 
 // The page is mounted ahead of the proxy-secret check because a browser
 // navigation cannot carry an Authorization header. That is only safe if nothing
@@ -39,13 +40,7 @@ it("serves the usage page without the secret while everything else still demands
   const base = `http://127.0.0.1:${port}`;
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     const get = (path: string, init: RequestInit = {}) =>
       fetch(base + path, { signal: AbortSignal.timeout(3000), redirect: "manual", ...init });
 
@@ -73,4 +68,4 @@ it("serves the usage page without the secret while everything else still demands
     if (child.exitCode === null) child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
   }
-}, 20000);
+});

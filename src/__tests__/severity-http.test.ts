@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { computeSeverity } from "../proxy/severity.js";
+import { waitForListening } from "./helpers/router-process.js";
 
 // `/cc-router/health` carries the verdict both status surfaces draw. It has to be
 // right on the wire, from a real router, not only in the pure module: the 429
@@ -92,13 +93,7 @@ async function withRouter(
   const base = `http://127.0.0.1:${port}`;
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     await run({
       send: () => fetch(`${base}/v1/messages`, {
         method: "POST", signal: AbortSignal.timeout(5000),

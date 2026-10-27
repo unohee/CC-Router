@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitFor, waitForListening } from "./helpers/router-process.js";
 
 // The 429 branch lives inside the proxy's response hook, so it can only be
 // exercised by a real request going through a real server. Nothing here touches
@@ -76,13 +77,7 @@ async function withRouter(script: Reply[], run: (ctx: {
   const base = `http://127.0.0.1:${port}`;
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-        else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-      }, 25);
-      const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 8000);
-    });
+    await waitForListening(child, () => logs);
     await run({
       send: (headers = {}) => fetch(`${base}/v1/messages`, {
         method: "POST", signal: AbortSignal.timeout(5000),
@@ -122,7 +117,8 @@ it.concurrent("cools an unexplained 429 for 8s, not a minute, and logs who asked
     expect(cooling).toBeGreaterThanOrEqual(6);
     expect(cooling).toBeLessThanOrEqual(8);
 
-    await sleep(200); // the body line is written on the response's `end`
+    // The body line is written on the response's `end`, after the client already has it.
+    await waitFor(() => logs().includes("upstream said:"), "the 429 diagnostic line");
     const out = logs();
     expect(out).toContain('429 bare#1 cooldown=8s retry-after=absent limit=allowed claim=none');
     expect(out).toContain('session=abcdef01 ua="omp-test-client/0.3"');
@@ -138,7 +134,7 @@ it.concurrent("cools an unexplained 429 for 8s, not a minute, and logs who asked
     expect(res.headers.get("x-should-retry")).toBeNull();
     expect(res.headers.get("anthropic-ratelimit-unified-status")).toBe("allowed");
   });
-}, 20_000);
+});
 
 it.concurrent("keeps the Retry-After upstream stated", async () => {
   await withRouter([{ ...BARE_429, headers: { ...BARE_429.headers, "retry-after": "30" } }], async ({ send, coolingForSeconds, logs }) => {
@@ -148,7 +144,7 @@ it.concurrent("keeps the Retry-After upstream stated", async () => {
     expect(cooling).toBeLessThanOrEqual(30);
     expect(logs()).toContain('429 stated cooldown=30s retry-after="30"');
   });
-}, 20_000);
+});
 
 it.concurrent("keeps the flat minute when upstream names the window that is limiting", async () => {
   await withRouter([{
@@ -160,7 +156,7 @@ it.concurrent("keeps the flat minute when upstream names the window that is limi
     expect(cooling).toBeGreaterThanOrEqual(58);
     expect(logs()).toContain("429 stated cooldown=60s");
   });
-}, 20_000);
+});
 
 it.concurrent("escalates the next unexplained 429 once the account is let back in", async () => {
   await withRouter([BARE_429, BARE_429], async ({ send, coolingForSeconds }) => {
@@ -172,7 +168,7 @@ it.concurrent("escalates the next unexplained 429 once the account is let back i
     expect(cooling).toBeGreaterThan(8);
     expect(cooling).toBeLessThanOrEqual(16);
   });
-}, 30_000);
+});
 
 it.concurrent("starts the schedule over once a request has been served", async () => {
   await withRouter([BARE_429, OK, BARE_429], async ({ send, coolingForSeconds }) => {
@@ -183,4 +179,4 @@ it.concurrent("starts the schedule over once a request has been served", async (
     // Without the reset this would be the second step, 16s.
     expect(await coolingForSeconds()).toBeLessThanOrEqual(8);
   });
-}, 30_000);
+});

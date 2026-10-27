@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, statSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { waitForListening } from "./helpers/router-process.js";
 
 // What matters here is the far side of the proxy: tokens a fake upstream reports
 // must show up in the history the router serves, exactly once per request, keep
@@ -112,13 +113,7 @@ async function startRouter(f: Fixture): Promise<Router> {
   let logs = "";
   child.stdout!.on("data", b => { logs += b; });
   child.stderr!.on("data", b => { logs += b; });
-  await new Promise<void>((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (logs.includes("Listening:")) { clearInterval(timer); clearTimeout(timeout); resolve(); }
-      else if (child.exitCode !== null) { clearInterval(timer); clearTimeout(timeout); reject(new Error(logs)); }
-    }, 25);
-    const timeout = setTimeout(() => { clearInterval(timer); reject(new Error(logs || "startup timeout")); }, 10_000);
-  });
+  await waitForListening(child, () => logs);
   const base = `http://127.0.0.1:${port}`;
   const usage = (query = "", auth = false) => fetch(`${base}/cc-router/usage-history${query}`, {
     signal: AbortSignal.timeout(5000), headers: auth ? { authorization: `Bearer ${SECRET}` } : {},
@@ -190,7 +185,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("agrees with the router's own running totals, which is what the history is meant to extend", async () => {
     const f = await fixture();
@@ -209,7 +204,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("keeps accumulating across a restart, from a file only its owner can read", async () => {
     const f = await fixture();
@@ -236,7 +231,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 40_000);
+  });
 
   it("leaves no sample for a response whose usage it could not read, instead of recording a zero", async () => {
     const f = await fixture();
@@ -253,7 +248,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("exposes only aggregates on a route that needs no secret", async () => {
     const f = await fixture();
@@ -271,7 +266,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("answers in the viewer's time zone, and falls back to UTC — flagged — for one it does not know", async () => {
     const f = await fixture();
@@ -285,7 +280,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("sets a file that is not JSON aside rather than overwrite it, and starts with an empty history", async () => {
     const f = await fixture();
@@ -304,7 +299,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("sets aside a JSON file that is not a usage history just the same", async () => {
     const f = await fixture();
@@ -318,7 +313,7 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 
   it("writes nothing while idle", async () => {
     const f = await fixture();
@@ -331,5 +326,5 @@ describe("usage history through a real router", () => {
       await r.stop();
       await teardown(f);
     }
-  }, 30_000);
+  });
 });
