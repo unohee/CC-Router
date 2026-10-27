@@ -42,6 +42,8 @@ export interface OpenAIActivity {
   path: string;
   statusCode: number;
   durationMs: number;
+  /** Same as durationMs here: these routes log once the response has ended. */
+  totalMs: number;
   source: "cli" | "desktop" | "api";
   sessionId?: string;
 }
@@ -295,11 +297,13 @@ function openAIActivity(req: Request, res: Response, startedAt: number, sessionI
     ? "desktop" as const
     : "api" as const;
 
+  const elapsed = Date.now() - startedAt;
   return {
     method: req.method,
     path: req.path,
     statusCode: res.statusCode,
-    durationMs: Date.now() - startedAt,
+    durationMs: elapsed,
+    totalMs: elapsed,
     source,
     ...(sessionId ? { sessionId } : {}),
   };

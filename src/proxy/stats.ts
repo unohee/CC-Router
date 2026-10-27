@@ -1,3 +1,5 @@
+import { PerfWindow } from "./perf-window.js";
+
 export interface LogEntry {
   ts: number;
   accountId: string;
@@ -5,7 +7,15 @@ export interface LogEntry {
   type: "route" | "refresh" | "error";
   details?: string;
   statusCode?: number;
+  /** For an Anthropic request, time until the response headers arrived; for a
+   *  cross-provider one, until the response finished. See `totalMs`. */
   durationMs?: number;
+  /** Time from receiving the request to the end of the response, on every
+   *  provider. Absent while the response is still streaming, and for one the
+   *  client abandoned. */
+  totalMs?: number;
+  /** The client hung up before the response finished: not an upstream error. */
+  clientClosed?: boolean;
   method?: string;
   path?: string;
   source?: "cli" | "desktop" | "api";
@@ -33,8 +43,11 @@ export class ProxyStats {
   totalOutputTokens = 0;
   readonly startTime = Date.now();
   private logs: LogEntry[] = [];
+  /** The last hour of request entries, for latency and error figures. */
+  readonly perf = new PerfWindow();
 
   addLog(entry: LogEntry): void {
+    this.perf.record(entry);
     this.logs.push(entry);
     if (this.logs.length > MAX_LOG_ENTRIES) this.logs.shift();
   }

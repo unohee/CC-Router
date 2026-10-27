@@ -27,6 +27,7 @@ import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideO
 import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
+import { createUsageSeriesProvider } from "./usage-series.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
@@ -633,7 +634,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // The usage page is mounted ahead of the secret check on purpose; see
   // mountWebDashboard for why that is not an exposure.
-  mountWebDashboard(app, { usage: createUsageSummaryProvider(usageHistory) });
+  mountWebDashboard(app, {
+    usage: createUsageSummaryProvider(usageHistory),
+    series: createUsageSeriesProvider(usageHistory),
+  });
 
   // ─── Proxy auth middleware ─────────────────────────────────────────────────
   // If a proxySecret is configured, all requests must present it as EITHER
@@ -718,6 +722,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       totalOutputTokens: stats.totalOutputTokens,
       accounts: accountViews,
       recentLogs: stats.getRecentLogs(50),
+      // The last hour's latency and error figures. The 50 rows above cover
+      // minutes on a busy pool, too few for a p95.
+      performance: stats.perf.snapshot(Date.now()),
       // The one verdict both status surfaces draw. The 429 count reads the whole
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
@@ -1097,6 +1104,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `session ${sessionId.slice(0, 8)} → ${openAIAccountId} — client disconnected`
           : `session ${sessionId.slice(0, 8)} → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, sessionId,
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1112,6 +1120,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `explicit openai/* → ${openAIAccountId} — client disconnected`
           : `explicit openai/* → ${openAIAccountId}`,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        // A hang-up is neither an error nor a completion in the last-hour figures.
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1158,6 +1168,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           : clientClosed ? `${msg} — client disconnected` : msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
         cacheReadTokens: usage?.cache_read_input_tokens,
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1172,6 +1183,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         details: failedAfterStart ? `${msg} — upstream failed mid-response`
           : clientClosed ? `${msg} — client disconnected` : msg,
         inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens,
+        ...(clientClosed ? { clientClosed: true } : {}),
         ...activity,
       });
     },
@@ -1386,6 +1398,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
         const entry = pendingLog as LogEntry;
         stats.addLog(entry);
+        // durationMs above stops at the headers; a streamed answer takes far
+        // longer than that to finish, and the latency figures need the finish.
+        // A response the client abandoned never ends, and keeps no total.
+        const startedAt = (req as Request)._startTime;
+        if (startedAt) proxyRes.once("end", () => { entry.totalMs = Date.now() - startedAt; });
 
         // ── Capture token usage from Anthropic response body ─────────────────
         // SSE streams carry usage across two events:
