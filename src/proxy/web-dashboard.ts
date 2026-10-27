@@ -168,7 +168,7 @@ dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .chart .base{stroke:var(--muted);stroke-width:1}
 .chart .selcol{fill:var(--sel)}
 .chart .s0,.sw .s0{fill:var(--s0)}.chart .s1,.sw .s1{fill:var(--s1)}.chart .s2,.sw .s2{fill:var(--s2)}.chart .s3,.sw .s3{fill:var(--s3)}
-.chart .so:not([fill]),.sw .so:not([fill]),.texture-base{fill:var(--so)}
+.chart .so:not([fill]),.sw .so:not([fill]){fill:var(--so)}
 .chart .s4,.sw .s4{fill:var(--s4)}.chart .s5,.sw .s5{fill:var(--s5)}.chart .s6,.sw .s6{fill:var(--s6)}.chart .s7,.sw .s7{fill:var(--s7)}
 .texture-line{stroke:var(--surface)}
 .model-name{overflow-wrap:anywhere;min-width:0}
@@ -318,7 +318,7 @@ const BODY = String.raw`
           <ul id="mixlist" class="mlist"></ul>
         </section>
       </div>
-      <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI input counts include cached tokens, so the cache ratio covers Claude accounts only.</p>
+      <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI rows recorded since 27 Oct 2026 split cached input out; earlier OpenAI rows count it inside input. Because the two cannot be told apart, the cache ratio covers Claude accounts only.</p>
     </section>
     <section class="card" aria-labelledby="log-h">
       <div class="cardhead"><h2 id="log-h">Recent activity</h2><span id="logsum" class="sum"></span></div>

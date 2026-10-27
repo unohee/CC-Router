@@ -1,4 +1,5 @@
 import express from "express";
+import type { BridgeUsage } from "../protocol/openai-usage.js";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { ServerResponse } from "http";
 import { timingSafeEqual } from "crypto";
@@ -997,7 +998,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // OpenAI responses never pass the Anthropic proxy middleware, so their
   // usage has to be folded into the aggregates here or the totals only ever
   // count one provider.
-  const recordOpenAIUsage = (usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number } | undefined, model: string): void => {
+  const recordOpenAIUsage = (usage: BridgeUsage | undefined, model: string): void => {
     if (!usage) return;
     stats.totalInputTokens += usage.input_tokens;
     stats.totalCacheReadTokens += usage.cache_read_input_tokens ?? 0;

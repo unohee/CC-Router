@@ -220,8 +220,8 @@ export function summarizeUsage(
   const rest = ranked.slice(modelLimit);
   const restTotal = rest.reduce((n, g) => n + g.t.total, 0);
 
-  // Anthropic only: OpenAI rows carry no cache fields and their input already
-  // includes cached tokens, so mixing them in would understate the ratio.
+  // Anthropic only: OpenAI rows recorded before 2026-10-27 count cached tokens
+  // inside input, and history cannot tell those rows from newer split ones.
   const cacheDenominator = anthropic.cacheRead + anthropic.cacheCreation + anthropic.input;
 
   let busiest: { date: string; total: number } | null = null;

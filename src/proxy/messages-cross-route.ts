@@ -19,6 +19,7 @@ import {
   type PinBlock, type CompactAskGuard,
 } from "./session-migration.js";
 import type { SessionContextTracker } from "./session-context-tracker.js";
+import type { BridgeUsage } from "../protocol/openai-usage.js";
 import type { AnthropicMessagesRequest } from "../protocol/anthropic-types.js";
 import type { OpenAIFunctionCall, OpenAIResponseCompleted, OpenAIResponseOutputItem } from "../protocol/openai-responses-types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -170,11 +171,7 @@ export interface MessagesCrossProviderRouteOptions {
   onOllamaSkip?: (reason: string) => void;
 }
 
-export interface OpenAIUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens?: number;
-}
+export type OpenAIUsage = BridgeUsage;
 
 /** Raised when an HTTP 200 stream carries a failure before any byte reached the client. */
 class UpstreamStreamFailure extends Error {}
@@ -975,9 +972,11 @@ export function mountMessagesCrossProviderRoute(
           /* publicModel */ req.body.model,
           sessionId,
         );
+        // Remember only an account that served the whole turn; a refusal or a
+        // mid-stream failure must leave rotation free to try another account.
+        if (sessionId) fallbackAccounts.delete(sessionId);
         if (outcome.ok) {
-          if (sessionId) {
-            fallbackAccounts.delete(sessionId);
+          if (sessionId && !outcome.failedAfterStart) {
             fallbackAccounts.set(sessionId, outcome.account.id);
             if (fallbackAccounts.size > 10_000) fallbackAccounts.delete(fallbackAccounts.keys().next().value!);
           }

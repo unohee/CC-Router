@@ -12,6 +12,8 @@
  * wrong for everyone not on the server's clock.
  */
 
+import type { BridgeUsage } from "../protocol/openai-usage.js";
+
 export type UsageProvider = "anthropic" | "openai" | "ollama";
 
 export const HOUR_MS = 3_600_000;
@@ -236,7 +238,7 @@ export class UsageHistory {
  * Historical rows recorded before this split cannot be backfilled.
  */
 export function openAISample(
-  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number } | undefined,
+  usage: BridgeUsage | undefined,
   model: unknown,
   ts: number,
 ): UsageSample | null {
