@@ -39,6 +39,7 @@ import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/a
 import { resolveCodexFiveHourBudget } from "../providers/openai/five-hour-budget.js";
 import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../providers/openai/context-limits.js";
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
+import { startCodexUsageLoop } from "../providers/openai/usage-probe.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
@@ -626,6 +627,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   startRefreshLoop(accounts);
   startOpenAIRefreshLoop(openAIAccounts, saveOpenAIAccounts);
+  startCodexUsageLoop(openAIAccounts);
 
   // Tier matching — opt-in per provider. Fills tiers the configured maps leave
   // unset, so the top tier (opus, and the advisor's fable) reaches each
