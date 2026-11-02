@@ -1004,6 +1004,18 @@ describe("dashboard activity chart", () => {
     expect(page.el("acttot").textContent).toContain("cache hit 96%");
   });
 
+  it("lists in the legend only the models used inside the range being drawn", async () => {
+    const data = usageSeries();
+    // gpt-6-luna (index 2) has no tokens in this range; its colour slot is still kept.
+    const page = await boot(ok(health([account()])), ok(usageSummary()), ok(usageSeries({
+      points: data.points.map(p => ({ ...p, requests: [p.requests[0], p.requests[1], 0], output: [p.output[0], p.output[1], 0], total: [p.total[0], p.total[1], 0] })),
+    })));
+    const legend = page.rows("actlegend");
+    expect(legend).toHaveLength(2);
+    expect(legend.join(" ")).not.toContain("gpt-6-luna");
+    expect(legend[1]).toContain("gpt-6.1-sol (OpenAI)");
+  });
+
   it("reads one hour at a time from the keyboard, and says when the newest one is still going", async () => {
     const page = await boot(ok(health([account()])));
     key(page, "End");
