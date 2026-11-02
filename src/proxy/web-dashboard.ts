@@ -1416,7 +1416,8 @@ const SCRIPT = String.raw`
     // Series are fixed over the 30-day ranking so colours hold across ranges; the
     // legend lists only those with use inside the range being drawn.
     var kids = d.series.map(function (x, k) {
-      if (!(sums[k] > 0)) return null;
+      // Same rule as the model list: nothing that would print as 0%.
+      if (!(sums[k] > 0) || Math.round(sums[k] / all * 100) === 0) return null;
       var li = el("li", "lrow");
       var swatch = svg("svg", "sw", { width: 10, height: 10, "aria-hidden": "true" });
       var tile = svg("rect", seriesClass(d, k), { width: 10, height: 10 });
