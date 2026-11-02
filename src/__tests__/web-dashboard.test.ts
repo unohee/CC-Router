@@ -1016,6 +1016,17 @@ describe("dashboard activity chart", () => {
     expect(legend[1]).toContain("gpt-6.1-sol (OpenAI)");
   });
 
+  it("drops from the legend a model whose share of the measure would print as 0%", async () => {
+    const page = await boot(ok(health([account()])));
+    // By requests gpt-6-luna is a few percent; by all tokens it is ~0.2%.
+    expect(page.rows("actlegend").join(" ")).toContain("gpt-6-luna");
+    press(page, "m-total");
+    const legend = page.rows("actlegend");
+    expect(legend).toHaveLength(2);
+    expect(legend.join(" ")).not.toContain("gpt-6-luna");
+    expect(legend.join(" ")).not.toMatch(/ 0%/);
+  });
+
   it("reads one hour at a time from the keyboard, and says when the newest one is still going", async () => {
     const page = await boot(ok(health([account()])));
     key(page, "End");

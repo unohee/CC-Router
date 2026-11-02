@@ -273,6 +273,17 @@ describe("models", () => {
     expect(m.others).toBeNull();
   });
 
+  it("leaves out a model whose share would print as 0%, even with some tokens", () => {
+    const m = summarizeUsage(src([
+      bucket("2026-10-16T10:00:00Z", { model: "main", input: 9_960, requests: 9 }),
+      bucket("2026-10-16T10:00:00Z", { model: "half", input: 50, requests: 1 }),
+      bucket("2026-10-16T10:00:00Z", { model: "speck", input: 40, requests: 1 }),
+    ]), { now: NOW }).models;
+    // 50 / 10_050 ≈ 0.5% prints as 0%; 40 / 10_050 ≈ 0.4% as well.
+    expect(m.rows.map(r => r.model)).toEqual(["main"]);
+    expect(m.others).toBeNull();
+  });
+
   it("only looks at the rolling 30 days", () => {
     const m = summarizeUsage(src([bucket("2026-09-01T10:00:00Z", { model: "old", input: 5 })]), { now: NOW }).models;
     expect(m.rows).toEqual([]);

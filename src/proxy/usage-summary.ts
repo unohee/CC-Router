@@ -214,11 +214,12 @@ export function summarizeUsage(
     if (!g) { g = { model: b.model, provider: b.provider, t: emptyTotals() }; grouped.set(key, g); }
     add(g.t, b);
   }
-  // A model with requests but no tokens in the window would show as 0%: leave it out.
-  const ranked = [...grouped.values()]
-    .filter(g => g.t.total > 0)
-    .sort((a, b) => b.t.total - a.t.total || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0));
   const share = (n: number): number => (detailTotals.total > 0 ? n / detailTotals.total : 0);
+  // A model whose share the page would print as 0% (it rounds to whole percent)
+  // only clutters the list: leave it out, along with models that used no tokens.
+  const ranked = [...grouped.values()]
+    .filter(g => g.t.total > 0 && Math.round(share(g.t.total) * 100) > 0)
+    .sort((a, b) => b.t.total - a.t.total || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0));
   const top = ranked.slice(0, modelLimit);
   const rest = ranked.slice(modelLimit);
   const restTotal = rest.reduce((n, g) => n + g.t.total, 0);
