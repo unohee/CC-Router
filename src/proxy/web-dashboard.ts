@@ -1413,7 +1413,10 @@ const SCRIPT = String.raw`
   function renderLegend(d) {
     var sums = d.series.map(function () { return 0; }), all = 0;
     d.points.forEach(function (p) { p[A.metric].forEach(function (v, k) { sums[k] += v; all += v; }); });
+    // Series are fixed over the 30-day ranking so colours hold across ranges; the
+    // legend lists only those with use inside the range being drawn.
     var kids = d.series.map(function (x, k) {
+      if (!(sums[k] > 0)) return null;
       var li = el("li", "lrow");
       var swatch = svg("svg", "sw", { width: 10, height: 10, "aria-hidden": "true" });
       var tile = svg("rect", seriesClass(d, k), { width: 10, height: 10 });
@@ -1428,7 +1431,7 @@ const SCRIPT = String.raw`
       li.appendChild(name);
       li.appendChild(el("span", "lval", num(sums[k]) + (all > 0 ? " · " + pct(sums[k] / all) : "")));
       return li;
-    });
+    }).filter(Boolean);
     if (kids.length === 0) kids.push(el("li", "note", "No model has been used yet."));
     var list = $("actlegend");
     list.replaceChildren.apply(list, kids);

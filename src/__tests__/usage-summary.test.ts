@@ -264,6 +264,15 @@ describe("models", () => {
     expect(m.rows.map(r => r.model)).toEqual(["a", "b"]);
   });
 
+  it("leaves out a model that has requests but no tokens, so it never shows as 0%", () => {
+    const m = summarizeUsage(src([
+      bucket("2026-10-16T10:00:00Z", { model: "used", input: 10, requests: 1 }),
+      bucket("2026-10-16T10:00:00Z", { model: "silent", input: 0, requests: 4 }),
+    ]), { now: NOW }).models;
+    expect(m.rows.map(r => r.model)).toEqual(["used"]);
+    expect(m.others).toBeNull();
+  });
+
   it("only looks at the rolling 30 days", () => {
     const m = summarizeUsage(src([bucket("2026-09-01T10:00:00Z", { model: "old", input: 5 })]), { now: NOW }).models;
     expect(m.rows).toEqual([]);
