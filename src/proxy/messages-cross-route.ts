@@ -1011,6 +1011,7 @@ export function mountMessagesCrossProviderRoute(
             apiKey: ollama.apiKey(),
             upstreamModel: decision.model,
             publicModel: req.body.model ?? route.publicModel,
+            effort: decision.effort,
             body: req.body as unknown as Record<string, unknown>,
             timeoutMs: ollama.timeoutMs,
             fetchImpl: ollama.fetchImpl,

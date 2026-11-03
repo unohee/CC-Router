@@ -26,7 +26,7 @@ import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../confi
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
 import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
-import { OllamaDailyBudget, resolveOllamaDailyBudgetConfig } from "../providers/ollama/daily-budget.js";
+import { OllamaDailyBudget, budgetBalanceOf, resolveOllamaDailyBudgetConfig } from "../providers/ollama/daily-budget.js";
 
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
@@ -364,12 +364,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     }
   }
   /** The latest balance the monitor has, as the budget wants it. */
-  const latestBalance = () => {
-    const snap = ollamaQuota?.snapshot();
-    return snap?.status === "known" && snap.balance && snap.resetsAt !== null && snap.checkedAt !== null
-      ? { includedUsd: snap.balance.includedUsd, resetsAt: snap.resetsAt, checkedAt: snap.checkedAt }
-      : null;
-  };
+  const latestBalance = () => budgetBalanceOf(ollamaQuota?.snapshot());
   /** Latest budget verdict as health wants it. */
   const budgetSnapshot = () => ollamaBudget?.verdict(latestBalance()) ?? null;
 
@@ -756,6 +751,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         ? {
           enabled: true,
           model: ollamaConfig.model || null,
+          tierMap: ollamaConfig.tierMap,
+          tierEffort: ollamaConfig.tierEffort,
           baseUrl: ollamaConfig.baseUrl,
           minWaitSeconds: ollamaConfig.minWaitSeconds,
           // Readiness, so a missing key shows before the pool is blocked. The

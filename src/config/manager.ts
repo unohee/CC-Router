@@ -218,6 +218,8 @@ export function saveOpenAIAccounts(accounts: OpenAISubscriptionAccount[]): void 
  */
 /** See ProxyConfig.ollamaFallback. Read through resolveOllamaFallbackConfig,
  *  which applies the defaults and coerces hand-edited values. */
+export type OllamaEffort = "off" | "low" | "medium" | "high";
+
 export interface OllamaFallbackConfig {
   enabled: boolean;
   baseUrl?: string;
@@ -228,6 +230,10 @@ export interface OllamaFallbackConfig {
   /** Upstream model used when the request's Claude tier is not in `tierMap`. */
   model: string;
   tierMap?: { opus?: string; sonnet?: string; haiku?: string };
+  /** Reasoning effort per Claude tier, applied to the Ollama request. "off"
+   *  disables thinking; a level turns thinking on and passes the level as
+   *  output_config.effort. Unset tiers keep the client's own thinking settings. */
+  tierEffort?: { opus?: OllamaEffort; sonnet?: OllamaEffort; haiku?: OllamaEffort };
   /** Fill tiers `tierMap` leaves unset from the live Ollama Cloud catalog
    *  (providers/tier-matching.ts). Off unless true. */
   autoTierMap?: boolean;

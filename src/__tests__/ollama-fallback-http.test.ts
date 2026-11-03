@@ -276,6 +276,29 @@ it.concurrent("answers from Ollama when the pool is blocked far into the future,
   });
 });
 
+it.concurrent("sends one model for every tier with that tier's effort, and reports the map in health", async () => {
+  const config = {
+    enabled: true, model: "deepseek-v4.1-flash:cloud",
+    tierEffort: { opus: "high", sonnet: "medium", haiku: "off" },
+  };
+  await withRouter({ anthropic: [limited(7200)], ollamaConfig: config }, async ({ send, health, ollamaSeen }) => {
+    expect((await send()).status).toBe(429);
+    await waitFor(async () => (await health()).recentLogs.some(l => l.statusCode === 429), "the upstream 429 to be recorded");
+    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+      const res = await send({ model });
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    expect(ollamaSeen.map(s => s.body["model"])).toEqual(Array(3).fill("deepseek-v4.1-flash:cloud"));
+    expect(ollamaSeen.map(s => (s.body["output_config"] as { effort?: string } | undefined)?.effort))
+      .toEqual(["high", "medium", undefined]);
+    expect(ollamaSeen.map(s => (s.body["thinking"] as { type: string }).type)).toEqual(["enabled", "enabled", "disabled"]);
+    expect((await health()).ollamaFallback).toMatchObject({
+      model: "deepseek-v4.1-flash:cloud", tierEffort: { opus: "high", sonnet: "medium", haiku: "off" },
+    });
+  });
+});
+
 it.concurrent("keeps the router's 429 when the reset is near, and does not call Ollama", async () => {
   await withRouter({ anthropic: [limited(30)], ollamaConfig: ENABLED }, async ({ send, health, ollamaSeen }) => {
     expect((await send()).status).toBe(429);

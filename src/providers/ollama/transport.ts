@@ -1,4 +1,5 @@
 import type { Response as ExpressResponse } from "express";
+import type { OllamaEffort } from "../../config/manager.js";
 
 /**
  * Sends an Anthropic Messages request to an Ollama endpoint and relays the
@@ -38,6 +39,8 @@ export interface OllamaForwardOptions {
   upstreamModel: string;
   /** Model name reported to the client: the Claude name it asked for. */
   publicModel: string;
+  /** Tier effort to impose (see applyOllamaEffort); absent leaves the body's own. */
+  effort?: OllamaEffort;
   body: Record<string, unknown>;
   /** Inactivity timeout: the longest wait for the response headers or for the
    *  next body chunk. Not a total deadline, matching the Anthropic path, whose
@@ -45,6 +48,37 @@ export interface OllamaForwardOptions {
    *  streaming is never cut. */
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+}
+
+/**
+ * Imposes a tier's reasoning effort on an outgoing Anthropic body.
+ *
+ * Measured against Ollama Cloud deepseek-v4.1-flash (2026-11-03): only
+ * `thinking: {type: "disabled"}` changes the answer measurably (no thinking at
+ * all). Effort levels are accepted but low and high produced overlapping
+ * thinking lengths, so a level is passed as `output_config.effort` with
+ * thinking switched on, ready for when the upstream honours it.
+ */
+export function applyOllamaEffort(body: Record<string, unknown>, effort: OllamaEffort | undefined): Record<string, unknown> {
+  if (!effort) return body;
+  const outputConfig = isRecord(body["output_config"]) ? { ...body["output_config"] } : {};
+  if (effort === "off") {
+    delete outputConfig["effort"];
+    const next: Record<string, unknown> = { ...body, thinking: { type: "disabled" } };
+    if (Object.keys(outputConfig).length > 0) next["output_config"] = outputConfig;
+    else delete next["output_config"];
+    return next;
+  }
+  const current = body["thinking"];
+  // Keep the client's own enabled/adaptive thinking (its budget included);
+  // otherwise switch it on with a budget the request's max_tokens can hold.
+  const thinkingOn = isRecord(current) && (current["type"] === "enabled" || current["type"] === "adaptive");
+  const maxTokens = num(body["max_tokens"]);
+  const thinking = thinkingOn ? current : {
+    type: "enabled",
+    budget_tokens: Math.max(1024, Math.min(16_384, (maxTokens ?? 32_000) - 1)),
+  };
+  return { ...body, thinking, output_config: { ...outputConfig, effort } };
 }
 
 const STRIPPED_BLOCK_TYPES = new Set(["thinking", "redacted_thinking"]);
@@ -260,7 +294,7 @@ export async function forwardToOllama(
       upstream = await fetchImpl(`${opts.baseUrl}/v1/messages`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ ...opts.body, model: opts.upstreamModel }),
+        body: JSON.stringify({ ...applyOllamaEffort(opts.body, opts.effort), model: opts.upstreamModel }),
         signal,
       });
       idle.arm();
