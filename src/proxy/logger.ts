@@ -1,9 +1,9 @@
 import chalk from "chalk";
 import { CODEX_SESSION_CEILING } from "../providers/openai/context-limits.js";
 
-function ts(): string {
-  return new Date().toISOString().slice(11, 19); // HH:MM:SS
-}
+// Lines carry no time of their own: the running router stamps every line it
+// prints with the date and time (see log-stamp.ts), so a stamp here would be a
+// second, dateless one.
 
 export function logRoute(
   accountId: string,
@@ -13,8 +13,7 @@ export function logRoute(
   pinnedSessionId?: string,
 ): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.green(` → ${accountId}`) +
+    chalk.green(`→ ${accountId}`) +
     chalk.gray(` req#${requestCount}`) +
     chalk.yellow(` exp=${expiresInMin}min`) +
     (pinnedSessionId ? chalk.cyan(` pin=${pinnedSessionId.slice(0, 8)}`) : "")
@@ -31,8 +30,7 @@ export function logRoute(
  */
 export function logOpenAIRoute(accountId: string, model: string, note?: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.cyan(` ⇢ ${accountId}`) +
+    chalk.cyan(`⇢ ${accountId}`) +
     chalk.gray(` ${model}`) +
     (note ? chalk.cyan(` ${note}`) : "")
   );
@@ -40,8 +38,7 @@ export function logOpenAIRoute(accountId: string, model: string, note?: string):
 
 export function logFallback(accountId: string, model: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.magenta(` ⇄ FALLBACK → ${accountId}`) +
+    chalk.magenta(`⇄ FALLBACK → ${accountId}`) +
     chalk.gray(` (Anthropic exhausted, model=${model})`)
   );
 }
@@ -55,8 +52,7 @@ export function logFallback(accountId: string, model: string): void {
  */
 export function logSessionRepin(sessionId: string, accountId: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.yellow(` ⤳ repin ${sessionId.slice(0, 8)} → ${accountId}`) +
+    chalk.yellow(`⤳ repin ${sessionId.slice(0, 8)} → ${accountId}`) +
     chalk.gray(" (OpenAI account refused the session)")
   );
 }
@@ -70,8 +66,7 @@ export function logSessionRepin(sessionId: string, accountId: string): void {
  */
 export function logSessionOutgrewCodex(sessionId: string, estimatedTokens: number): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.yellow(` ⤳ ${sessionId.slice(0, 8)} outgrew Codex`) +
+    chalk.yellow(`⤳ ${sessionId.slice(0, 8)} outgrew Codex`) +
     chalk.gray(` (~${Math.round(estimatedTokens / 1_000)}K tokens > ${CODEX_SESSION_CEILING / 1_000}K ceiling)`)
   );
 }
@@ -88,8 +83,7 @@ export function logSessionMove(
   sessionId: string, fromAccountId: string, toAccountId: string, estimatedTokens: number,
 ): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.yellow(` ⇄ ${sessionId.slice(0, 8)} ${fromAccountId} → ${toAccountId}`) +
+    chalk.yellow(`⇄ ${sessionId.slice(0, 8)} ${fromAccountId} → ${toAccountId}`) +
     chalk.gray(` (re-writing ~${Math.round(estimatedTokens / 1_000)}K tokens of context)`)
   );
 }
@@ -108,8 +102,7 @@ export function logSessionCompaction(
   sessionId: string, fromTokens: number, toTokens: number,
 ): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.cyan(` ✂ ${sessionId.slice(0, 8)} compacted`) +
+    chalk.cyan(`✂ ${sessionId.slice(0, 8)} compacted`) +
     chalk.gray(` (~${Math.round(fromTokens / 1_000)}K → ~${Math.round(toTokens / 1_000)}K)`)
   );
 }
@@ -121,23 +114,22 @@ export function logSessionCompaction(
  */
 export function logSessionReassign(sessionId: string, from: string, to: string, why: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.yellow(` ⤳ reassign ${sessionId.slice(0, 8)} ${from} → ${to}`) +
+    chalk.yellow(`⤳ reassign ${sessionId.slice(0, 8)} ${from} → ${to}`) +
     chalk.gray(` (${why})`)
   );
 }
 
 export function logRefresh(accountId: string, ok: boolean, expiresInMin?: number): void {
   if (ok) {
-    console.log(chalk.yellow(`[${ts()}] [REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));
+    console.log(chalk.yellow(`[REFRESH] ${accountId}: OK — expires in ${expiresInMin}min`));
   } else {
-    console.log(chalk.red(`[${ts()}] [REFRESH] ${accountId}: FAILED`));
+    console.log(chalk.red(`[REFRESH] ${accountId}: FAILED`));
   }
 }
 
 export function logError(accountId: string, status: number, message: string): void {
   const statusStr = status > 0 ? ` HTTP ${status}` : "";
-  console.log(chalk.red(`[${ts()}] [ERROR] ${accountId}:${statusStr} ${message}`));
+  console.log(chalk.red(`[ERROR] ${accountId}:${statusStr} ${message}`));
 }
 
 /** What the router knew about one upstream 429, gathered at header time. */
@@ -186,7 +178,7 @@ export function format429Diagnostic(d: Refusal429Diagnostic): string {
 }
 
 export function log429Diagnostic(d: Refusal429Diagnostic): void {
-  console.log(chalk.red(`[${ts()}] [429] ${d.accountId}: ${format429Diagnostic(d)}`));
+  console.log(chalk.red(`[429] ${d.accountId}: ${format429Diagnostic(d)}`));
 }
 
 export interface StartupAccountCounts {
@@ -224,7 +216,7 @@ export function logStartup(port: number, host: string, mode: string, target: str
 export function logBlockedClient(pattern: string, userAgent: string | undefined, suppressed: number): void {
   const ua = (userAgent ?? "none").replace(/[^\x20-\x7e]/g, "?").slice(0, 80);
   console.log(
-    chalk.yellow(`[${ts()}] [BLOCKED] ${pattern}: refused a request from "${ua}"`)
+    chalk.yellow(`[BLOCKED] ${pattern}: refused a request from "${ua}"`)
     + (suppressed > 0 ? chalk.gray(` (+${suppressed} more since the last line)`) : "")
   );
 }
@@ -232,8 +224,7 @@ export function logBlockedClient(pattern: string, userAgent: string | undefined,
 /** A request answered by the Ollama fallback. */
 export function logOllamaFallback(model: string, poolWaitSeconds: number, note?: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
-    chalk.magenta(` ⇄ OLLAMA → ${model}`) +
+    chalk.magenta(`⇄ OLLAMA → ${model}`) +
     chalk.gray(` (Anthropic blocked for ${poolWaitSeconds}s)`) +
     (note ? chalk.yellow(` ${note}`) : "")
   );
@@ -245,10 +236,9 @@ export function logOllamaFallback(model: string, poolWaitSeconds: number, note?:
  */
 export function logOllamaTransition(to: "ollama" | "anthropic", detail: string): void {
   console.log(
-    chalk.gray(`[${ts()}]`) +
     (to === "ollama"
-      ? chalk.magenta(` ⇄ serving switched to Ollama`)
-      : chalk.green(` ⇄ serving back on Anthropic`)) +
+      ? chalk.magenta(`⇄ serving switched to Ollama`)
+      : chalk.green(`⇄ serving back on Anthropic`)) +
     chalk.gray(` (${detail})`)
   );
 }
@@ -285,5 +275,5 @@ export function formatThrottleWait(w: ThrottleWaitLine): string {
 }
 
 export function logThrottleWait(w: ThrottleWaitLine): void {
-  console.log(chalk.gray(`[${ts()}]`) + chalk.yellow(` ⏳ ${formatThrottleWait(w)}`));
+  console.log(chalk.yellow(`⏳ ${formatThrottleWait(w)}`));
 }
