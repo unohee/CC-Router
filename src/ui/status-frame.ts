@@ -175,7 +175,7 @@ function windowCell(
 
   if (!r.ok) {
     // No figure is shown as a figure: an unmeasured window is not 0 %. A 7-day window
-    // upstream never reports (a Teams seat has only the 5-hour limit) is said to be
+    // upstream never reports (some plans have had only the 5-hour limit) is said to be
     // absent rather than unread; the claim is about what was reported, not the plan.
     const absent = key === "sevenDay" && a.weeklyWindow === "not-reported";
     const note = tier.bar > 0 ? (absent ? "no 7d window" : READING_NOTE[r.note] ?? r.note) : "—";

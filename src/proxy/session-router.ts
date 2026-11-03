@@ -1,3 +1,5 @@
+import { NO_PACE, weeklyPace, type WeeklyPace, type WeeklyPaceConfig } from "./weekly-pace.js";
+
 /** A routable destination for one Claude Code session. */
 export interface SessionTarget {
   provider: "anthropic" | "openai";
@@ -27,10 +29,13 @@ export interface TargetMetrics {
    *  ranking must compare every target on the same window. Absent means rank by
    *  `util`/`resetAtSec`. The soft-cap check always uses `util`. */
   pace?: { util: number; resetAtSec?: number };
+  /** The 7-day window, for weekly pacing. Absent means no weekly window is
+   *  known, which reads as on pace. */
+  weekly?: { util: number; resetAtSec?: number };
 }
 
 /** Why an existing session left its target. */
-export type ReassignReason = "unservable" | "soft-cap";
+export type ReassignReason = "unservable" | "soft-cap" | "weekly-pace";
 
 export interface SessionRouterOptions {
   /** How long an unused assignment survives. Default 1 hour. */
@@ -44,6 +49,12 @@ export interface SessionRouterOptions {
    * exactly as it was. See `resolve` for why this is a preference, not a ban.
    */
   softCapUtil?: number;
+  /**
+   * Weekly pacing (opt-in). Seats spending their 7-day window faster than the
+   * week elapses take new sessions only after on-pace seats, and a pin on a
+   * seat far ahead moves to an on-pace seat. Pace never makes a seat unusable.
+   */
+  weeklyPace?: WeeklyPaceConfig;
   /** Fired when an existing session is moved to a different target. */
   onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget; reason: ReassignReason }) => void;
   /** Fired whenever the assignment set changes, so it can be persisted. */
@@ -63,6 +74,9 @@ const UNOPENED_WINDOW_MIN = 5 * 60;
  *  kept: the quota is about to refill, and moving would pay a full cache
  *  rewrite to avoid a few minutes on a hot account. */
 const SOFT_CAP_GRACE_MIN = 15;
+/** Seats within this much of the least-ahead seat count as tied when every
+ *  usable seat is ahead of pace, so placement still spreads across them. */
+const PACE_TIE = 0.02;
 /** Floor on time-to-reset, so a window seconds from rolling over does not
  *  score as unbounded capacity. */
 const MIN_TTR_MIN = 5;
@@ -97,6 +111,7 @@ export class SessionRouter {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly softCapUtil: number | null;
+  private readonly weeklyPace: WeeklyPaceConfig | null;
   private readonly onReassign?: SessionRouterOptions["onReassign"];
   private readonly onAssignmentsChanged?: SessionRouterOptions["onAssignmentsChanged"];
 
@@ -105,6 +120,7 @@ export class SessionRouter {
     this.now = opts.now ?? (() => Date.now());
     const cap = opts.softCapUtil;
     this.softCapUtil = typeof cap === "number" && cap > 0 && cap < 1 ? cap : null;
+    this.weeklyPace = opts.weeklyPace ?? null;
     this.onReassign = opts.onReassign;
     this.onAssignmentsChanged = opts.onAssignmentsChanged;
   }
@@ -144,22 +160,29 @@ export class SessionRouter {
       if (!this.overSoftCap(existing.target, utilOf)
         || this.resetsWithin(existing.target, SOFT_CAP_GRACE_MIN, utilOf)
         || !candidates.some(c => this.softCapRelief(c, existing.target, isUsable, utilOf))) {
-        existing.lastSeen = this.now();
-        // Refreshing the timestamp is itself a change worth persisting: a busy
-        // long-lived session never re-assigns, so without this its snapshot
-        // keeps the timestamp of its first request and restores as expired.
-        this.onAssignmentsChanged?.();
-        return existing.target;
+        if (!this.shouldLeaveForPace(existing.target, candidates, isUsable, utilOf)) {
+          existing.lastSeen = this.now();
+          // Refreshing the timestamp is itself a change worth persisting: a busy
+          // long-lived session never re-assigns, so without this its snapshot
+          // keeps the timestamp of its first request and restores as expired.
+          this.onAssignmentsChanged?.();
+          return existing.target;
+        }
+        reason = "weekly-pace";
+      } else {
+        reason = "soft-cap";
       }
-      reason = "soft-cap";
     }
 
     // A soft-cap move stays within the provider: the session's cache is lost
     // either way, but switching the model that answers mid-conversation is a
     // bigger disruption than the 429 the move exists to prevent.
+    // A weekly-pace move is held to the same rule, and goes only to seats on pace.
     const usable = reason === "soft-cap"
       ? candidates.filter(c => this.softCapRelief(c, existing!.target, isUsable, utilOf))
-      : candidates.filter(isUsable);
+      : reason === "weekly-pace"
+        ? candidates.filter(c => this.paceRelief(c, existing!.target, isUsable, utilOf))
+        : candidates.filter(isUsable);
     if (usable.length === 0) return null;
 
     const target = this.place(usable, utilOf);
@@ -304,6 +327,64 @@ export class SessionRouter {
     return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
   }
 
+  /** Pace of a target's weekly window, or null when pacing is off. */
+  private paceOf(
+    target: SessionTarget,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): WeeklyPace | null {
+    if (!this.weeklyPace) return null;
+    const w = this.metricsOf(target, utilOf).weekly;
+    return w ? weeklyPace(w.util, w.resetAtSec, this.now(), this.weeklyPace.slack) : NO_PACE;
+  }
+
+  /** Whether `c` can take a session that `from` is shedding for weekly pace. */
+  private paceRelief(
+    c: SessionTarget,
+    from: SessionTarget,
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): boolean {
+    return c.provider === from.provider && !sameTarget(c, from) && isUsable(c)
+      && !this.overSoftCap(c, utilOf) && (this.paceOf(c, utilOf)?.ahead ?? 1) <= 0;
+  }
+
+  /**
+   * A pin moves for weekly pace only when its seat is more than `migrateAhead`
+   * past its line, its weekly window is not about to reset, and an on-pace
+   * seat of the same provider can take the session. The move costs a full
+   * cache rewrite, so it is reserved for seats that would otherwise run dry.
+   */
+  private shouldLeaveForPace(
+    target: SessionTarget,
+    candidates: SessionTarget[],
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): boolean {
+    const pace = this.paceOf(target, utilOf);
+    if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;
+    const resetAt = this.metricsOf(target, utilOf).weekly?.resetAtSec;
+    const nowSec = this.now() / 1000;
+    if (resetAt && resetAt > nowSec && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
+    return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf));
+  }
+
+  /**
+   * With pacing on, narrow `usable` to the seats on pace. When every seat is
+   * ahead, keep those closest to their line. Never empty when `usable` is not:
+   * pace reorders, it does not refuse.
+   */
+  private paceFilter(
+    usable: SessionTarget[],
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): SessionTarget[] {
+    if (!this.weeklyPace || usable.length <= 1) return usable;
+    const aheads = usable.map(t => this.paceOf(t, utilOf)!.ahead);
+    const onPace = usable.filter((_, i) => aheads[i] <= 0);
+    if (onPace.length > 0) return onPace;
+    const least = Math.min(...aheads);
+    return usable.filter((_, i) => aheads[i] - least <= PACE_TIE);
+  }
+
   private resetsWithin(
     target: SessionTarget,
     minutes: number,
@@ -346,6 +427,7 @@ export class SessionRouter {
     usable: SessionTarget[],
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): SessionTarget {
+    usable = this.paceFilter(usable, utilOf);
     const cap = this.softCapUtil;
     const utilOnly = (t: SessionTarget) => this.metricsOf(t, utilOf).util;
     if (cap === null) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);

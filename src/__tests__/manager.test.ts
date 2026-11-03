@@ -34,6 +34,7 @@ import {
   writeConfig,
   getProxyRequestTimeoutMs,
   getSoftCapUtil,
+  getWeeklyPace,
 } from "../config/manager.js";
 
 const accountsPath = () => `${MOCK_DIR}/accounts.json`;
@@ -532,5 +533,20 @@ describe("getSoftCapUtil", () => {
       writeConfig({ routing: { softCapUtil } });
       expect(getSoftCapUtil()).toBeUndefined();
     }
+  });
+});
+
+describe("getWeeklyPace", () => {
+  it("is off unless enabled is true", () => {
+    expect(getWeeklyPace()).toBeUndefined();
+    writeConfig({ routing: { weeklyPace: { slack: 0.2 } } });
+    expect(getWeeklyPace()).toBeUndefined();
+  });
+
+  it("reads its fractions, falling back to defaults when out of range", () => {
+    writeConfig({ routing: { weeklyPace: { enabled: true, slack: 0.05, migrateAhead: 0.2 } } });
+    expect(getWeeklyPace()).toEqual({ slack: 0.05, migrateAhead: 0.2 });
+    writeConfig({ routing: { weeklyPace: { enabled: true, slack: 10, migrateAhead: -1 } } });
+    expect(getWeeklyPace()).toEqual({ slack: 0.1, migrateAhead: 0.15 });
   });
 });

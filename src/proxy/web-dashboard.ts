@@ -531,6 +531,14 @@ const SCRIPT = String.raw`
       // The figure behind a warning can be days old on an idle account; say so beside it.
       var sv = accountSeverity(a);
       if (sv && sv.age && sv.window === (key === "fiveHour" ? "5h" : "7d")) text.appendChild(el("span", "note", "read " + dur(sv.age) + " ago"));
+      // Weekly pace: spent share against elapsed share (plus slack) of the window.
+      var wp = a.weeklyPace;
+      if (key === "sevenDay" && wp && wp.ahead > -1) {
+        var off = Math.round(wp.ahead * 100);
+        var pn = el("span", "note", off > 0 ? "ahead of pace +" + off + "%" : "on pace");
+        pn.title = "Even spend over the week, plus slack, allows " + Math.round(wp.target * 100) + "% by now.";
+        text.appendChild(pn);
+      }
     }
     if (cap > 0 && cap < 100) {
       var tick = el("div", "tick");
