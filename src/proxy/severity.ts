@@ -122,7 +122,7 @@ export type WeeklyWindow = "seen" | "not-reported" | "unknown";
 
 /**
  * An account whose responses never name a 7-day window is not "unmeasured" on
- * that side, it has none to measure (a Teams seat has only the 5-hour limit).
+ * that side, it has none to measure (some plans have had only the 5-hour limit).
  * That is a claim about what upstream has *reported*, not about the plan, which
  * the router does not record, so it waits for enough responses before saying it.
  */

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "fs";
+import { DEFAULT_WEEKLY_PACE, type WeeklyPaceConfig } from "../proxy/weekly-pace.js";
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH, SESSIONS_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
@@ -340,6 +341,9 @@ export interface ProxyConfig {
      *  hands its pinned ones to an account with room — only while one exists.
      *  Opt-in: absent, or outside (0, 1), keeps placement as it was. */
     softCapUtil?: number;
+    /** Weekly pacing: prefer seats spending their 7-day window no faster than
+     *  the week elapses. Opt-in: off unless `enabled` is true. */
+    weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number };
   };
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
@@ -411,6 +415,21 @@ export function getThrottleConfig(): ThrottleConfig {
 export function getSoftCapUtil(): number | undefined {
   const v = readConfig().routing?.softCapUtil;
   return typeof v === "number" && Number.isFinite(v) && v > 0 && v < 1 ? v : undefined;
+}
+
+/**
+ * Weekly pacing settings, or undefined when it is off. Out-of-range values
+ * fall back to the defaults rather than disabling or inverting the rule.
+ */
+export function getWeeklyPace(): WeeklyPaceConfig | undefined {
+  const raw = readConfig().routing?.weeklyPace;
+  if (!raw || raw.enabled !== true) return undefined;
+  const frac = (v: unknown, d: number) =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 && v < 1 ? v : d;
+  return {
+    slack: frac(raw.slack, DEFAULT_WEEKLY_PACE.slack),
+    migrateAhead: frac(raw.migrateAhead, DEFAULT_WEEKLY_PACE.migrateAhead),
+  };
 }
 
 function normalizeProxyConfig(cfg: ProxyConfig): ProxyConfig {

@@ -14,7 +14,7 @@ import {
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -32,6 +32,7 @@ import { OllamaDailyBudget, budgetBalanceOf, resolveOllamaDailyBudgetConfig } fr
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { createUsageSeriesProvider } from "./usage-series.js";
+import { DEFAULT_WEEKLY_PACE, weeklyPace, type WeeklyPace } from "./weekly-pace.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
@@ -90,6 +91,8 @@ export interface HealthAccountView {
   weeklyLimitPercent?: number;
   /** Whether upstream has ever named a 7-day window for this account (Anthropic accounts only). */
   weeklyWindow?: WeeklyWindow;
+  /** Where the 7-day window stands against an even spend over the week. */
+  weeklyPace?: WeeklyPace;
 }
 
 export interface OperationalStatus {
@@ -199,6 +202,8 @@ function publicAnthropicAccountView(a: Account): HealthAccountView {
     lastRefreshMs: a.lastRefresh,
     rateLimits: a.rateLimits,
     weeklyWindow: weeklyWindowOf(a),
+    weeklyPace: weeklyPace(a.rateLimits.sevenDayUtil, a.rateLimits.sevenDayReset, Date.now(),
+      (getWeeklyPace() ?? DEFAULT_WEEKLY_PACE).slack),
   };
 }
 
@@ -387,14 +392,18 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // a restart lands sessions back on their own accounts.
   let sessionFlush: NodeJS.Timeout | null = null;
   const softCapUtil = getSoftCapUtil();
+  const weeklyPaceCfg = getWeeklyPace();
   const sessionRouter = new SessionRouter({
     softCapUtil,
+    weeklyPace: weeklyPaceCfg,
     onReassign: ({ sessionId, from, to, reason }) => {
-      const why = reason === "soft-cap" ? `soft cap ${Math.round((softCapUtil ?? 0) * 100)}%` : "account unservable";
+      const why = reason === "soft-cap" ? `soft cap ${Math.round((softCapUtil ?? 0) * 100)}%`
+        : reason === "weekly-pace" ? "ahead of weekly pace"
+        : "account unservable";
       // Only the soft-cap reason needs its own console line: other moves are
       // already logged with their cost by `logSessionMove` / `logSessionRepin`,
       // which do not know why a retainable pin was given up.
-      if (reason === "soft-cap") logSessionReassign(sessionId, from.accountId, to.accountId, why);
+      if (reason !== "unservable") logSessionReassign(sessionId, from.accountId, to.accountId, why);
       const msg = `session ${sessionId.slice(0, 8)} reassigned ${from.accountId} → ${to.accountId} (${why})`;
       stats.addLog({ ts: Date.now(), accountId: to.accountId, model: "-", type: "route", details: msg });
     },
@@ -500,9 +509,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // the rest and was left idle while they ran at the cap. The weekly window
     // still decides whether the account is over the soft cap.
     const pace = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
+    const weekly = { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset };
     return limits.sevenDayUtil > limits.fiveHourUtil
-      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace }
-      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace };
+      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace, weekly }
+      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace, weekly };
   };
 
   // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
