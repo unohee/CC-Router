@@ -173,7 +173,7 @@ describe("createThrottleGate — disabled gate", () => {
       clock.deps,
     );
 
-    await expect(gate.admit("a", 0.99)).resolves.toBeUndefined();
+    await expect(gate.admit("a", 0.99)).resolves.toMatchObject({ waitedMs: 0, bypassed: false });
 
     expect(gate.inFlight("a")).toBe(0);
     expect(gate.inFlight("unknown")).toBe(0);
@@ -330,9 +330,11 @@ describe("createThrottleGate — maxWaitMs cap and fail-open", () => {
     gate.acquire("a");                    // the only slot stays taken for the whole wait
     const before = clock.time();
 
-    await expect(gate.admit("a", 0.5)).resolves.toBeUndefined();
+    const result = await gate.admit("a", 0.5);
 
     const waited = clock.time() - before;
+    expect(result.waitedMs).toBe(waited);           // the reported wait is the clock's
+    expect(result).toMatchObject({ short: false, bypassed: false, inFlight: 1, limit: 1 });
     expect(waited).toBeGreaterThanOrEqual(19_750);
     expect(waited).toBeLessThanOrEqual(20_250);
     expect(clock.sleeps.every(ms => ms <= 20_000)).toBe(true);
@@ -349,11 +351,82 @@ describe("createThrottleGate — maxWaitMs cap and fail-open", () => {
     gate.acquire("a");                    // the only slot stays taken for the whole wait
     const before = clock.time();
 
-    await expect(gate.admit("a", 0.5)).resolves.toBeUndefined();
+    await expect(gate.admit("a", 0.5)).resolves.toMatchObject({ short: false });
 
     const totalSlept = clock.sleeps.reduce((sum, ms) => sum + ms, 0);
     expect(totalSlept).toBeLessThanOrEqual(GATE_ON.maxWaitMs);
     expect(totalSlept).toBeGreaterThanOrEqual(19_750);    // the budget is actually spent
     expect(clock.time() - before).toBe(totalSlept);       // no waiting that skipped the fake clock
+  });
+});
+
+describe("createThrottleGate — short requests", () => {
+  it("admits a short request at once even when every slot is taken", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate(
+      { ...GATE_ON, perAccountMaxInFlight: 1, minIntervalMs: 0 },
+      clock.deps,
+    );
+    gate.acquire("a");                    // the only slot is busy with a long stream
+
+    const result = await gate.admit("a", 0.5, { short: true });
+
+    expect(clock.sleeps).toEqual([]);
+    expect(result).toEqual({ waitedMs: 0, short: true, bypassed: true, inFlight: 1, limit: 1 });
+  });
+
+  it("still counts an admitted short request as in flight", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate({ ...GATE_ON, perAccountMaxInFlight: 1, minIntervalMs: 0 }, clock.deps);
+
+    await gate.admit("a", 0.5, { short: true });
+    gate.acquire("a");                    // the caller acquires it like any request
+    expect(gate.inFlight("a")).toBe(1);
+
+    // A normal request now waits behind the short one's slot.
+    const pending = gate.admit("a", 0.5);
+    await Promise.resolve();
+    expect(clock.sleeps.length).toBeGreaterThan(0);
+    gate.release("a");
+    await expect(pending).resolves.toMatchObject({ short: false, inFlight: 1 });
+  });
+
+  it("does not report a bypass when a short request had nothing to wait for", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate({ ...GATE_ON, minIntervalMs: 0 }, clock.deps);
+
+    await expect(gate.admit("a", 0.5, { short: true })).resolves.toMatchObject({ bypassed: false, waitedMs: 0 });
+  });
+
+  it("skips pacing and reserves no slot, so normal requests are not pushed back", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate({ ...GATE_ON, minIntervalMs: 1_000 }, clock.deps);
+
+    await gate.admit("a", 0.85);          // takes the first slot; next one owes 500 ms
+    const shortResult = await gate.admit("a", 0.85, { short: true });
+    expect(shortResult).toMatchObject({ waitedMs: 0, bypassed: true });
+    expect(clock.sleeps).toEqual([]);
+
+    // Without the short request in between, this is the same 500 ms wait.
+    const normal = await gate.admit("a", 0.85);
+    expect(clock.sleeps).toEqual([500]);
+    expect(normal.waitedMs).toBe(500);
+  });
+
+  it("stays inert for a short request when the gate is disabled", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate({ ...DEFAULT_THROTTLE, enabled: false, minIntervalMs: 1_000 }, clock.deps);
+
+    await expect(gate.admit("a", 0.99, { short: true })).resolves.toMatchObject({ waitedMs: 0, bypassed: false });
+    gate.acquire("a");
+    expect(gate.snapshot()).toEqual({});
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it("reports no wait for a normal request that did not sleep", async () => {
+    const clock = makeClock();
+    const gate = createThrottleGate({ ...GATE_ON, minIntervalMs: 0 }, clock.deps);
+
+    await expect(gate.admit("a", 0.5)).resolves.toMatchObject({ waitedMs: 0, bypassed: false });
   });
 });
