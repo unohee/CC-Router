@@ -1,5 +1,5 @@
 import { claudeTierOf } from "../../protocol/model-ref.js";
-import type { OllamaFallbackConfig } from "../../config/manager.js";
+import type { OllamaEffort, OllamaFallbackConfig } from "../../config/manager.js";
 import type { TierModels } from "../tier-matching.js";
 import type { OllamaDailyBudgetConfig, OllamaBudgetVerdict } from "./daily-budget.js";
 
@@ -33,6 +33,8 @@ export interface ResolvedOllamaFallbackConfig {
   /** Empty when unset; the decision then answers "no-model". */
   model: string;
   tierMap: { opus?: string; sonnet?: string; haiku?: string };
+  /** Effort per tier; unset tiers leave the client's thinking settings alone. */
+  tierEffort: { opus?: OllamaEffort; sonnet?: OllamaEffort; haiku?: OllamaEffort };
   contextTokens: number;
   /** The endpoint refuses requests without a key (Ollama Cloud). */
   keyRequired: boolean;
@@ -46,6 +48,12 @@ function cleanString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+const EFFORTS: ReadonlySet<string> = new Set(["off", "low", "medium", "high"]);
+
+function cleanEffort(value: unknown): OllamaEffort | undefined {
+  return typeof value === "string" && EFFORTS.has(value.trim()) ? value.trim() as OllamaEffort : undefined;
 }
 
 function cleanNumber(value: unknown, fallback: number, min: number): number {
@@ -76,6 +84,8 @@ export function resolveOllamaFallbackConfig(
   if (!raw || raw.enabled !== true) return null;
   const baseUrl = (cleanString(raw.baseUrl) ?? OLLAMA_DEFAULT_BASE_URL).replace(/\/+$/, "");
   const tierMap = typeof raw.tierMap === "object" && raw.tierMap !== null ? raw.tierMap : {};
+  const tierEffort: Record<string, unknown> = typeof raw.tierEffort === "object" && raw.tierEffort !== null
+    ? raw.tierEffort as Record<string, unknown> : {};
   return {
     baseUrl,
     apiKeyEnv: cleanString(raw.apiKeyEnv) ?? OLLAMA_DEFAULT_API_KEY_ENV,
@@ -85,6 +95,11 @@ export function resolveOllamaFallbackConfig(
       opus: cleanString(tierMap.opus),
       sonnet: cleanString(tierMap.sonnet),
       haiku: cleanString(tierMap.haiku),
+    },
+    tierEffort: {
+      opus: cleanEffort(tierEffort["opus"]),
+      sonnet: cleanEffort(tierEffort["sonnet"]),
+      haiku: cleanEffort(tierEffort["haiku"]),
     },
     contextTokens: cleanNumber(raw.contextTokens, OLLAMA_DEFAULT_CONTEXT_TOKENS, 1),
     keyRequired: ollamaKeyRequired(baseUrl),
@@ -132,6 +147,16 @@ export function ollamaModelFor(
   return (tier ? config.tierMap[tier] ?? matched[tier] : undefined) ?? config.model;
 }
 
+/** The effort configured for `claudeModel`'s tier, if any. Frontier counts as opus. */
+export function ollamaEffortFor(
+  claudeModel: string | undefined,
+  config: Pick<ResolvedOllamaFallbackConfig, "tierEffort">,
+): OllamaEffort | undefined {
+  const classified = claudeTierOf(claudeModel);
+  const tier = classified === "frontier" ? "opus" : classified;
+  return tier ? config.tierEffort?.[tier] : undefined;
+}
+
 export type OllamaSkipReason =
   | "disabled"
   | "budget-exhausted"
@@ -146,7 +171,7 @@ export type OllamaSkipReason =
   | "no-api-key";
 
 export type OllamaDecision =
-  | { use: true; model: string; waitSeconds: number }
+  | { use: true; model: string; waitSeconds: number; effort?: OllamaEffort }
   | { use: false; reason: OllamaSkipReason; detail?: string };
 
 export interface OllamaDecisionInput {
@@ -200,5 +225,11 @@ export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision
     return { use: false, reason: b.reason as "budget-exhausted" | "reserve-exhausted" | "balance-unknown", detail };
   }
 
-  return { use: true, model: ollamaModelFor(input.claudeModel, config, input.matchedTiers?.()), waitSeconds: wait };
+  const effort = ollamaEffortFor(input.claudeModel, config);
+  return {
+    use: true,
+    model: ollamaModelFor(input.claudeModel, config, input.matchedTiers?.()),
+    waitSeconds: wait,
+    ...(effort ? { effort } : {}),
+  };
 }

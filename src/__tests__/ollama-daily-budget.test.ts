@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   OllamaDailyBudget,
+  budgetBalanceOf,
   dayString,
   resolveOllamaDailyBudgetConfig,
   type OllamaBudgetBalance,
@@ -11,8 +12,8 @@ import {
 
 // 2026-10-27 03:00 KST = 2026-10-26T18:00:00Z
 const NOW = Date.parse("2026-10-26T18:00:00Z");
-const bal = (includedUsd: number, resetsAtDays = 24): OllamaBudgetBalance => ({
-  includedUsd, resetsAt: NOW + resetsAtDays * 86_400_000, checkedAt: NOW,
+const bal = (spendableUsd: number, resetsAtDays = 24): OllamaBudgetBalance => ({
+  spendableUsd, resetsAt: NOW + resetsAtDays * 86_400_000, checkedAt: NOW,
 });
 const mk = (config = { monthlyUsd: 300 }, opts: { now?: () => number; statePath?: string } = {}) =>
   new OllamaDailyBudget({ config: { monthlyUsd: config.monthlyUsd, tz: undefined, reserveUsd: 0 }, statePath: opts.statePath, now: opts.now ?? (() => NOW) });
@@ -104,5 +105,35 @@ describe("OllamaDailyBudget", () => {
     // 2026-10-26T18:00Z: Seoul has rolled to Oct 27, UTC has not.
     expect(dayString(NOW, "Asia/Seoul")).toBe("2026-10-27");
     expect(dayString(NOW, "UTC")).toBe("2026-10-26");
+  });
+});
+
+describe("budgetBalanceOf", () => {
+  const known = (includedUsd: number, purchasedUsd: number) => ({
+    status: "known", balance: { includedUsd, purchasedUsd }, resetsAt: NOW + 20 * 86_400_000, checkedAt: NOW,
+  });
+
+  it("counts purchased credit, so an empty monthly allowance with credit bought still serves", () => {
+    // The live account on 2026-11-03: included $0 of $300, purchased $31.72.
+    const b = budgetBalanceOf(known(0, 31.72));
+    expect(b?.spendableUsd).toBeCloseTo(31.72);
+    const v = mk().verdict(b);
+    expect(v.allow).toBe(true);
+    expect(v.reason).toBe("ok");
+  });
+
+  it("adds both kinds of credit and never lets a negative figure subtract", () => {
+    expect(budgetBalanceOf(known(10, 5))?.spendableUsd).toBe(15);
+    expect(budgetBalanceOf(known(-3, 5))?.spendableUsd).toBe(5);
+  });
+
+  it("stops Ollama only when both are gone", () => {
+    expect(mk().verdict(budgetBalanceOf(known(0, 0))).reason).toBe("reserve-exhausted");
+  });
+
+  it("has no balance for an unknown or incomplete reading", () => {
+    expect(budgetBalanceOf(undefined)).toBeNull();
+    expect(budgetBalanceOf({ status: "unavailable", resetsAt: null, checkedAt: NOW })).toBeNull();
+    expect(budgetBalanceOf({ ...known(1, 1), resetsAt: null })).toBeNull();
   });
 });

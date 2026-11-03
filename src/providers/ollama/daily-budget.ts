@@ -4,12 +4,14 @@
  *
  * Ollama publishes balance, allowance and period end — no per-request bill
  * this router can trust beyond the provider's own meter. So spending is the
- * balance going down: when includedUsd falls between two quota readings, that
- * delta is today's spend. (If the account is shared, other consumers' spending
+ * balance going down: when the spendable balance (included monthly credit plus
+ * purchased credit) falls between two quota readings, that delta is today's
+ * spend. Purchased credit counts because Ollama draws on it once the included
+ * credit is gone; leaving it out stopped the fallback with credit still left. (If the account is shared, other consumers' spending
  * is charged to this router's day as if it were ours — the safe direction.)
  *
  * The day rolls in the configured time zone (default: the router's own zone).
- * Today's allowance is the remaining monthly credit spread evenly over the
+ * Today's allowance is the spendable credit spread evenly over the
  * budget days left in the period, so a running-low month slows down rather
  * than stopping outright. `reserveUsd` is a hard floor that stops Ollama
  * regardless of today's allowance.
@@ -52,12 +54,31 @@ export function resolveOllamaDailyBudgetConfig(
 }
 
 export interface OllamaBudgetBalance {
-  /** Remaining monthly included credit. */
-  includedUsd: number;
+  /** Credit Ollama can still draw on: included monthly credit + purchased credit. */
+  spendableUsd: number;
   /** Period end, epoch ms: same period => same resetsAt. */
   resetsAt: number;
   /** When the reading was taken, epoch ms. */
   checkedAt: number;
+}
+
+/**
+ * The budget's view of a quota reading: what Ollama can still spend. Purchased
+ * credit is drawn once the included monthly credit runs out, so both count.
+ * Null unless the reading is known and complete.
+ */
+export function budgetBalanceOf(snap: {
+  status: string;
+  balance?: { includedUsd: number; purchasedUsd: number };
+  resetsAt: number | null;
+  checkedAt: number | null;
+} | undefined): OllamaBudgetBalance | null {
+  if (snap?.status !== "known" || !snap.balance || snap.resetsAt === null || snap.checkedAt === null) return null;
+  return {
+    spendableUsd: Math.max(0, snap.balance.includedUsd) + Math.max(0, snap.balance.purchasedUsd),
+    resetsAt: snap.resetsAt,
+    checkedAt: snap.checkedAt,
+  };
 }
 
 export type OllamaBudgetReason = "ok" | "budget-exhausted" | "reserve-exhausted" | "balance-unknown";
@@ -114,7 +135,7 @@ export class OllamaDailyBudget {
   verdict(balance: OllamaBudgetBalance | null): OllamaBudgetVerdict {
     this.roll();
     if (!balance) return this.report(false, "balance-unknown", null, null);
-    if (balance.includedUsd <= this.cfg.reserveUsd) {
+    if (balance.spendableUsd <= this.cfg.reserveUsd) {
       return this.report(false, "reserve-exhausted", null, 0);
     }
     const budget = this.todayAllowance(balance);
@@ -136,7 +157,7 @@ export class OllamaDailyBudget {
     const prev = this.lastReading;
     this.lastReading = balance;
     if (!prev || prev.resetsAt !== balance.resetsAt) return;
-    const drop = prev.includedUsd - balance.includedUsd;
+    const drop = prev.spendableUsd - balance.spendableUsd;
     if (drop <= 0) return;
     this.spentUsd = roundCents(this.spentUsd + clampUsd(drop));
     this.flush();
@@ -150,7 +171,7 @@ export class OllamaDailyBudget {
     // as one whole budget day.
     const daysLeft = resetDay === this.day ? 1
       : Math.max(1, Math.ceil((balance.resetsAt - this.now()) / DAY_MS));
-    return roundCents(Math.max(0, balance.includedUsd) / daysLeft);
+    return roundCents(Math.max(0, balance.spendableUsd) / daysLeft);
   }
 
   private roll(): void {

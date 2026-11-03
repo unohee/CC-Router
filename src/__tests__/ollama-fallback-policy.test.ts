@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  decideOllamaFallback, resolveOllamaFallbackConfig, ollamaKeyRequired, ollamaModelFor, readOllamaApiKey,
+  decideOllamaFallback, resolveOllamaFallbackConfig, ollamaEffortFor, ollamaKeyRequired, ollamaModelFor, readOllamaApiKey,
   type OllamaDecisionInput,
 } from "../providers/ollama/fallback-policy.js";
 
@@ -32,7 +32,9 @@ describe("resolveOllamaFallbackConfig", () => {
     const c = resolveOllamaFallbackConfig({ enabled: true, model: " m ", minWaitSeconds: -5, contextTokens: "x" as unknown as number })!;
     expect(c).toEqual({
       baseUrl: "https://ollama.com", apiKeyEnv: "OLLAMA_API_KEY", minWaitSeconds: 900, model: "m",
-      tierMap: { opus: undefined, sonnet: undefined, haiku: undefined }, contextTokens: 1_048_576, keyRequired: true,
+      tierMap: { opus: undefined, sonnet: undefined, haiku: undefined },
+      tierEffort: { opus: undefined, sonnet: undefined, haiku: undefined },
+      contextTokens: 1_048_576, keyRequired: true,
       autoTierMap: false,
     });
     expect(LOCAL.baseUrl).toBe("http://127.0.0.1:11434");
@@ -97,5 +99,41 @@ describe("decideOllamaFallback", () => {
     let read = false;
     decideOllamaFallback(input({ anthropicAvailable: () => true, poolWaitSeconds: () => { read = true; return 0; } }));
     expect(read).toBe(false);
+  });
+});
+
+describe("tier effort", () => {
+  // The live setup: one model for every tier, only the effort differs.
+  const ONE_MODEL = resolveOllamaFallbackConfig({
+    enabled: true, baseUrl: "https://ollama.com", model: "deepseek-v4.1-flash:cloud", minWaitSeconds: 0,
+    tierEffort: { opus: "high", sonnet: "medium", haiku: "off" },
+  })!;
+
+  it("keeps only the recognised levels from a hand-edited config", () => {
+    const c = resolveOllamaFallbackConfig({
+      enabled: true, model: "m",
+      tierEffort: { opus: " high ", sonnet: "max" as never, haiku: 3 as never },
+    })!;
+    expect(c.tierEffort).toEqual({ opus: "high", sonnet: undefined, haiku: undefined });
+  });
+
+  it("picks the effort by the request's tier, frontier counting as opus", () => {
+    expect(ollamaEffortFor("claude-opus-5-5", ONE_MODEL)).toBe("high");
+    expect(ollamaEffortFor("claude-sonnet-5-5", ONE_MODEL)).toBe("medium");
+    expect(ollamaEffortFor("claude-haiku-5-5", ONE_MODEL)).toBe("off");
+    expect(ollamaEffortFor("claude-fable-5-1", ONE_MODEL)).toBe(ollamaEffortFor("claude-opus-5-5", ONE_MODEL));
+    expect(ollamaEffortFor("mystery", ONE_MODEL)).toBeUndefined();
+  });
+
+  it("answers every tier with the same model and that tier's effort", () => {
+    const pick = (claudeModel: string) => decideOllamaFallback(input({ config: ONE_MODEL, claudeModel, apiKey: () => "k" }));
+    expect(pick("claude-opus-5-5")).toMatchObject({ use: true, model: "deepseek-v4.1-flash:cloud", effort: "high" });
+    expect(pick("claude-sonnet-5-5")).toMatchObject({ use: true, model: "deepseek-v4.1-flash:cloud", effort: "medium" });
+    expect(pick("claude-haiku-5-5")).toMatchObject({ use: true, model: "deepseek-v4.1-flash:cloud", effort: "off" });
+  });
+
+  it("adds no effort when none is configured", () => {
+    const d = decideOllamaFallback(input());
+    expect(d.use && "effort" in d).toBe(false);
   });
 });

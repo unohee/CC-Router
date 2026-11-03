@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EventEmitter, once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Response as ExpressResponse } from "express";
-import { createOllamaStreamTransformer, forwardToOllama, transformOllamaMessage } from "../providers/ollama/transport.js";
+import { applyOllamaEffort, createOllamaStreamTransformer, forwardToOllama, transformOllamaMessage } from "../providers/ollama/transport.js";
 
 const ev = (type: string, data: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 
@@ -316,5 +316,44 @@ describe("forwardToOllama", () => {
     const res = new FakeRes();
     expect(await forward(base, res, 150, false)).toMatchObject({ ok: true, status: 200 });
     expect(JSON.parse(res.body)).toMatchObject({ model: "claude-sonnet-4-6", content: [{ type: "text", text: "hi" }] });
+  });
+});
+
+describe("applyOllamaEffort", () => {
+  const base = { model: "claude-opus-5-5", max_tokens: 32_000, messages: [{ role: "user", content: "hi" }] };
+
+  it("leaves the body untouched without an effort", () => {
+    expect(applyOllamaEffort(base, undefined)).toBe(base);
+  });
+
+  it("turns thinking off and drops any effort for off", () => {
+    const out = applyOllamaEffort({ ...base, thinking: { type: "enabled", budget_tokens: 9000 }, output_config: { effort: "high" } }, "off");
+    expect(out["thinking"]).toEqual({ type: "disabled" });
+    expect(out).not.toHaveProperty("output_config");
+    // Other output_config fields survive.
+    const kept = applyOllamaEffort({ ...base, output_config: { effort: "low", format: "x" } }, "off");
+    expect(kept["output_config"]).toEqual({ format: "x" });
+  });
+
+  it("switches thinking on with a budget the request can hold, and sets the level", () => {
+    const out = applyOllamaEffort({ ...base, max_tokens: 4000 }, "medium");
+    expect(out["thinking"]).toEqual({ type: "enabled", budget_tokens: 3999 });
+    expect(out["output_config"]).toEqual({ effort: "medium" });
+    expect(applyOllamaEffort({ ...base, thinking: { type: "disabled" } }, "high")["thinking"])
+      .toEqual({ type: "enabled", budget_tokens: 16_384 });
+  });
+
+  it("keeps the client's own enabled thinking and budget", () => {
+    const thinking = { type: "enabled", budget_tokens: 5000 };
+    const out = applyOllamaEffort({ ...base, thinking }, "high");
+    expect(out["thinking"]).toBe(thinking);
+    expect(out["output_config"]).toEqual({ effort: "high" });
+  });
+
+  it("does not mutate the caller's body", () => {
+    const body = { ...base, output_config: { effort: "low" } };
+    applyOllamaEffort(body, "off");
+    expect(body.output_config).toEqual({ effort: "low" });
+    expect(body).not.toHaveProperty("thinking");
   });
 });
