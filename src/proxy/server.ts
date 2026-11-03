@@ -16,9 +16,10 @@ import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
+import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
 import { logOllamaFallback, logOllamaTransition } from "./logger.js";
-import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient } from "./logger.js";
+import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient, logThrottleWait } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH } from "../config/paths.js";
@@ -1615,7 +1616,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // concurrency limit when its quota is running hot. `admit` never rejects —
     // on expiry it fails open, so the client always has a working account.
     // Both calls are no-ops while the throttle is disabled (the default).
-    await throttleGate.admit(account.id, accountUtil(account));
+    // Short one-shot requests (a plugin's prompt classifier, say) skip the wait
+    // but still count as in flight: queued behind the session's own long
+    // streams, their answer would arrive after it stopped mattering.
+    const util = accountUtil(account);
+    const admitted = await throttleGate.admit(account.id, util, { short: isShortRequest(req.body) });
+    if (admitted.waitedMs > 0 || admitted.bypassed) {
+      logThrottleWait({ accountId: account.id, util, ...admitted });
+    }
     throttleGate.acquire(account.id);
     res.once("close", () => throttleGate.release(account.id));
     reportSaturation(account);

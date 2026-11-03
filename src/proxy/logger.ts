@@ -252,3 +252,38 @@ export function logOllamaTransition(to: "ollama" | "anthropic", detail: string):
     chalk.gray(` (${detail})`)
   );
 }
+
+export interface ThrottleWaitLine {
+  accountId: string;
+  waitedMs: number;
+  inFlight: number;
+  /** Concurrency limit applied (Infinity when the concurrency gate is off). */
+  limit: number;
+  /** Utilization (0–1) the gate judged the account by. */
+  util: number;
+  short: boolean;
+  /** A short request that skipped a wait a normal request would have taken. */
+  bypassed: boolean;
+}
+
+/**
+ * One line per admission the throttle actually delayed — and per short request
+ * that skipped a delay it would otherwise have taken, which is the only sign
+ * the fast lane fires. Without it a throttle wait is invisible: the request just
+ * arrives late, and a ~20 s cluster in a client's latency reads as model time.
+ */
+export function formatThrottleWait(w: ThrottleWaitLine): string {
+  const limit = Number.isFinite(w.limit) ? String(w.limit) : "off";
+  const util = Number.isFinite(w.util) ? `${Math.round(w.util * 100)}%` : "-";
+  return [
+    `throttle ${w.bypassed ? "bypass" : "wait"} ${w.accountId}`,
+    `waitMs=${Math.round(w.waitedMs)}`,
+    `inFlight=${w.inFlight}/${limit}`,
+    `util=${util}`,
+    `short=${w.short ? "yes" : "no"}`,
+  ].join(" ");
+}
+
+export function logThrottleWait(w: ThrottleWaitLine): void {
+  console.log(chalk.gray(`[${ts()}]`) + chalk.yellow(` ⏳ ${formatThrottleWait(w)}`));
+}

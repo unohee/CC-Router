@@ -781,6 +781,14 @@ Behavior guarantees:
 - **A request is never rejected by the throttle.** If a wait expires, the request proceeds anyway (fail-open) — the client always has a working account.
 - **No 429 is ever synthesized** toward the client, and the router's own cooldown is untouched. Caps and pacing are orthogonal layers.
 - **Session affinity is untouched**, so a session is never moved (and never pays a prompt-cache rewrite) because of pacing.
+- **Short requests skip the wait.** A request that is non-streaming, declares no tools and asks for at most 4096 output tokens — the shape of a plugin's `$.model.classify` / `$.model.complete` call — is admitted at once instead of queueing behind its session's long streams. It still counts toward the account's in-flight total.
+
+Every admission the throttle actually delays is logged, as is every short request that skipped a wait it would otherwise have taken:
+
+```
+[10:31:02] ⏳ throttle wait max-1 waitMs=20000 inFlight=4/4 util=81% short=no
+[10:31:05] ⏳ throttle bypass max-1 waitMs=0 inFlight=4/4 util=81% short=yes
+```
 
 Disable it:
 

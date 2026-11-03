@@ -13,6 +13,11 @@
  *     working account.
  *   • Never synthesizes a 429. Caps and this throttle are orthogonal layers.
  *   • Fully inert when disabled (the default): no timers, no state, no logs.
+ *
+ * Short requests (see short-request.ts — one-shot, non-streaming, no tools,
+ * small output budget, e.g. a plugin's prompt classifier) skip the wait: they
+ * neither pace nor poll, and they reserve no pacing slot, but the caller still
+ * `acquire()`s them, so they count toward the account's in-flight total.
  */
 
 export interface ThrottleConfig {
@@ -112,9 +117,29 @@ export function pacingIntervalMs(util: number, cfg: ThrottleConfig): number {
   return Math.max(0, Math.round(rampFraction(util, cfg) * cfg.minIntervalMs));
 }
 
+export interface AdmitOptions {
+  /** The request is short (see `isShortRequest`): admit it without waiting. */
+  short?: boolean;
+}
+
+/** What one `admit()` call did, for the caller to log. Never an error. */
+export interface AdmitResult {
+  /** Wall time spent waiting (pacing + concurrency), by the gate's clock. */
+  waitedMs: number;
+  /** Echo of `AdmitOptions.short`. */
+  short: boolean;
+  /** A short request that skipped a wait a normal request would have taken. */
+  bypassed: boolean;
+  /** This account's in-flight count when the request arrived. */
+  inFlight: number;
+  /** Concurrency limit applied at this utilization (Infinity = gate off). */
+  limit: number;
+}
+
 export interface ThrottleGate {
-  /** Wait until this account may send. Never rejects. Never throws on expiry. */
-  admit(accountId: string, util: number): Promise<void>;
+  /** Wait until this account may send. Never rejects. Never throws on expiry.
+   *  Short requests (`opts.short`) return at once. */
+  admit(accountId: string, util: number, opts?: AdmitOptions): Promise<AdmitResult>;
   /** Count a request as in flight for this account. */
   acquire(accountId: string): void;
   /** Remove one in-flight request for this account. Safe to call more than once. */
@@ -162,37 +187,63 @@ export function createThrottleGate(cfg: ThrottleConfig, deps?: ThrottleGateDeps)
       else counts.set(accountId, n - 1);
     },
 
-    async admit(accountId: string, util: number): Promise<void> {
-      // 1. Disabled — fully inert. No state touched, nothing awaited.
-      if (!cfg.enabled) return;
+    async admit(accountId: string, util: number, opts?: AdmitOptions): Promise<AdmitResult> {
+      const short = opts?.short === true;
+      const entryInFlight = inFlight(accountId);
 
-      // 2. Pacing. The reservation is written before any await so concurrent
+      // 1. Disabled — fully inert. No state touched, nothing awaited.
+      if (!cfg.enabled) {
+        return { waitedMs: 0, short, bypassed: false, inFlight: entryInFlight, limit: Number.POSITIVE_INFINITY };
+      }
+
+      const limit = cfg.perAccountMaxInFlight > 0 ? admissionLimit(util, cfg) : Number.POSITIVE_INFINITY;
+      const interval = pacingIntervalMs(util, cfg);
+
+      // 2. Short request — skip both waits. It reserves no pacing slot, so the
+      //    normal requests queued behind it are not pushed back; it still
+      //    counts as in flight once the caller acquires it.
+      if (short) {
+        const pacingWait = interval > 0 && (nextSlot.get(accountId) ?? 0) > now();
+        const bypassed = pacingWait || entryInFlight >= limit;
+        return { waitedMs: 0, short, bypassed, inFlight: entryInFlight, limit };
+      }
+
+      const startedAt = now();
+      // Only a call that actually slept reports a wait: a clock tick during
+      // synchronous work must not read as a throttle delay.
+      let slept = false;
+
+      // 3. Pacing. The reservation is written before any await so concurrent
       //    callers for the same account stack up behind each other instead of
       //    all reading the same stale slot.
-      const interval = pacingIntervalMs(util, cfg);
       if (interval > 0) {
         const t = now();
         const slot = Math.max(t, nextSlot.get(accountId) ?? 0);
         nextSlot.set(accountId, slot + interval);
         const wait = Math.min(slot - t, cfg.maxWaitMs);
-        if (wait > 0) await sleep(wait);
+        if (wait > 0) {
+          slept = true;
+          await sleep(wait);
+        }
       }
 
-      // 3. Concurrency gate. Poll until a slot frees up or the budget runs
+      // 4. Concurrency gate. Poll until a slot frees up or the budget runs
       //    out, then proceed either way (fail-open — never reject). No single
       //    slice may exceed the remaining budget, so the wait can overshoot
       //    maxWaitMs only by the clock, never by a whole poll slice.
       if (cfg.perAccountMaxInFlight > 0) {
-        const limit = admissionLimit(util, cfg);
         let waited = 0;
         while (inFlight(accountId) >= limit) {
           const remaining = cfg.maxWaitMs - waited;
           if (remaining <= 0 || cfg.pollMaxDelayMs <= 0) break;
           const slice = Math.min(cfg.pollMaxDelayMs, remaining);
+          slept = true;
           await sleep(slice);
           waited += slice;
         }
       }
+
+      return { waitedMs: slept ? Math.max(0, now() - startedAt) : 0, short, bypassed: false, inFlight: entryInFlight, limit };
     },
   };
 }
