@@ -199,7 +199,7 @@ client compacts.
 Look for a `✂` line:
 
 ```
-[12:54:57] ✂ 9702d337 compacted (~998K → ~120K)
+[2026-11-03 12:54:57Z] ✂ 9702d337 compacted (~998K → ~120K)
 ```
 
 The first number is what matters. Compaction near the top of the window is a
@@ -226,7 +226,7 @@ never enough to call it a compaction.
 Look for a `⇄` line:
 
 ```
-[09:15:03] ⇄ 4a1ab0b1 kyte → intrect (re-writing ~740K tokens of context)
+[2026-11-03 09:15:03Z] ⇄ 4a1ab0b1 kyte → intrect (re-writing ~740K tokens of context)
 ```
 
 That is the cost of the move, logged so the thresholds above can be tuned from

@@ -786,8 +786,8 @@ Behavior guarantees:
 Every admission the throttle actually delays is logged, as is every short request that skipped a wait it would otherwise have taken:
 
 ```
-[10:31:02] ⏳ throttle wait max-1 waitMs=20000 inFlight=4/4 util=81% short=no
-[10:31:05] ⏳ throttle bypass max-1 waitMs=0 inFlight=4/4 util=81% short=yes
+[2026-11-03 10:31:02Z] ⏳ throttle wait max-1 waitMs=20000 inFlight=4/4 util=81% short=no
+[2026-11-03 10:31:05Z] ⏳ throttle bypass max-1 waitMs=0 inFlight=4/4 util=81% short=yes
 ```
 
 Disable it:

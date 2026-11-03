@@ -252,6 +252,11 @@ async function startForeground(opts: {
   litellm?: string | boolean;
   accounts: string;
 }): Promise<void> {
+  // Every way the router runs (terminal, daemon, systemd, launchd) comes through
+  // here, and its output is a log spanning days: date-stamp every line from now on.
+  const { installLogStamps } = await import("../proxy/log-stamp.js");
+  installLogStamps();
+
   const litellmUrl = opts.litellm
     ? (typeof opts.litellm === "string" ? opts.litellm : `http://localhost:${LITELLM_PORT}`)
     : undefined;
