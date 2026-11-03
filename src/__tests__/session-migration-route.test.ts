@@ -4,6 +4,7 @@ import express, { type Express } from "express";
 import { mountMessagesCrossProviderRoute } from "../proxy/messages-cross-route.js";
 import { CompactAskGuard, type PinBlock } from "../proxy/session-migration.js";
 import { SessionContextTracker } from "../proxy/session-context-tracker.js";
+import type { SessionTarget } from "../proxy/session-router.js";
 import { BYTES_PER_TOKEN } from "../providers/openai/context-limits.js";
 
 const PINNED: SessionTarget = { provider: "anthropic", accountId: "kyte" };
