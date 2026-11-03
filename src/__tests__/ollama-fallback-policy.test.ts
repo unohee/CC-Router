@@ -112,7 +112,7 @@ describe("tier effort", () => {
   it("keeps only the recognised levels from a hand-edited config", () => {
     const c = resolveOllamaFallbackConfig({
       enabled: true, model: "m",
-      tierEffort: { opus: " high ", sonnet: "max" as never, haiku: 3 as never },
+      tierEffort: { opus: " high " as never, sonnet: "max" as never, haiku: 3 as never },
     })!;
     expect(c.tierEffort).toEqual({ opus: "high", sonnet: undefined, haiku: undefined });
   });

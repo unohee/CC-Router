@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { computeSeverity } from "../proxy/severity.js";
+import { computeSeverity, type SeverityAccountInput } from "../proxy/severity.js";
 import { waitForListening } from "./helpers/router-process.js";
 
 // `/cc-router/health` carries the verdict both status surfaces draw. It has to be
@@ -13,12 +13,19 @@ import { waitForListening } from "./helpers/router-process.js";
 // count reads the stats buffer, and the pool-exhausted rejection only reaches
 // that buffer through the request handler.
 
-const BARE_429 = {
+/** One scripted upstream reply. */
+interface Reply {
+  status: number;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+const BARE_429: Reply = {
   status: 429,
   headers: { "anthropic-ratelimit-unified-status": "allowed" },
   body: { type: "error", error: { type: "rate_limit_error", message: "Error" } },
 };
-const OK = {
+const OK: Reply = {
   status: 200,
   headers: { "anthropic-ratelimit-unified-status": "allowed" },
   body: { id: "msg_1", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1, output_tokens: 1 } },
@@ -33,7 +40,7 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-const OK_WEEKLY = {
+const OK_WEEKLY: Reply = {
   ...OK,
   headers: {
     ...OK.headers,
@@ -44,7 +51,7 @@ const OK_WEEKLY = {
 
 interface Health {
   status: string;
-  accounts: { id: string; weeklyWindow?: string; healthy: boolean; coolingUntil?: number; modelCooldowns?: Record<string, number>; expiresInMs: number; enabled?: boolean; rateLimits?: unknown }[];
+  accounts: (SeverityAccountInput & { weeklyWindow?: string; expiresInMs: number })[];
   recentLogs: { ts: number; accountId: string; type: string; statusCode?: number; details?: string }[];
   severity?: {
     pool: string; reasons: string[]; recent429s: number;
@@ -54,7 +61,7 @@ interface Health {
 }
 
 async function withRouter(
-  script: typeof OK[],
+  script: Reply[],
   run: (ctx: { send: () => Promise<Response>; health: () => Promise<Health> }) => Promise<void>,
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "cc-router-severity-test-"));

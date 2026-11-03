@@ -28,6 +28,9 @@ describe("openAIResponsesToAnthropic", () => {
   });
 
   it("maps function calls and outputs to Anthropic tool blocks", () => {
+    // Function calls nested inside a message's content are off-type (the
+    // canonical form is top-level items), but an inbound client may send them,
+    // so the converter decodes them. The cast says so instead of hiding it.
     const result = openAIResponsesToAnthropic({
       model: "anthropic/claude-opus-4-1",
       input: [
@@ -51,7 +54,7 @@ describe("openAIResponsesToAnthropic", () => {
           parameters: { type: "object", properties: { path: { type: "string" } } },
         },
       ],
-    });
+    } as unknown as Parameters<typeof openAIResponsesToAnthropic>[0]);
 
     expect(result.messages).toEqual([
       {
