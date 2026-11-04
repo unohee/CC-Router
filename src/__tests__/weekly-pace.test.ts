@@ -52,7 +52,7 @@ describe("SessionRouter with weekly pacing", () => {
   const all = ["lyra", "rigel", "vega", "heewon"].map(T);
 
   it("never places a new session on a seat ahead of pace while one is on pace", () => {
-    const r = new SessionRouter({ now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15 } });
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 } });
     const utilOf = poolMetrics(readings);
     const picked = new Set<string>();
     for (let i = 0; i < 20; i++) picked.add(r.resolve(`s${i}`, all, () => true, utilOf)!.accountId);
@@ -69,7 +69,7 @@ describe("SessionRouter with weekly pacing", () => {
   });
 
   it("keeps serving when every seat is ahead, choosing the least ahead", () => {
-    const r = new SessionRouter({ now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15 } });
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 } });
     const utilOf = poolMetrics({ a: { util: 0.9, daysLeft: 5 }, b: { util: 0.6, daysLeft: 5 } });
     expect(r.resolve("s", [T("a"), T("b")], () => true, utilOf)?.accountId).toBe("b");
   });
@@ -80,7 +80,7 @@ describe("SessionRouter with weekly pacing", () => {
     };
     const moves: string[] = [];
     const r = new SessionRouter({
-      now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15 },
+      now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 },
       onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`),
     });
     const targets = [T("a"), T("b")];
