@@ -1,4 +1,4 @@
-import { NO_PACE, weeklyPace, type WeeklyPace, type WeeklyPaceConfig } from "./weekly-pace.js";
+import { FIVE_HOUR_SEC, NO_PACE, weeklyPace, type WeeklyPace, type WeeklyPaceConfig } from "./weekly-pace.js";
 
 /** A routable destination for one Claude Code session. */
 export interface SessionTarget {
@@ -32,6 +32,8 @@ export interface TargetMetrics {
   /** The 7-day window, for weekly pacing. Absent means no weekly window is
    *  known, which reads as on pace. */
   weekly?: { util: number; resetAtSec?: number };
+  /** The 5-hour window, paced when `fiveHour` pacing is on. */
+  fiveHour?: { util: number; resetAtSec?: number };
 }
 
 /** Why an existing session left its target. */
@@ -333,8 +335,15 @@ export class SessionRouter {
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): WeeklyPace | null {
     if (!this.weeklyPace) return null;
-    const w = this.metricsOf(target, utilOf).weekly;
-    return w ? weeklyPace(w.util, w.resetAtSec, this.now(), this.weeklyPace.slack) : NO_PACE;
+    const m = this.metricsOf(target, utilOf);
+    const week = m.weekly
+      ? weeklyPace(m.weekly.util, m.weekly.resetAtSec, this.now(), this.weeklyPace.slack)
+      : NO_PACE;
+    if (!this.weeklyPace.fiveHour || !m.fiveHour) return week;
+    // The tighter window is what stops the seat, so the worse of the two counts.
+    const five = weeklyPace(m.fiveHour.util, m.fiveHour.resetAtSec, this.now(),
+      this.weeklyPace.fiveHourSlack, FIVE_HOUR_SEC);
+    return five.ahead > week.ahead ? five : week;
   }
 
   /** Whether `c` can take a session that `from` is shedding for weekly pace. */
@@ -362,9 +371,12 @@ export class SessionRouter {
   ): boolean {
     const pace = this.paceOf(target, utilOf);
     if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;
-    const resetAt = this.metricsOf(target, utilOf).weekly?.resetAtSec;
+    const m = this.metricsOf(target, utilOf);
     const nowSec = this.now() / 1000;
-    if (resetAt && resetAt > nowSec && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
+    // Moving costs a cache rewrite; skip it when either window is about to refill.
+    for (const resetAt of [m.weekly?.resetAtSec, this.weeklyPace!.fiveHour ? m.fiveHour?.resetAtSec : undefined]) {
+      if (resetAt && resetAt > nowSec && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
+    }
     return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf));
   }
 

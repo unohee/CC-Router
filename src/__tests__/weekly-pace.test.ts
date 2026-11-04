@@ -100,3 +100,47 @@ describe("SessionRouter with weekly pacing", () => {
     expect(moves).toEqual(["b:weekly-pace"]);
   });
 });
+
+describe("five-hour pacing", () => {
+  const HOUR = 3600;
+  const cfg = { slack: 0.1, migrateAhead: 0.15, fiveHour: true, fiveHourSlack: 0.2 };
+  /** `hoursLeft` hours before the 5-hour window closes. */
+  const five = (util: number, hoursLeft: number) => ({ util, resetAtSec: nowSec + hoursLeft * HOUR });
+  const week = { util: 0.1, resetAtSec: nowSec + 6 * DAY };
+  const metrics = (over: Record<string, ReturnType<typeof five>>) => (t: SessionTarget): TargetMetrics =>
+    ({ util: over[t.accountId]!.util, resetAtSec: over[t.accountId]!.resetAtSec, weekly: week, fiveHour: over[t.accountId] });
+
+  it("measures the 5-hour window against five hours, not a week", () => {
+    const p = weeklyPace(0.5, nowSec + 2.5 * HOUR, NOW, 0.2, 5 * HOUR);
+    expect(p.target).toBeCloseTo(0.7, 9);
+  });
+
+  it("sends new sessions to the seat with 5-hour room, not the one that is full", () => {
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: cfg });
+    const utilOf = metrics({ lyra: five(0.35, 4.8), rigel: five(1.0, 3.8), vega: five(1.0, 3.5) });
+    const picked = new Set<string>();
+    for (let i = 0; i < 12; i++) picked.add(r.resolve(`s${i}`, [T("lyra"), T("rigel"), T("vega")], () => true, utilOf)!.accountId);
+    expect([...picked]).toEqual(["lyra"]);
+  });
+
+  it("ignores the 5-hour window when fiveHour pacing is off", () => {
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: { ...cfg, fiveHour: false } });
+    const utilOf = metrics({ a: five(1.0, 3.8), b: five(1.0, 3.5) });
+    const picked = new Set<string>();
+    for (let i = 0; i < 12; i++) picked.add(r.resolve(`s${i}`, [T("a"), T("b")], () => true, utilOf)!.accountId);
+    expect(picked.size).toBe(2);
+  });
+
+  it("moves a pin whose 5-hour window is far ahead, unless that window resets within 15 minutes", () => {
+    const moves: string[] = [];
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: cfg, onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`) });
+    const t = [T("a"), T("b")];
+    r.resolve("s", t, x => x.accountId === "a", metrics({ a: five(0.1, 4), b: five(0.1, 4) }));
+    // a nearly full with a fresh window; b has room: leave.
+    expect(r.resolve("s", t, () => true, metrics({ a: five(0.9, 4.5), b: five(0.1, 4.5) }))?.accountId).toBe("b");
+    expect(moves).toEqual(["b:weekly-pace"]);
+    // Pinned on b; b is full but resets in 10 minutes: stay.
+    const stay = r.resolve("s", t, () => true, metrics({ a: five(0.1, 4.5), b: five(0.95, 10 / 60) }));
+    expect(stay?.accountId).toBe("b");
+  });
+});
