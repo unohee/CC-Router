@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { needsRefresh, refreshAccountToken } from "../proxy/token-refresher.js";
-import type { Account } from "../proxy/types.js";
+import { ACCOUNT_USER_DEFAULTS, DEFAULT_RATE_LIMITS, type Account } from "../proxy/types.js";
 
 function makeAccount(expiresAt: number): Account {
   return {
@@ -18,6 +18,8 @@ function makeAccount(expiresAt: number): Account {
     lastUsed: 0,
     lastRefresh: 0,
     consecutiveErrors: 0,
+    rateLimits: { ...DEFAULT_RATE_LIMITS },
+    ...ACCOUNT_USER_DEFAULTS,
   };
 }
 
