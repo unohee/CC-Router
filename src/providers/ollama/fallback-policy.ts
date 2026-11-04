@@ -42,6 +42,33 @@ export interface ResolvedOllamaFallbackConfig {
   autoTierMap: boolean;
   /** Daily USD budget gate (daily-budget.ts). */
   dailyBudget?: OllamaDailyBudgetConfig;
+  /** Spill: answer some tiers from Ollama while Anthropic can still serve, once
+   *  the pool's 5-hour headroom is nearly gone. Null when off. */
+  spill: OllamaSpillConfig | null;
+}
+
+export type OllamaSpillTier = "opus" | "sonnet" | "haiku";
+
+export interface OllamaSpillConfig {
+  /** Tiers that may spill. Opus is never spilled unless listed. */
+  tiers: OllamaSpillTier[];
+  /** The pool is tight when no usable account has 5-hour utilization below this (0–1). */
+  poolUtil: number;
+}
+
+export const OLLAMA_DEFAULT_SPILL_TIERS: OllamaSpillTier[] = ["haiku", "sonnet"];
+export const OLLAMA_DEFAULT_SPILL_POOL_UTIL = 0.9;
+
+/** Null unless `enabled` is true; bad fields fall back to the defaults. */
+export function resolveOllamaSpillConfig(raw: unknown): OllamaSpillConfig | null {
+  if (typeof raw !== "object" || raw === null || (raw as { enabled?: unknown }).enabled !== true) return null;
+  const r = raw as { tiers?: unknown; poolUtil?: unknown };
+  const tiers = Array.isArray(r.tiers)
+    ? [...new Set(r.tiers.filter((t): t is OllamaSpillTier => t === "opus" || t === "sonnet" || t === "haiku"))]
+    : [];
+  const poolUtil = typeof r.poolUtil === "number" && Number.isFinite(r.poolUtil) && r.poolUtil > 0 && r.poolUtil <= 1
+    ? r.poolUtil : OLLAMA_DEFAULT_SPILL_POOL_UTIL;
+  return { tiers: tiers.length > 0 ? tiers : OLLAMA_DEFAULT_SPILL_TIERS, poolUtil };
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -105,6 +132,7 @@ export function resolveOllamaFallbackConfig(
     keyRequired: ollamaKeyRequired(baseUrl),
     autoTierMap: raw.autoTierMap === true,
     dailyBudget: raw.dailyBudget,
+    spill: resolveOllamaSpillConfig(raw.spill),
   };
 }
 
@@ -171,7 +199,7 @@ export type OllamaSkipReason =
   | "no-api-key";
 
 export type OllamaDecision =
-  | { use: true; model: string; waitSeconds: number; effort?: OllamaEffort }
+  | { use: true; model: string; waitSeconds: number; effort?: OllamaEffort; spill?: true }
   | { use: false; reason: OllamaSkipReason; detail?: string };
 
 export interface OllamaDecisionInput {
@@ -188,24 +216,46 @@ export interface OllamaDecisionInput {
   matchedTiers?: () => TierModels;
   /** Daily-budget verdict; null verdicts (feature off) skip the check. */
   budget?: () => OllamaBudgetVerdict | null;
+  /** Whether the pool's 5-hour headroom is nearly gone. Read only when spill is
+   *  configured, the request's tier may spill, and Anthropic could still serve. */
+  poolTight?: () => boolean;
+}
+
+/** A tier name for `claudeModel`, with frontier counted as opus. */
+function spillTierOf(claudeModel: string | undefined): OllamaSpillTier | undefined {
+  const c = claudeTierOf(claudeModel);
+  const t = c === "frontier" ? "opus" : c;
+  return t === "opus" || t === "sonnet" || t === "haiku" ? t : undefined;
 }
 
 export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision {
   const { config } = input;
   if (!config) return { use: false, reason: "disabled" };
   if (!config.model) return { use: false, reason: "no-model" };
-  if (input.anthropicAvailable()) return { use: false, reason: "anthropic-available" };
+  // Spill: Anthropic can still serve, but its 5-hour headroom is nearly gone, so
+  // the tiers the operator listed go to Ollama now instead of after the 429.
+  // Everything below except the wait checks still applies to a spilled request.
+  let spilled = false;
+  if (input.anthropicAvailable()) {
+    const tier = spillTierOf(input.claudeModel);
+    if (!config.spill || !tier || !config.spill.tiers.includes(tier) || !input.poolTight?.()) {
+      return { use: false, reason: "anthropic-available" };
+    }
+    spilled = true;
+  }
 
-  const wait = input.poolWaitSeconds();
-  // getNext() still hands out a busy or over-cap account, so Anthropic answers
-  // this request in degraded form; Ollama must not pre-empt that.
-  if (wait <= 0) return { use: false, reason: "anthropic-will-serve" };
-  // Nothing is blocked, there is simply nothing to route to (no account, or
-  // every one disabled). That is a configuration state answered with a 503, not
-  // a wait Ollama could bridge.
-  if (!Number.isFinite(wait)) return { use: false, reason: "pool-empty" };
-  if (wait <= config.minWaitSeconds) {
-    return { use: false, reason: "reset-near", detail: `reset in ${wait}s <= ${config.minWaitSeconds}s` };
+  const wait = spilled ? 0 : input.poolWaitSeconds();
+  if (!spilled) {
+    // getNext() still hands out a busy or over-cap account, so Anthropic answers
+    // this request in degraded form; Ollama must not pre-empt that.
+    if (wait <= 0) return { use: false, reason: "anthropic-will-serve" };
+    // Nothing is blocked, there is simply nothing to route to (no account, or
+    // every one disabled). That is a configuration state answered with a 503, not
+    // a wait Ollama could bridge.
+    if (!Number.isFinite(wait)) return { use: false, reason: "pool-empty" };
+    if (wait <= config.minWaitSeconds) {
+      return { use: false, reason: "reset-near", detail: `reset in ${wait}s <= ${config.minWaitSeconds}s` };
+    }
   }
 
   // Unknown size passes, as with codexCanHold: the guard stops a KNOWN
@@ -231,5 +281,6 @@ export function decideOllamaFallback(input: OllamaDecisionInput): OllamaDecision
     model: ollamaModelFor(input.claudeModel, config, input.matchedTiers?.()),
     waitSeconds: wait,
     ...(effort ? { effort } : {}),
+    ...(spilled ? { spill: true as const } : {}),
   };
 }

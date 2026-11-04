@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  decideOllamaFallback, resolveOllamaFallbackConfig, ollamaEffortFor, ollamaKeyRequired, ollamaModelFor, readOllamaApiKey,
+  decideOllamaFallback, resolveOllamaFallbackConfig, resolveOllamaSpillConfig, ollamaEffortFor, ollamaKeyRequired, ollamaModelFor, readOllamaApiKey,
   type OllamaDecisionInput,
 } from "../providers/ollama/fallback-policy.js";
 
@@ -36,6 +36,7 @@ describe("resolveOllamaFallbackConfig", () => {
       tierEffort: { opus: undefined, sonnet: undefined, haiku: undefined },
       contextTokens: 1_048_576, keyRequired: true,
       autoTierMap: false,
+      spill: null,
     });
     expect(LOCAL.baseUrl).toBe("http://127.0.0.1:11434");
     expect(LOCAL.keyRequired).toBe(false);
@@ -135,5 +136,51 @@ describe("tier effort", () => {
   it("adds no effort when none is configured", () => {
     const d = decideOllamaFallback(input());
     expect(d.use && "effort" in d).toBe(false);
+  });
+});
+
+describe("spill: answering from Ollama before the pool is empty", () => {
+  const SPILL = resolveOllamaFallbackConfig({
+    enabled: true, baseUrl: "http://127.0.0.1:11434/", model: "glm:cloud", minWaitSeconds: 900, contextTokens: 1000,
+    spill: { enabled: true, poolUtil: 0.9 },
+  })!;
+  const spillInput = (over: Partial<OllamaDecisionInput> = {}) =>
+    input({ config: SPILL, anthropicAvailable: () => true, poolWaitSeconds: () => 0, poolTight: () => true, ...over });
+
+  it("is off unless enabled, and bad fields fall back to the defaults", () => {
+    expect(resolveOllamaSpillConfig(undefined)).toBeNull();
+    expect(resolveOllamaSpillConfig({ enabled: false })).toBeNull();
+    expect(resolveOllamaSpillConfig({ enabled: true, tiers: ["x"], poolUtil: 5 }))
+      .toEqual({ tiers: ["haiku", "sonnet"], poolUtil: 0.9 });
+    expect(resolveOllamaSpillConfig({ enabled: true, tiers: ["opus", "opus"], poolUtil: 0.8 }))
+      .toEqual({ tiers: ["opus"], poolUtil: 0.8 });
+  });
+
+  it("spills a listed tier while Anthropic can serve and the pool is tight", () => {
+    const d = decideOllamaFallback(spillInput({ claudeModel: "claude-haiku-4-5" }));
+    expect(d).toMatchObject({ use: true, spill: true, waitSeconds: 0 });
+    expect(decideOllamaFallback(spillInput({ claudeModel: "claude-sonnet-4-6" }))).toMatchObject({ use: true, spill: true });
+  });
+
+  it("never spills opus unless listed, nor when the pool has room, nor without the config", () => {
+    expect(decideOllamaFallback(spillInput({ claudeModel: "claude-opus-4-1" }))).toEqual({ use: false, reason: "anthropic-available" });
+    expect(decideOllamaFallback(spillInput({ poolTight: () => false }))).toEqual({ use: false, reason: "anthropic-available" });
+    expect(decideOllamaFallback(spillInput({ config: LOCAL }))).toEqual({ use: false, reason: "anthropic-available" });
+  });
+
+  it("still obeys size, key and budget guards", () => {
+    expect(decideOllamaFallback(spillInput({ estimatedPromptTokens: 5000 }))).toMatchObject({ use: false, reason: "too-large" });
+    const cloud = { ...SPILL, keyRequired: true };
+    expect(decideOllamaFallback(spillInput({ config: cloud }))).toEqual({ use: false, reason: "no-api-key" });
+    expect(decideOllamaFallback(spillInput({
+      budget: () => ({ allow: false, reason: "budget-exhausted", budgetUsd: 1, spentUsd: 1, remainingUsd: 0, day: "d" }),
+    }))).toMatchObject({ use: false, reason: "budget-exhausted" });
+  });
+
+  it("leaves the blocked-pool path as it was", () => {
+    expect(decideOllamaFallback(spillInput({ anthropicAvailable: () => false, poolWaitSeconds: () => 7200 })))
+      .toMatchObject({ use: true });
+    expect(decideOllamaFallback(spillInput({ anthropicAvailable: () => false, poolWaitSeconds: () => 7200 })))
+      .not.toHaveProperty("spill");
   });
 });

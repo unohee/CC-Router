@@ -14,6 +14,7 @@
  */
 
 export const WEEK_SEC = 7 * 24 * 60 * 60;
+export const FIVE_HOUR_SEC = 5 * 60 * 60;
 
 export interface WeeklyPaceConfig {
   /** Allowance above the linear line, as a fraction of the window (0–1). A
@@ -22,9 +23,16 @@ export interface WeeklyPaceConfig {
   /** How far ahead (fraction of the window) a pinned session's seat must be
    *  before the session is moved to an on-pace seat. */
   migrateAhead: number;
+  /** Also pace the 5-hour window. Off unless set. */
+  fiveHour: boolean;
+  /** Allowance above the linear line for the 5-hour window. Wider than `slack`:
+   *  work arrives in bursts, so an even spend over five hours is not the goal. */
+  fiveHourSlack: number;
 }
 
-export const DEFAULT_WEEKLY_PACE: WeeklyPaceConfig = { slack: 0.10, migrateAhead: 0.15 };
+export const DEFAULT_WEEKLY_PACE: WeeklyPaceConfig = {
+  slack: 0.10, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.20,
+};
 
 export interface WeeklyPace {
   /** Utilization the seat may have reached by now and still be on pace. */
@@ -51,10 +59,11 @@ export function weeklyPace(
   resetAtSec: number | undefined,
   nowMs: number,
   slack: number = DEFAULT_WEEKLY_PACE.slack,
+  windowSec: number = WEEK_SEC,
 ): WeeklyPace {
   const nowSec = nowMs / 1000;
   if (!resetAtSec || resetAtSec <= nowSec || !Number.isFinite(util)) return NO_PACE;
-  const elapsed = Math.min(1, Math.max(0, 1 - (resetAtSec - nowSec) / WEEK_SEC));
+  const elapsed = Math.min(1, Math.max(0, 1 - (resetAtSec - nowSec) / windowSec));
   const target = Math.min(1, elapsed + Math.max(0, slack));
   return { target, ahead: util - target };
 }

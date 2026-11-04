@@ -67,6 +67,8 @@ export type OllamaRouteInfo = OpenAIActivity & {
   upstreamModel: string;
   /** Seconds until the Anthropic pool frees up, as it read when deciding. */
   poolWaitSeconds: number;
+  /** Answered from Ollama while Anthropic could still serve (spill). */
+  spill?: boolean;
   usage?: OllamaUsage;
   failedAfterStart?: boolean;
   /** The client hung up mid-response. Served, but neither a success nor an
@@ -89,6 +91,8 @@ export interface OllamaFallbackRouteOptions {
   matchedTiers?: () => TierModels;
   /** Daily-budget verdict the request path reads before falling back. Null means off. */
   budget?: () => OllamaBudgetVerdict | null;
+  /** Whether the pool's 5-hour headroom is nearly gone (see `spill`). */
+  poolTight?: (model?: string) => boolean;
 }
 
 export interface MessagesCrossProviderRouteOptions {
@@ -677,6 +681,7 @@ export function mountMessagesCrossProviderRoute(
       apiKey: () => ollama?.apiKey(),
       matchedTiers: ollama?.matchedTiers,
       ...(ollama?.budget ? { budget: ollama.budget } : {}),
+      ...(ollama?.poolTight ? { poolTight: () => ollama.poolTight!(claudeModel) } : {}),
     });
     // Only a decision taken against a blocked pool is worth surfacing; the
     // everyday "Anthropic can serve" answer would bury it.
@@ -1020,6 +1025,7 @@ export function mountMessagesCrossProviderRoute(
             opts.onOllamaFallback?.({
               upstreamModel: decision.model,
               poolWaitSeconds: decision.waitSeconds,
+              ...(decision.spill ? { spill: true } : {}),
               usage: outcome.usage,
               failedAfterStart: outcome.failedAfterStart,
               clientClosed: outcome.clientClosed,

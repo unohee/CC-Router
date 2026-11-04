@@ -32,7 +32,7 @@ import { OllamaDailyBudget, budgetBalanceOf, resolveOllamaDailyBudgetConfig } fr
 import { resolveUpstream429Relay, clientRetryAfterSeconds, makeUpstream429Retryable, isRetryableQuota429 } from "./upstream-429-relay.js";
 import { createUsageSummaryProvider } from "./usage-summary.js";
 import { createUsageSeriesProvider } from "./usage-series.js";
-import { DEFAULT_WEEKLY_PACE, weeklyPace, type WeeklyPace } from "./weekly-pace.js";
+import { DEFAULT_WEEKLY_PACE, FIVE_HOUR_SEC, weeklyPace, type WeeklyPace } from "./weekly-pace.js";
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
@@ -93,6 +93,8 @@ export interface HealthAccountView {
   weeklyWindow?: WeeklyWindow;
   /** Where the 7-day window stands against an even spend over the week. */
   weeklyPace?: WeeklyPace;
+  /** The same for the 5-hour window (slack from `routing.weeklyPace.fiveHourSlack`). */
+  fiveHourPace?: WeeklyPace;
 }
 
 export interface OperationalStatus {
@@ -204,6 +206,8 @@ function publicAnthropicAccountView(a: Account): HealthAccountView {
     weeklyWindow: weeklyWindowOf(a),
     weeklyPace: weeklyPace(a.rateLimits.sevenDayUtil, a.rateLimits.sevenDayReset, Date.now(),
       (getWeeklyPace() ?? DEFAULT_WEEKLY_PACE).slack),
+    fiveHourPace: weeklyPace(a.rateLimits.fiveHourUtil, a.rateLimits.fiveHourReset, Date.now(),
+      (getWeeklyPace() ?? DEFAULT_WEEKLY_PACE).fiveHourSlack, FIVE_HOUR_SEC),
   };
 }
 
@@ -380,6 +384,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     serving: false,
     lastServedAt: null as number | null,
     requests: 0,
+    /** Requests answered while Anthropic could still serve (spill). */
+    spilled: 0,
     errors: 0,
     lastSkipReason: null as string | null,
     lastSkipAt: null as number | null,
@@ -510,9 +516,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // still decides whether the account is over the soft cap.
     const pace = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
     const weekly = { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset };
+    const fiveHour = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
     return limits.sevenDayUtil > limits.fiveHourUtil
-      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace, weekly }
-      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace, weekly };
+      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace, weekly, fiveHour }
+      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace, weekly, fiveHour };
   };
 
   // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
@@ -776,6 +783,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           serving: ollamaStatus.serving,
           lastServedAt: ollamaStatus.lastServedAt,
           requests: ollamaStatus.requests,
+          spilled: ollamaStatus.spilled,
           errors: ollamaStatus.errors,
           lastSkipReason: ollamaStatus.lastSkipReason,
           lastSkipAt: ollamaStatus.lastSkipAt,
@@ -1168,24 +1176,30 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         timeoutMs: proxyRequestTimeoutMs,
         matchedTiers: () => tierDiscovery?.ollama() ?? {},
         ...(ollamaBudget ? { budget: budgetSnapshot } : {}),
+        ...(ollamaConfig.spill ? {
+          // Tight = no usable account still has 5-hour room below the spill line.
+          poolTight: (model?: string) => !pool.getAll().some(a =>
+            a.enabled && a.healthy && pool.canServe(a.id, model) && a.rateLimits.fiveHourUtil < ollamaConfig.spill!.poolUtil),
+        } : {}),
       },
     } : {}),
     onOllamaSkip: (reason) => {
       ollamaStatus.lastSkipReason = reason;
       ollamaStatus.lastSkipAt = Date.now();
     },
-    onOllamaFallback: ({ upstreamModel, poolWaitSeconds, usage, failedAfterStart, clientClosed, ...activity }) => {
-      if (!ollamaStatus.serving) {
+    onOllamaFallback: ({ upstreamModel, poolWaitSeconds, spill, usage, failedAfterStart, clientClosed, ...activity }) => {
+      if (!ollamaStatus.serving && !spill) {
         logOllamaTransition("ollama", `every account blocked for ${poolWaitSeconds}s`);
         ollamaStatus.serving = true;
       }
       ollamaStatus.requests++;
+      if (spill) ollamaStatus.spilled++;
       ollamaStatus.lastServedAt = Date.now();
       // A completed response is where the provider will have spent its credit:
       // fold the balance drop since the last reading into today's budget.
       ollamaBudget?.observe(latestBalance());
       logOllamaFallback(upstreamModel, poolWaitSeconds,
-        failedAfterStart ? "— failed mid-response" : clientClosed ? "— client disconnected" : undefined);
+        spill ? "— spill (pool 5h tight)" : failedAfterStart ? "— failed mid-response" : clientClosed ? "— client disconnected" : undefined);
       // Its own provider in the history, and never an Anthropic account's
       // counters: these tokens were not spent on any Claude subscription.
       if (usage) {
@@ -1199,7 +1213,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         stats.totalErrors++;
         ollamaStatus.errors++;
       }
-      const msg = `all Anthropic accounts blocked for ${poolWaitSeconds}s — answered by Ollama (${upstreamModel})`;
+      const msg = spill
+        ? `spilled to Ollama (pool 5h ≥ ${Math.round((ollamaConfig?.spill?.poolUtil ?? 0) * 100)}%) — answered by ${upstreamModel}`
+        : `all Anthropic accounts blocked for ${poolWaitSeconds}s — answered by Ollama (${upstreamModel})`;
       stats.addLog({
         ts: Date.now(), accountId: "ollama", model: upstreamModel,
         type: failedAfterStart ? "error" : "route",

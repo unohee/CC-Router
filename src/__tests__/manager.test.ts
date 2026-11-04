@@ -545,8 +545,10 @@ describe("getWeeklyPace", () => {
 
   it("reads its fractions, falling back to defaults when out of range", () => {
     writeConfig({ routing: { weeklyPace: { enabled: true, slack: 0.05, migrateAhead: 0.2 } } });
-    expect(getWeeklyPace()).toEqual({ slack: 0.05, migrateAhead: 0.2 });
+    expect(getWeeklyPace()).toEqual({ slack: 0.05, migrateAhead: 0.2, fiveHour: false, fiveHourSlack: 0.2 });
+    writeConfig({ routing: { weeklyPace: { enabled: true, fiveHour: true, fiveHourSlack: 0.3 } } });
+    expect(getWeeklyPace()).toMatchObject({ fiveHour: true, fiveHourSlack: 0.3 });
     writeConfig({ routing: { weeklyPace: { enabled: true, slack: 10, migrateAhead: -1 } } });
-    expect(getWeeklyPace()).toEqual({ slack: 0.1, migrateAhead: 0.15 });
+    expect(getWeeklyPace()).toEqual({ slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 });
   });
 });

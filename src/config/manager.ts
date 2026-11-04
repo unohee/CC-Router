@@ -243,6 +243,9 @@ export interface OllamaFallbackConfig {
   /** Daily USD budget for Ollama Cloud (providers/ollama/daily-budget.ts). Opt-in.
    *  `monthlyUsd` is the period's included allowance; `reserveUsd` is a hard floor. */
   dailyBudget?: OllamaDailyBudgetConfig;
+  /** Answer the listed tiers from Ollama while Anthropic can still serve, once
+   *  no usable account has 5-hour utilization below `poolUtil`. Opt-in. */
+  spill?: { enabled?: boolean; tiers?: Array<"opus" | "sonnet" | "haiku">; poolUtil?: number };
 }
 
 export interface ClientConfig {
@@ -343,7 +346,7 @@ export interface ProxyConfig {
     softCapUtil?: number;
     /** Weekly pacing: prefer seats spending their 7-day window no faster than
      *  the week elapses. Opt-in: off unless `enabled` is true. */
-    weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number };
+    weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number; fiveHour?: boolean; fiveHourSlack?: number };
   };
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
@@ -429,6 +432,8 @@ export function getWeeklyPace(): WeeklyPaceConfig | undefined {
   return {
     slack: frac(raw.slack, DEFAULT_WEEKLY_PACE.slack),
     migrateAhead: frac(raw.migrateAhead, DEFAULT_WEEKLY_PACE.migrateAhead),
+    fiveHour: raw.fiveHour === true,
+    fiveHourSlack: frac(raw.fiveHourSlack, DEFAULT_WEEKLY_PACE.fiveHourSlack),
   };
 }
 
