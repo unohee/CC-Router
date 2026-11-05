@@ -24,6 +24,7 @@ import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH } from "../config/paths.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
+import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
@@ -283,12 +284,42 @@ function applyInputUsage(entry: LogEntry, usage: Record<string, number>): void {
     input: entry.inputTokens, cacheRead: entry.cacheReadTokens, cacheCreation: entry.cacheCreationTokens,
     request: true,
   });
+  // Per account, for the supply model: the usage store above is pool-wide.
+  quotaHistory.addSpend(entry.accountId, costWeighted({
+    input: entry.inputTokens, cacheRead: entry.cacheReadTokens, cacheCreation: entry.cacheCreationTokens,
+  }));
 }
 
 function applyOutputUsage(entry: LogEntry, usage: Record<string, number>): void {
   entry.outputTokens = usage["output_tokens"] ?? 0;
   stats.totalOutputTokens += entry.outputTokens;
   usageHistory.record({ ts: entry.ts, provider: "anthropic", model: entry.model, output: entry.outputTokens });
+  quotaHistory.addSpend(entry.accountId, costWeighted({ output: entry.outputTokens }));
+}
+
+/**
+ * The supply model over the pool's live readings and both histories. Memoised
+ * for a minute: health is polled every few seconds, and the inputs change by
+ * the hour.
+ */
+const SUPPLY_TTL_MS = 60_000;
+let supplyMemo: { at: number; value: PoolSupply } | null = null;
+function supplySnapshot(accounts: ReadonlyArray<Account>, now: number): PoolSupply {
+  if (supplyMemo && now - supplyMemo.at < SUPPLY_TTL_MS) return supplyMemo.value;
+  const value = computeSupply({
+    now,
+    live: accounts.filter(a => a.enabled).map(a => ({
+      id: a.id,
+      fiveHour: { util: a.rateLimits.fiveHourUtil, resetAt: a.rateLimits.fiveHourReset },
+      sevenDay: { util: a.rateLimits.sevenDayUtil, resetAt: a.rateLimits.sevenDayReset },
+      readAt: a.rateLimits.lastUpdated,
+    })),
+    readings: quotaHistory.readings(),
+    buckets: usageHistory.buckets().filter(b => b.provider === "anthropic"),
+    since: usageHistory.since,
+  });
+  supplyMemo = { at: now, value };
+  return value;
 }
 
 // ─── Rate limit header extraction ──────────────────────────────────────────
@@ -792,6 +823,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // The last hour's latency and error figures. The 50 rows above cover
       // minutes on a busy pool, too few for a p95.
       performance: stats.perf.snapshot(Date.now()),
+      // Capacity, demand forecast, today's budget and projected exhaustion per
+      // account. Cost-weighted tokens; "unknown" until enough readings pair up.
+      supply: supplySnapshot(pool.getAll(), Date.now()),
       // The one verdict both status surfaces draw. The 429 count reads the whole
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
@@ -1758,6 +1792,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // final assignments is what makes a restart rewrite every prompt cache.
     writeSessionAssignments(sessionRouter.snapshot());
     flushUsage();
+    quotaHistory.touch();
     flushQuota();
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();

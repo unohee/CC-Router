@@ -112,7 +112,7 @@ describe("on disk", () => {
       expect(existsSync(`${path}.tmp`)).toBe(false);
       const file = JSON.parse(readFileSync(path, "utf-8")) as QuotaFile;
       expect(file.version).toBe(1);
-      expect(file.rows[0]).toEqual([HOUR0 / 1000, "lyra", Math.floor(T0 / 1000), 0.42, RL.fiveHourReset, 0.58, RL.sevenDayReset]);
+      expect(file.rows[0]).toEqual([HOUR0 / 1000, "lyra", Math.floor(T0 / 1000), 0.42, RL.fiveHourReset, 0.58, RL.sevenDayReset, 0]);
 
       const read = readUsageFile(path);
       expect(read.status).toBe("ok");
