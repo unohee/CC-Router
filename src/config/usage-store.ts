@@ -1,5 +1,6 @@
 /**
- * Reading and writing the usage history file.
+ * Reading and writing the usage history file, and the other history files
+ * kept the same way beside it (quota-history.json).
  *
  * Kept apart from `manager.ts` and taking the path as a parameter: the path
  * constants live in a module several tests replace wholesale, and a store that
@@ -8,7 +9,6 @@
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { UsageFile } from "../proxy/usage-history.js";
 
 export type UsageRead =
   | { status: "missing" }
@@ -54,7 +54,7 @@ export function readUsageFile(path: string): UsageRead {
  * Never throws: history is not worth taking the proxy down for, and the caller
  * decides what a failure means (it keeps the data dirty and tries again).
  */
-export function writeUsageFile(path: string, file: UsageFile): { ok: true } | { ok: false; error: string } {
+export function writeUsageFile(path: string, file: object): { ok: true } | { ok: false; error: string } {
   const data = JSON.stringify(file);
   const tmp = `${path}.tmp`;
   try {
@@ -81,7 +81,7 @@ export function writeUsageFile(path: string, file: UsageFile): { ok: true } | { 
 
 interface Flushable {
   readonly dirty: boolean;
-  toFile(): UsageFile;
+  toFile(): object;
   markClean(): void;
 }
 
@@ -99,6 +99,7 @@ export function createUsageFlusher(
   path: string,
   onWarn: (message: string) => void,
   write: typeof writeUsageFile = writeUsageFile,
+  what = "usage history",
 ): () => void {
   let warned = false;
   return () => {
@@ -111,7 +112,7 @@ export function createUsageFlusher(
     }
     if (!warned) {
       warned = true;
-      onWarn(`could not save usage history to ${path}: ${result.error}`);
+      onWarn(`could not save ${what} to ${path}: ${result.error}`);
     }
   };
 }

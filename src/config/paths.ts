@@ -31,6 +31,14 @@ export const USAGE_PATH =
   process.env["USAGE_PATH"] ||
   path.join(path.dirname(ACCOUNTS_PATH), "usage.json");
 
+/**
+ * Per-account quota readings, sampled at most once an hour. Beside accounts.json
+ * for the same reason as USAGE_PATH; `||` for the same reason too.
+ */
+export const QUOTA_HISTORY_PATH =
+  process.env["QUOTA_HISTORY_PATH"] ||
+  path.join(path.dirname(ACCOUNTS_PATH), "quota-history.json");
+
 /** Ollama daily-budget spend, so a restart does not reset the day. */
 export const OLLAMA_BUDGET_PATH =
   process.env["OLLAMA_BUDGET_PATH"] ??
