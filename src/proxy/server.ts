@@ -27,7 +27,7 @@ import { restoreAccountState, snapshotAccountState } from "../config/account-sta
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
 import { hasClaudeCodeIdentity } from "./client-identity.js";
-import { isFailoverStatus, readCapped, relayResponse, type FailoverState, type StoredRefusal } from "./failover.js";
+import { FailoverCounters, isFailoverStatus, readCapped, reasonOfStatus, relayResponse, type FailoverOutcome, type FailoverState, type StoredRefusal } from "./failover.js";
 import { DemandGovernor, PRIORITY_HEADER, governedSpill, governedThrottleUtil, governedWeeklyPace } from "./demand-governor.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher, writeUsageFile } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample, DAY_MS, HOUR_MS } from "./usage-history.js";
@@ -896,6 +896,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // account. Cost-weighted tokens; "unknown" until enough readings pair up.
       supply: supplySnapshot(pool.getAll(), Date.now()),
       governor: governor.snapshot(),
+      // POST /v1/messages requests retried inside the router, by how they ended
+      // and by what refused them. Totals since the router started.
+      failover: failoverCounters.snapshot(),
       // The one verdict both status surfaces draw. The 429 count reads the whole
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
@@ -1741,6 +1744,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // client, so nothing is retried after the first byte. Every other response
   // is piped through exactly as the plain proxy would (relayResponse).
   const failoverEnabled = getFailoverEnabled();
+  const failoverCounters = new FailoverCounters(failoverEnabled);
+  /** Count how a request that entered failover ended, once. */
+  const endFailover = (req: Request, outcome: FailoverOutcome): void => {
+    const st = req._ccFailover;
+    if (!st?.entered || st.ended) return;
+    st.ended = true;
+    failoverCounters.ended(outcome);
+  };
   const failoverProxy = createProxyMiddleware<Request, ServerResponse>({
     ...proxyOptions,
     selfHandleResponse: true,
@@ -1766,7 +1777,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "proxy_error", message: err.message } }));
         void failoverNext(r, res as ServerResponse, {
           status: 502, headers: { "content-type": "application/json", "content-length": String(body.length) }, body,
-          reason: `connection error (${err.message.slice(0, 80)})`,
+          reason: `connection error (${err.message.slice(0, 80)})`, kind: "connection",
         });
       },
     },
@@ -1787,12 +1798,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   async function onFailoverResponse(proxyRes: IncomingMessage, req: Request, res: ServerResponse): Promise<void> {
     if (res.headersSent || res.destroyed || !req._ccFailover || !shouldFailover(proxyRes, req)) {
+      if (res.destroyed) endFailover(req, "clientGone");
+      else endFailover(req, (proxyRes.statusCode ?? 0) < 400 ? "recovered" : "refused");
       relayResponse(proxyRes, res);
       return;
     }
     const status = proxyRes.statusCode ?? 0;
     const body = await readCapped(proxyRes);
-    await failoverNext(req, res, { status, headers: { ...proxyRes.headers }, body, reason: `HTTP ${status}` });
+    await failoverNext(req, res, { status, headers: { ...proxyRes.headers }, body, reason: `HTTP ${status}`, kind: reasonOfStatus(status) });
   }
 
   /** The next account to try: usable for this model, not tried yet, coolest first. */
@@ -1808,15 +1821,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   async function failoverNext(req: Request, res: ServerResponse, refusal: StoredRefusal): Promise<void> {
     const st = req._ccFailover!;
     st.last = refusal;
+    if (!st.entered) { st.entered = true; failoverCounters.entered(); }
+    failoverCounters.refused(refusal.kind);
     const from = req._ccAccount?.id ?? "?";
+    const refusedLog = req._pendingLog;
     if (st.throttleHeld) throttleGate.release(st.throttleHeld);
     st.throttleHeld = undefined;
-    if (res.destroyed) return;
+    if (res.destroyed) { endFailover(req, "clientGone"); return; }
     for (;;) {
       const next = nextFailoverAccount(st.tried, req._ccAnthropicModel);
       if (!next) break;
       st.tried.add(next.id);
       st.retries++;
+      failoverCounters.retried();
+      // The client will not see this refusal: keep it out of the 429 burst count.
+      if (refusedLog) refusedLog.failedOver = true;
       const msg = `failover: ${from} answered ${refusal.reason}; retrying on ${next.id} (attempt ${st.tried.size})`;
       console.log(chalk.yellow(`  ${msg}`));
       stats.addLog({ ts: Date.now(), accountId: next.id, model: req._ccAnthropicModel ?? "-", type: "route", details: msg });
@@ -1826,8 +1845,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       return;
     }
     // Every eligible account has refused: the Ollama fallback, then the refusal.
-    if (req._ccOllamaFailover && await req._ccOllamaFailover()) return;
-    if (res.headersSent || res.destroyed) return;
+    if (req._ccOllamaFailover && await req._ccOllamaFailover()) {
+      endFailover(req, res.headersSent ? "ollama" : "clientGone");
+      return;
+    }
+    if (res.headersSent || res.destroyed) { endFailover(req, "clientGone"); return; }
+    endFailover(req, "exhausted");
     if (st.retries > 0) {
       const msg = `failover: no account left after ${st.tried.size} tried; relaying the last refusal (${refusal.reason})`;
       console.log(chalk.yellow(`  ${msg}`));
@@ -1911,7 +1934,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // gets the request, otherwise the client gets the 401.
       if (!failover) return;
       const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "Anthropic subscription token refresh failed" } }));
-      await failoverNext(req, res, { status: 401, headers: { "content-type": "application/json", "content-length": String(body.length) }, body, reason: "token refresh failed" });
+      await failoverNext(req, res, { status: 401, headers: { "content-type": "application/json", "content-length": String(body.length) }, body, reason: "token refresh failed", kind: "token-refresh" });
       return;
     }
     if (failover) void failoverProxy(req, res, next);

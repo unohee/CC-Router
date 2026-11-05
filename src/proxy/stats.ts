@@ -16,6 +16,9 @@ export interface LogEntry {
   totalMs?: number;
   /** The client hung up before the response finished: not an upstream error. */
   clientClosed?: boolean;
+  /** This attempt was refused and the router retried the request on another
+   *  account (in-router failover). The client never saw this refusal. */
+  failedOver?: boolean;
   method?: string;
   path?: string;
   source?: "cli" | "desktop" | "api";

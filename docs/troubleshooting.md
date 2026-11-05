@@ -67,7 +67,11 @@ also scoped to their respective families. Unknown claims remain account-wide.
 
 The health endpoint exposes active `modelCooldowns` (epoch milliseconds) per
 account separately from `coolingUntil`. Scoped cooldowns do not set the global
-`busy` flag. These deadlines are runtime state and are remeasured after restart.
+`busy` flag. These deadlines, and each account's last rate-limit reading, are
+saved to `account-state.json` beside `accounts.json` and restored after a
+restart unless they have expired, so a restarted router does not try an
+exhausted account again. To start from a clean slate, stop the router and move
+that file aside.
 
 The account is hitting Anthropic's rate limits. cc-router puts the account on cooldown for the `Retry-After` period automatically.
 
@@ -220,6 +224,67 @@ Note the router infers this: it sees a request whose prompt is a fraction of
 what the session was carrying, confirmed by the following request. Claude Code
 issues small side-calls under the same session id, so a single small request is
 never enough to call it a compaction.
+
+## Was my request retried on another account? (failover)
+
+A `POST /v1/messages` that gets a 429, a 529, a 500/502/503/504 or a dropped
+connection before any byte is retried inside the router. The retry goes to the
+next usable account with the same body, then to the Ollama fallback, and only
+then is the refusal passed on. Look for:
+
+```
+  failover: lyra answered HTTP 429; retrying on vega (attempt 2)
+  failover: no account left after 5 tried; relaying the last refusal (HTTP 503)
+```
+
+`/cc-router/health` → `failover` counts requests by how they ended
+(`byOutcome.recovered`, `ollama`, `exhausted`, `refused`, `clientGone`) and by
+what refused them (`byReason`). The dashboard's Failover card shows the same.
+
+- **A 429 in the activity list, but Claude Code never saw one.** The router
+  failed over from it. Such entries are marked `failedOver` and are not
+  counted in the severity strip's "429 ×N in 5m".
+- **A token spike after a retry.** The other account has no prompt cache for
+  the session, so the retry rewrites it. A 5xx does not cool the first
+  account, so the session's next turn goes back there and rewrites it again.
+  This is the price of not failing the request.
+- **A slow non-streaming request answered twice as late.** A proxy timeout
+  before the headers counts as a connection error and is retried on another
+  account.
+- **Not retried:** other 4xx, anything after the first byte (SSE streams pass
+  through as they are), and a bare 429 for a client without Claude Code
+  identity (every account would refuse that client).
+- **Turn it off:** set `routing.failover.enabled` to false
+  (`{ "routing": { "failover": { "enabled": false } } }`). The client then gets
+  the first refusal and retries itself.
+
+---
+
+## What is the demand governor doing?
+
+`routing.governor` is off by default. With `enabled: true` and
+`enforce: false` it only observes: it judges a stage (0–4), logs every change
+and shows it in health, but applies nothing.
+
+```
+  governor stage 0 → 3 (observe only) — demand at 118% of today's budget
+```
+
+`/cc-router/health` → `governor` has `stage` (judged), `applied` (in effect:
+0 unless `enforce`), `pressure`, `reason` and the last 24 hours (`hours`, with
+changes and requests delayed).
+
+- **Stuck at stage 0 with "no budget yet".** The supply model has no capacity
+  estimate for any account yet. It needs 24 paired hourly readings per
+  account, so the first day or so after an upgrade looks like this.
+  `health.supply.accounts[].sevenDay.capacity.samples` shows the progress.
+- **Requests feel slower at stage 4.** Low-priority requests (short one-shots,
+  haiku-tier, or `x-cc-router-priority: low`) wait `delayMs` (2 s) first.
+  Nothing opus-tier is ever delayed, and nothing is refused.
+- **Pin a stage while testing:** `routing.governor.stageOverride` (0–4).
+- **Back off:** set `enforce` to false and keep observing, or `enabled` to false.
+
+---
 
 ## Why did my session move accounts?
 

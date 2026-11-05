@@ -61,6 +61,8 @@ export interface SeverityLogInput {
   ts: number;
   type: string;
   statusCode?: number;
+  /** Refused, then retried on another account: the client never saw it. */
+  failedOver?: boolean;
 }
 
 export interface AccountSeverity {
@@ -223,10 +225,15 @@ function reasonOf(s: AccountSeverity, now: number): string {
   }
 }
 
-/** Upstream rejections inside the burst window. A 429 the router raised itself to hold a session is not one. */
+/**
+ * Upstream rejections inside the burst window. A 429 the router raised itself
+ * to hold a session is not one, and neither is one the router failed over from:
+ * another account took the request, so the client was not refused.
+ */
 export function countRecent429s(logs: readonly SeverityLogInput[], now: number): number {
   let n = 0;
   for (const l of logs) {
+    if (l.failedOver) continue;
     if (l.statusCode === 429 && l.type === "error" && l.ts <= now && now - l.ts <= BURST_WINDOW_MS) n++;
   }
   return n;
