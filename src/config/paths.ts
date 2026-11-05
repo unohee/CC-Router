@@ -39,6 +39,15 @@ export const QUOTA_HISTORY_PATH =
   process.env["QUOTA_HISTORY_PATH"] ||
   path.join(path.dirname(ACCOUNTS_PATH), "quota-history.json");
 
+/**
+ * Cooldowns and the last rate-limit reading per account, so a restart does not
+ * send traffic straight back to an account that was exhausted. Beside
+ * accounts.json, like USAGE_PATH.
+ */
+export const ACCOUNT_STATE_PATH =
+  process.env["ACCOUNT_STATE_PATH"] ||
+  path.join(path.dirname(ACCOUNTS_PATH), "account-state.json");
+
 /** Ollama daily-budget spend, so a restart does not reset the day. */
 export const OLLAMA_BUDGET_PATH =
   process.env["OLLAMA_BUDGET_PATH"] ??

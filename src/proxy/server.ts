@@ -22,13 +22,14 @@ import { logOllamaFallback, logOllamaTransition } from "./logger.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient, logThrottleWait } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
-import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH } from "../config/paths.js";
+import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH } from "../config/paths.js";
+import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
 import { hasClaudeCodeIdentity } from "./client-identity.js";
 import { isFailoverStatus, readCapped, relayResponse, type FailoverState, type StoredRefusal } from "./failover.js";
 import { DemandGovernor, PRIORITY_HEADER, governedSpill, governedThrottleUtil, governedWeeklyPace } from "./demand-governor.js";
-import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
+import { readUsageFile, quarantineUsageFile, createUsageFlusher, writeUsageFile } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample, DAY_MS, HOUR_MS } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
 import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
@@ -83,6 +84,8 @@ export interface ServerOptions {
   usagePath?: string;
   /** Where per-account quota readings are kept. Defaults to quota-history.json beside accounts.json. */
   quotaHistoryPath?: string;
+  /** Where cooldowns and last rate-limit readings are kept. Defaults to account-state.json beside accounts.json. */
+  accountStatePath?: string;
 }
 
 export interface HealthAccountView {
@@ -386,6 +389,39 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   }
 
   const pool = new TokenPool(accounts);
+
+  // Cooldowns and last readings from before the restart (account-state.ts), so
+  // an account that was exhausted is routed around instead of tried again.
+  const accountStatePath = opts.accountStatePath ?? ACCOUNT_STATE_PATH;
+  const accountStateRead = readUsageFile(accountStatePath);
+  if (accountStateRead.status === "corrupt") {
+    console.log(chalk.yellow(`  account state at ${accountStatePath} could not be read${accountStateRead.movedTo ? ` — kept as ${accountStateRead.movedTo}` : ""}; starting fresh`));
+  } else if (accountStateRead.status === "ok") {
+    const restored = restoreAccountState(accounts, accountStateRead.data, Date.now());
+    if (restored.cooling.length > 0 || restored.readings.length > 0) {
+      console.log(chalk.gray(`  account state restored: ${restored.readings.length} reading(s)${restored.cooling.length > 0 ? `, still cooling: ${restored.cooling.join(", ")}` : ""}`));
+    }
+  }
+  // Written only when it changed, every 10 s and at shutdown. The snapshot is
+  // small (a few fields per account), so comparing it whole is cheap.
+  let lastAccountState = "";
+  let accountStateWarned = false;
+  const flushAccountState = (): void => {
+    const snap = snapshotAccountState(pool.getAll(), Date.now());
+    const key = JSON.stringify(snap.accounts);
+    if (key === lastAccountState) return;
+    const written = writeUsageFile(accountStatePath, snap);
+    if (written.ok) {
+      lastAccountState = key;
+      accountStateWarned = false;
+    } else if (!accountStateWarned) {
+      // Once until a write succeeds again, not every ten seconds.
+      accountStateWarned = true;
+      console.log(chalk.yellow(`  could not save account state to ${accountStatePath}: ${written.error}`));
+    }
+  };
+  setInterval(flushAccountState, 10_000).unref();
+  process.on("exit", flushAccountState);
   const initialConfig = readConfig();
   const codexBudget = resolveCodexFiveHourBudget(initialConfig.codexFiveHourBudget);
   const pickOpenAIAccount = createOpenAIAccountPicker(openAIAccounts, codexBudget ?? undefined);
@@ -1998,6 +2034,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // final assignments is what makes a restart rewrite every prompt cache.
     writeSessionAssignments(sessionRouter.snapshot());
     flushUsage();
+    flushAccountState();
     quotaHistory.touch();
     flushQuota();
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
