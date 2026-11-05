@@ -247,6 +247,11 @@ const BODY = String.raw`
       </div>
     </section>
     <p id="since" class="since"></p>
+    <section class="card" aria-labelledby="fo-h" id="focard" hidden>
+      <div class="cardhead"><h2 id="fo-h">Failover</h2><span id="fosum" class="sum"></span></div>
+      <dl id="fokpis" class="kv"></dl>
+      <p class="foot">POST /v1/messages is retried on the next account after a 429, 529, 5xx or a connection error before any byte reached the client; then the Ollama fallback; then the last refusal is passed on. Refusals the router failed over from are left out of the 429 count above. Totals since the router started.</p>
+    </section>
     <section class="card" aria-labelledby="sup-h" id="supcard" hidden>
       <div class="cardhead"><h2 id="sup-h">Supply</h2><span id="supsum" class="sum"></span></div>
       <dl id="supkpis" class="kv"></dl>
@@ -996,6 +1001,36 @@ const SCRIPT = String.raw`
     body.replaceChildren.apply(body, rows);
   }
 
+  // ── failover ───────────────────────────────────────────────────────────────
+  var FO_OUTCOMES = [
+    ["recovered", "Recovered on another account", "Another account answered."],
+    ["ollama", "Answered by Ollama", "Every account refused; the Ollama fallback answered."],
+    ["exhausted", "Refusal passed on", "Every account refused and Ollama did not answer: the last refusal went to the client."],
+    ["refused", "Refused after a retry", "Another account answered with a status that is not retried (a 4xx)."],
+    ["clientGone", "Client hung up", "The client left before an answer."]
+  ];
+  var FO_REASONS = ["429", "529", "500", "502", "503", "504", "connection", "token-refresh"];
+  function validFailover(f) {
+    if (!f || typeof f !== "object" || typeof f.enabled !== "boolean" || !isNum(f.requests) || !isNum(f.retries)) return false;
+    if (!f.byOutcome || !f.byReason || !(f.lastAt === null || isNum(f.lastAt))) return false;
+    for (var i = 0; i < FO_OUTCOMES.length; i++) if (!isNum(f.byOutcome[FO_OUTCOMES[i][0]])) return false;
+    for (var j = 0; j < FO_REASONS.length; j++) if (!isNum(f.byReason[FO_REASONS[j]])) return false;
+    return true;
+  }
+  function renderFailover(h) {
+    var card = $("focard"), f = h.failover;
+    if (!validFailover(f)) { card.hidden = true; return; }
+    card.hidden = false;
+    $("fosum").textContent = !f.enabled ? "off (routing.failover.enabled is false)"
+      : f.requests === 0 ? "no request needed it yet"
+      : plural(f.requests, "request") + " · " + f.retries + (f.retries === 1 ? " retry" : " retries") + " · last " + ago(f.lastAt);
+    var reasons = FO_REASONS.filter(function (r) { return f.byReason[r] > 0; })
+      .map(function (r) { return (r === "connection" || r === "token-refresh" ? r : "HTTP " + r) + " ×" + num(f.byReason[r]); });
+    var rows = FO_OUTCOMES.map(function (o) { return [o[1], num(f.byOutcome[o[0]]), o[2]]; });
+    rows.push(["Refused by", reasons.length ? reasons.join(" · ") : "—", "What made the router move a request on, per step."]);
+    kv($("fokpis"), rows);
+  }
+
   function render() {
     var h = S.data;
     if (!h) return;
@@ -1007,6 +1042,7 @@ const SCRIPT = String.raw`
     if (!selecting() || !S.rendered) {
       renderAccounts(h);
       renderSupply(h);
+      renderFailover(h);
       renderPerf();
       renderLogs(h);
       S.rendered = true;

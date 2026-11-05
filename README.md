@@ -804,6 +804,109 @@ cc-router configure --show
 
 ---
 
+## Keeping the token supply steady
+
+Every seat in the pool now has a 5-hour **and** a 7-day window. The pieces below keep the pool from running dry before the windows refill. Each one is described with its `config.json` keys. Only failover is on by default; everything else is opt-in.
+
+### In-router failover (on by default)
+
+A `POST /v1/messages` that meets a refusal is retried **inside the router**, before the client sees anything:
+
+1. **The next account.** A 429, a 529, a 500/502/503/504, or a connection that fails before any response byte sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most.
+2. **Ollama.** When every eligible account has refused, the request goes to the Ollama fallback, if `ollamaFallback` is configured and its policy accepts it (minimum wait, size, budget).
+3. **The last refusal.** Otherwise the last upstream refusal is passed to the client as received.
+
+What it never does:
+
+- It never retries once a byte has reached the client. The decision is taken at the response headers, so SSE streams pass through unchanged.
+- It never retries other 4xx (400, 401, 403, 404, 413, …): those are the request's own fault.
+- It never retries a bare 429 for a client without Claude Code identity: upstream is refusing that client, and every account would refuse it too.
+
+Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (attempt 2)`. Health reports `failover`: requests that entered the chain, retries, `byOutcome` (`recovered`, `refused`, `ollama`, `exhausted`, `clientGone`) and `byReason` (`429`, `529`, `500`, `502`, `503`, `504`, `connection`, `token-refresh`). The dashboard has a Failover card. A refusal the router failed over from is left out of the 429 burst count, because the client never saw it.
+
+```json
+{ "routing": { "failover": { "enabled": false } } }
+```
+
+`routing.failover.enabled: false` turns it off. The client then gets the first refusal and retries on its own, as before.
+
+### Weekly and 5-hour pacing (opt-in)
+
+`routing.weeklyPace` places new sessions on the seats that are spending their window no faster than it elapses. A seat is on pace while `util ≤ elapsed share of the window + slack`.
+
+```json
+{ "routing": { "weeklyPace": { "enabled": true, "slack": 0.10, "migrateAhead": 0.15, "fiveHour": true, "fiveHourSlack": 0.20 } } }
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. |
+| `slack` | `0.10` | Allowance above the linear line of the 7-day window. |
+| `migrateAhead` | `0.15` | A pinned session moves to an on-pace seat only once its seat is this far ahead. |
+| `fiveHour` | `false` | Also pace the 5-hour window; the worse of the two counts. |
+| `fiveHourSlack` | `0.20` | Allowance for the 5-hour window, which is burstier. |
+
+Pace only reorders. When every seat is ahead, the least-ahead one still takes the session, and nothing is refused. Health shows `weeklyPace` and `fiveHourPace` per account.
+
+### Ollama spill (opt-in)
+
+`ollamaFallback.spill` sends the listed tiers to Ollama **before** the pool is empty. This happens once no usable account has 5-hour utilization below `poolUtil`. Without it, Ollama is used only after every account is blocked.
+
+```json
+{ "ollamaFallback": { "spill": { "enabled": true, "tiers": ["haiku", "sonnet"], "poolUtil": 0.9 } } }
+```
+
+Opus is never spilled unless you list it. Spilled requests obey the same key, size and budget guards as the emergency fallback, and are counted separately as `spilled` in health.
+
+### Supply model
+
+The router keeps two histories, and from them a supply model works out four things:
+
+- **The histories.**
+  - The hourly usage store (`usage.json`): tokens, plus upstream errors, 429s and throttle waits per hour. It is served by `/cc-router/usage-history` and has an Incidents card.
+  - A per-account quota history (`quota-history.json`): each account's 5-hour and 7-day utilization and resets, sampled at most once per hour. It is served behind the proxy secret by `GET /cc-router/quota-history?days=N`.
+- **Capacity:** cost-weighted tokens per 1% of each window, per account. It is `unknown` until 24 paired readings exist. The weights are input 1, output 5, cache write 1.25, cache read 0.1.
+- **Demand:** the forecast for the rest of each window, from the last 14 days by hour of day.
+- **Today's pool budget:** what the pool can spend today and keep every known account on pace.
+- **Run-out times:** when each window is projected to reach 100%.
+
+It is read-only and appears in health as `supply`, with a Supply card on the dashboard.
+
+### Demand governor (opt-in, observe first)
+
+`routing.governor` compares the last and the next 24 hours of demand with today's budget. From that it picks a stage, and the stages are cumulative:
+
+| Stage | Effect |
+| --- | --- |
+| 0 | Normal. |
+| 1 | Pace placement (weekly and 5-hour), even when `weeklyPace` is off. |
+| 2 | The admission throttle starts earlier on accounts ahead of pace (+`throttleBoost`). |
+| 3 | Ollama spill widened: the spill line drops to `spillPoolUtil` for the listed tiers (haiku and sonnet when none are configured). |
+| 4 | Low-priority requests wait `delayMs` before they are sent. Low priority means short one-shots, haiku-tier requests, or `x-cc-router-priority: low`. |
+
+```json
+{ "routing": { "governor": { "enabled": true, "enforce": false } } }
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Judge a stage and log it. |
+| `enforce` | `false` | Apply the stage. Without it the governor only observes. |
+| `stageOverride` | none | Pin a stage (0–4) whatever the pressure. |
+| `thresholds` | `[0.9, 1.0, 1.15, 1.3]` | Pressure at which stages 1–4 begin. |
+| `hysteresis` | `0.05` | How far below a threshold pressure must fall to step down. |
+| `delayMs` | `2000` | Stage 4 wait. |
+| `throttleBoost` | `0.15` | Stage 2 utilization added for ahead-of-pace accounts. |
+| `spillPoolUtil` | `0.75` | Stage 3 spill line. |
+
+It never refuses a request, and it never delays anything opus-tier. With no budget yet (capacity still unknown), it holds stage 0. Every stage change is logged as `governor stage 0 → 2 — demand at 104% of today's budget`. Health shows `governor` with the stage, what is applied, the pressure, the reason and the last 24 hours.
+
+### State that survives a restart
+
+Cooldowns (account-wide and per model) and each account's last rate-limit reading are saved to `account-state.json` beside `accounts.json`. The write is atomic and the file is mode 0600, every 10 s when the state changed and at shutdown. On start they are restored unless expired, so a restarted router routes around an account it saw exhausted. `ACCOUNT_STATE_PATH` and `QUOTA_HISTORY_PATH` move the files.
+
+---
+
 ## Client mode — connecting to an existing CC-Router
 
 If someone on your team already hosts a CC-Router instance (on a VPS, home server, or another machine on the LAN), you don't need to install accounts locally. You just point your Claude Code at the remote proxy.
