@@ -31,6 +31,12 @@ export interface QuotaReading {
   sampledAt: number;
   fiveHour: QuotaWindowReading;
   sevenDay: QuotaWindowReading;
+  /**
+   * The account's cumulative cost-weighted tokens (see `addSpend`) when the
+   * reading was taken. The difference between two readings is what the account
+   * spent between them. Null for readings from before this was kept.
+   */
+  spentAt: number | null;
 }
 
 /** What the proxy hands in from a response's rate-limit headers. */
@@ -41,13 +47,20 @@ export interface QuotaInput {
   sevenDayReset: number;
 }
 
-/** On-disk shape. Rows are tuples to keep the file small. */
+/**
+ * On-disk shape. Rows are tuples to keep the file small. The eighth field
+ * (spentAt) and `spent` were added later; seven-field rows load with spentAt
+ * null, so the version stays 1.
+ */
 export interface QuotaFile {
   version: 1;
   rows: Array<[
     hourSec: number, accountId: string, sampledAtSec: number,
     fiveHourUtil: number, fiveHourResetSec: number, sevenDayUtil: number, sevenDayResetSec: number,
+    spentAt?: number | null,
   ]>;
+  /** Cumulative cost-weighted tokens per account, so the counter survives a restart. */
+  spent?: Record<string, number>;
 }
 
 /** An account id safe to key on and print; null for anything else. */
@@ -80,6 +93,8 @@ export class QuotaHistory {
   // Keyed `${hour}|${accountId}`; a Map because account ids are data.
   private readonly byKey = new Map<string, QuotaReading>();
   private readonly accounts = new Set<string>();
+  // Cumulative cost-weighted tokens per account; never pruned (one number each).
+  private readonly spent = new Map<string, number>();
   private isDirty = false;
   private lastPruneHour = -Infinity;
 
@@ -90,6 +105,30 @@ export class QuotaHistory {
   }
 
   get dirty(): boolean { return this.isDirty; }
+
+  /**
+   * Count cost-weighted tokens an account was just billed for. Kept per
+   * account here because the hourly usage store is pool-wide by model, and the
+   * supply model needs what each account spent between two of its readings.
+   */
+  addSpend(accountId: unknown, weighted: number): void {
+    const id = sanitizeAccountId(accountId);
+    if (id === null || !Number.isFinite(weighted) || weighted <= 0) return;
+    if (!this.spent.has(id) && this.spent.size >= this.maxAccounts) return;
+    this.spent.set(id, (this.spent.get(id) ?? 0) + weighted);
+    // Not marked dirty on its own: the counter is saved with the next reading,
+    // and an hour's worth lost to a crash only shortens one pair.
+  }
+
+  /**
+   * Mark the store as needing a save even with no new reading, so a graceful
+   * shutdown keeps the spend counted since the last one. (A crash loses it; the
+   * one pair that spans it then reads short.)
+   */
+  touch(): void { if (this.spent.size > 0) this.isDirty = true; }
+
+  /** The account's cumulative cost-weighted tokens so far. */
+  spentOf(accountId: string): number { return this.spent.get(accountId) ?? 0; }
 
   /**
    * Take a reading unless this account already has one for the current hour.
@@ -123,6 +162,7 @@ export class QuotaHistory {
       hour, accountId: id, sampledAt: ts,
       fiveHour: { util: fiveUtil, resetAt: fiveReset },
       sevenDay: { util: sevenUtil, resetAt: sevenReset },
+      spentAt: this.spent.get(id) ?? 0,
     });
     this.accounts.add(id);
     this.isDirty = true;
@@ -159,8 +199,9 @@ export class QuotaHistory {
       version: 1,
       rows: this.readings().map(r => [
         r.hour / 1000, r.accountId, Math.floor(r.sampledAt / 1000),
-        r.fiveHour.util, r.fiveHour.resetAt, r.sevenDay.util, r.sevenDay.resetAt,
+        r.fiveHour.util, r.fiveHour.resetAt, r.sevenDay.util, r.sevenDay.resetAt, r.spentAt,
       ]),
+      spent: Object.fromEntries(this.spent),
     };
   }
 
@@ -174,11 +215,12 @@ export class QuotaHistory {
    */
   restore(raw: unknown): boolean {
     if (typeof raw !== "object" || raw === null) return false;
-    const file = raw as { version?: unknown; rows?: unknown };
+    const file = raw as { version?: unknown; rows?: unknown; spent?: unknown };
     if (file.version !== 1 || !Array.isArray(file.rows)) return false;
     for (const row of file.rows as unknown[]) {
-      if (!Array.isArray(row) || row.length !== 7) continue;
-      const [hourSec, accountId, sampledAtSec, fiveUtil, fiveReset, sevenUtil, sevenReset] = row as unknown[];
+      if (!Array.isArray(row) || (row.length !== 7 && row.length !== 8)) continue;
+      const [hourSec, accountId, sampledAtSec, fiveUtil, fiveReset, sevenUtil, sevenReset, spentAtRaw] = row as unknown[];
+      const spentAt = typeof spentAtRaw === "number" && Number.isFinite(spentAtRaw) && spentAtRaw >= 0 ? spentAtRaw : null;
       const id = sanitizeAccountId(accountId);
       if (id === null || typeof hourSec !== "number" || !Number.isFinite(hourSec)) continue;
       if (typeof sampledAtSec !== "number" || !Number.isFinite(sampledAtSec)) continue;
@@ -190,8 +232,17 @@ export class QuotaHistory {
       if (!this.accounts.has(id) && this.accounts.size >= this.maxAccounts) continue;
       // A sample time outside its own hour is clamped into it.
       const sampledAt = Math.min(Math.max(sampledAtSec * 1000, hour), hour + HOUR_MS - 1);
-      this.byKey.set(key, { hour, accountId: id, sampledAt, fiveHour: { util: fu, resetAt: fr }, sevenDay: { util: su, resetAt: sr } });
+      this.byKey.set(key, { hour, accountId: id, sampledAt, fiveHour: { util: fu, resetAt: fr }, sevenDay: { util: su, resetAt: sr }, spentAt });
       this.accounts.add(id);
+    }
+    // The counter only grows: take the larger of what is held and what was saved.
+    if (typeof file.spent === "object" && file.spent !== null && !Array.isArray(file.spent)) {
+      for (const [raw, value] of Object.entries(file.spent as Record<string, unknown>)) {
+        const id = sanitizeAccountId(raw);
+        if (id === null || typeof value !== "number" || !Number.isFinite(value) || value < 0) continue;
+        if (!this.spent.has(id) && this.spent.size >= this.maxAccounts) continue;
+        this.spent.set(id, Math.max(this.spent.get(id) ?? 0, value));
+      }
     }
     // As in usage-history: what was merged is on disk already, so the dirty flag
     // is left to whatever was recorded before the merge.
@@ -222,7 +273,7 @@ export function quotaHistoryView(src: QuotaHistory, opts: { now: number; days: n
   for (const r of src.readings()) {
     if (r.hour + HOUR_MS <= from || r.hour > opts.now) continue;
     const list = grouped.get(r.accountId) ?? [];
-    list.push({ hour: r.hour, sampledAt: r.sampledAt, fiveHour: r.fiveHour, sevenDay: r.sevenDay });
+    list.push({ hour: r.hour, sampledAt: r.sampledAt, fiveHour: r.fiveHour, sevenDay: r.sevenDay, spentAt: r.spentAt });
     grouped.set(r.accountId, list);
   }
   return {

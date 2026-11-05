@@ -247,6 +247,20 @@ const BODY = String.raw`
       </div>
     </section>
     <p id="since" class="since"></p>
+    <section class="card" aria-labelledby="sup-h" id="supcard" hidden>
+      <div class="cardhead"><h2 id="sup-h">Supply</h2><span id="supsum" class="sum"></span></div>
+      <dl id="supkpis" class="kv"></dl>
+      <div class="scroll subtable">
+        <table>
+          <thead><tr>
+            <th scope="col">Account</th><th scope="col" class="num">5-hour, per 1%</th><th scope="col" class="num">7-day, per 1%</th>
+            <th scope="col" class="num">7-day left</th><th scope="col">Runs out</th>
+          </tr></thead>
+          <tbody id="supbody"></tbody>
+        </table>
+      </div>
+      <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). A capacity stays unknown until 24 pairs of hourly readings inside one window have been seen for that account. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
+    </section>
     <section class="card" aria-labelledby="perf-h">
       <div class="cardhead"><h2 id="perf-h">Last hour</h2><span id="perfsum" class="sum"></span></div>
       <dl id="kpis" class="kpis"></dl>
@@ -919,6 +933,69 @@ const SCRIPT = String.raw`
     return !!(s && !s.isCollapsed && String(s));
   }
 
+  // ── supply ─────────────────────────────────────────────────────────────────
+  // From health.supply. An older router sends none: the card stays hidden, and a
+  // malformed block hides only this card.
+  function validCap(c) {
+    return !!c && (c.status === "ok" || c.status === "unknown") && isNum(c.samples)
+      && (c.tokensPerPercent === null || isNum(c.tokensPerPercent));
+  }
+  function validWin(w) {
+    return !!w && validCap(w.capacity) && (w.remaining === null || isNum(w.remaining))
+      && (w.exhaustsAt === null || isNum(w.exhaustsAt)) && typeof w.exhaustsBeforeReset === "boolean";
+  }
+  function validSupply(x) {
+    if (!x || typeof x !== "object" || !Array.isArray(x.accounts) || x.accounts.length > 200) return false;
+    if (!x.demand || !isNum(x.demand.profileHours) || !(x.demand.next24h === null || isNum(x.demand.next24h))) return false;
+    if (!x.budget || !(x.budget.today === null || isNum(x.budget.today)) || !isNum(x.budget.known) || !isNum(x.budget.unknown)) return false;
+    for (var i = 0; i < x.accounts.length; i++) {
+      var a = x.accounts[i];
+      if (!a || typeof a.id !== "string" || !validWin(a.fiveHour) || !validWin(a.sevenDay)) return false;
+    }
+    return true;
+  }
+  function big(n) {
+    if (!isNum(n)) return "—";
+    var a = Math.abs(n);
+    if (a >= 1e9) return (n / 1e9).toFixed(a >= 1e10 ? 0 : 1) + "B";
+    if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
+    if (a >= 1e3) return (n / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "K";
+    return String(Math.round(n));
+  }
+  function capText(c) {
+    return c.status === "ok" ? big(c.tokensPerPercent) : "unknown (" + c.samples + "/24)";
+  }
+  function runsOut(a) {
+    var parts = [];
+    [["5h", a.fiveHour], ["7d", a.sevenDay]].forEach(function (p) {
+      if (p[1].exhaustsAt !== null && p[1].exhaustsBeforeReset) parts.push(p[0] + " in " + dur(p[1].exhaustsAt - now()));
+    });
+    return parts.length ? parts.join(" · ") : "lasts to reset";
+  }
+  function renderSupply(h) {
+    var card = $("supcard"), x = h.supply;
+    if (!validSupply(x)) { card.hidden = true; return; }
+    card.hidden = false;
+    $("supsum").textContent = x.budget.known + " of " + (x.budget.known + x.budget.unknown) + " accounts with a known 7-day capacity";
+    kv($("supkpis"), [
+      ["Today's pool budget", x.budget.today === null ? "unknown" : big(x.budget.today),
+        "What the pool can spend today and keep each known account on pace: its remaining 7-day supply over the days left to its reset."],
+      ["Forecast, next 24 hours", x.demand.next24h === null ? "no history" : big(x.demand.next24h),
+        "Expected pool demand from the last " + Math.round(x.demand.profileHours / 24) + " days of hourly history."]
+    ]);
+    var rows = x.accounts.map(function (a) {
+      var tr = el("tr");
+      tr.appendChild(lab(el("td", "", a.id), "Account"));
+      tr.appendChild(lab(el("td", "num", capText(a.fiveHour.capacity)), "5-hour, per 1%"));
+      tr.appendChild(lab(el("td", "num", capText(a.sevenDay.capacity)), "7-day, per 1%"));
+      tr.appendChild(lab(el("td", "num", a.sevenDay.remaining === null ? "—" : big(a.sevenDay.remaining)), "7-day left"));
+      tr.appendChild(lab(el("td", "", runsOut(a)), "Runs out"));
+      return tr;
+    });
+    var body = $("supbody");
+    body.replaceChildren.apply(body, rows);
+  }
+
   function render() {
     var h = S.data;
     if (!h) return;
@@ -929,6 +1006,7 @@ const SCRIPT = String.raw`
     renderSince(h);
     if (!selecting() || !S.rendered) {
       renderAccounts(h);
+      renderSupply(h);
       renderPerf();
       renderLogs(h);
       S.rendered = true;
