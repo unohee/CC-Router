@@ -25,6 +25,7 @@ import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH } from "../config/paths.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
+import { hasClaudeCodeIdentity } from "./client-identity.js";
 import { DemandGovernor, PRIORITY_HEADER, governedSpill, governedThrottleUtil, governedWeeklyPace } from "./demand-governor.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample, DAY_MS, HOUR_MS } from "./usage-history.js";
@@ -1458,7 +1459,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // Rate limited — put account on cooldown for Retry-After seconds.
           stats.totalErrors++;
           usageHistory.recordIncident({ ts: Date.now(), rateLimited: 1 });
-          account.errorCount++;
           const rawRetryAfterHeader = proxyRes.headers["retry-after"];
           const rawRetryAfter = Array.isArray(rawRetryAfterHeader) ? rawRetryAfterHeader[0] : rawRetryAfterHeader;
           const statedRetry = parseRetryAfterSeconds(rawRetryAfter);
@@ -1466,9 +1466,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // account as still allowed says nothing about this account's quota,
           // so it gets a short, escalating cooldown instead of a flat minute.
           const bare = isBare429(statedRetry, rl, req._ccAnthropicModel);
-          const retryAfter = statedRetry
-            ?? (bare ? bare429CooldownSeconds(account) : DEFAULT_429_COOLDOWN_SECONDS);
-          const scoped = recordRateLimitCooldown(account, req._ccAnthropicModel, rl?.claim ?? "", retryAfter);
+          // A bare 429 for a request without Claude Code identity is upstream
+          // refusing that client, not this account running out: relay it and
+          // leave the account (and its bare-429 streak) alone. Otherwise one
+          // such client would walk its refusals through every account.
+          const foreign = bare && !hasClaudeCodeIdentity((req as Request).headers);
+          if (!foreign) account.errorCount++;
+          const retryAfter = foreign ? 0
+            : statedRetry ?? (bare ? bare429CooldownSeconds(account) : DEFAULT_429_COOLDOWN_SECONDS);
+          const scoped = foreign ? false : recordRateLimitCooldown(account, req._ccAnthropicModel, rl?.claim ?? "", retryAfter);
           log429Diagnostic({
             accountId: account.id,
             bare,
@@ -1519,9 +1525,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
             const planLimit = removed > 0 && (rl?.status === "rate_limited" || /^(five_hour|seven_day)/.test(rl?.claim ?? ""));
             relayNote = ` — client retries in ${clientWait}s${planLimit ? " (plan-limit headers withheld)" : ""}`;
           }
+          const outcome = foreign
+            ? "relayed, account not cooled (request lacks Claude Code identity)"
+            : `cooldown ${retryAfter}s`;
           pendingLog.type = "error";
-          pendingLog.details = `${reason} — cooldown ${retryAfter}s${relayNote}`;
-          logError(account.id, 429, `${reason} — cooldown ${retryAfter}s${relayNote}`);
+          pendingLog.details = `${reason} — ${outcome}${relayNote}`;
+          logError(account.id, 429, `${reason} — ${outcome}${relayNote}`);
 
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.

@@ -104,7 +104,9 @@ async function withRouter(
     await run({
       send: () => fetch(`${base}/v1/messages`, {
         method: "POST", signal: AbortSignal.timeout(5000),
-        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+        // Claude Code's identity: a bare 429 for a request without it is relayed
+        // without cooling the account (client-identity-429.test.ts).
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "claude-cli/2.1.317 (external, cli)" },
         body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
       }),
       health: async () => (await fetch(`${base}/cc-router/health`, { signal: AbortSignal.timeout(3000) })).json() as Promise<Health>,

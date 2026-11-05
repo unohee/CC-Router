@@ -81,7 +81,9 @@ async function withRouter(script: Reply[], run: (ctx: {
     await run({
       send: (headers = {}) => fetch(`${base}/v1/messages`, {
         method: "POST", signal: AbortSignal.timeout(5000),
-        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", ...headers },
+        // Claude Code's identity by default: a bare 429 for a request without it
+        // is relayed without a cooldown (client-identity-429.test.ts).
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "user-agent": "claude-cli/2.1.317 (external, cli)", ...headers },
         body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
       }),
       coolingForSeconds: async () => {
@@ -110,7 +112,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 it.concurrent("cools an unexplained 429 for 8s, not a minute, and logs who asked and what upstream said", async () => {
   await withRouter([BARE_429], async ({ send, coolingForSeconds, activity, logs }) => {
-    const res = await send({ "user-agent": "omp-test-client/0.3", "x-claude-code-session-id": "abcdef0123456789" });
+    const res = await send({ "user-agent": "claude-cli/2.1.317 (test)", "x-claude-code-session-id": "abcdef0123456789" });
     expect(res.status).toBe(429); // still forwarded: the client decides whether to retry
 
     const cooling = await coolingForSeconds();
@@ -121,7 +123,7 @@ it.concurrent("cools an unexplained 429 for 8s, not a minute, and logs who asked
     await waitFor(() => logs().includes("upstream said:"), "the 429 diagnostic line");
     const out = logs();
     expect(out).toContain('429 bare#1 cooldown=8s retry-after=absent limit=allowed claim=none');
-    expect(out).toContain('session=abcdef01 ua="omp-test-client/0.3"');
+    expect(out).toContain('session=abcdef01 ua="claude-cli/2.1.317 (test)"');
     expect(out).toContain("upstream said: Error");
     expect(out).not.toContain("authorization");
 
