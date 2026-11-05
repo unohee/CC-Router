@@ -1360,6 +1360,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         } else if (status === 429) {
           // Rate limited — put account on cooldown for Retry-After seconds.
           stats.totalErrors++;
+          usageHistory.recordIncident({ ts: Date.now(), rateLimited: 1 });
           account.errorCount++;
           const rawRetryAfterHeader = proxyRes.headers["retry-after"];
           const rawRetryAfter = Array.isArray(rawRetryAfterHeader) ? rawRetryAfterHeader[0] : rawRetryAfterHeader;
@@ -1428,6 +1429,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         } else if (status === 529) {
           // Anthropic service overloaded — short cooldown on this account.
           stats.totalErrors++;
+          usageHistory.recordIncident({ ts: Date.now(), errors: 1 });
           account.errorCount++;
           pendingLog.type = "error";
           pendingLog.details = "service overloaded — cooldown 30s";
@@ -1447,6 +1449,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // error on the one column an operator reads to decide an account is
           // unhealthy.
           stats.totalErrors++;
+          // Only a server-side failure is a supply incident; a 4xx is the
+          // request's own fault and says nothing about the pool.
+          if (status >= 500) usageHistory.recordIncident({ ts: Date.now(), errors: 1 });
           pendingLog.type = "error";
           pendingLog.details = `upstream refused (${status})`;
           logError(account.id, status, "upstream refused the request");
@@ -1542,6 +1547,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
       error: (err: Error, _req: IncomingMessage, res: ServerResponse | Socket) => {
         stats.totalErrors++;
+        usageHistory.recordIncident({ ts: Date.now(), errors: 1 });
         logError("proxy", 0, err.message);
 
         // Complete the pending log entry for connection-level errors
@@ -1649,6 +1655,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     const admitted = await throttleGate.admit(account.id, util, { short: isShortRequest(req.body) });
     if (admitted.waitedMs > 0 || admitted.bypassed) {
       logThrottleWait({ accountId: account.id, util, ...admitted });
+      usageHistory.recordIncident(admitted.bypassed
+        ? { ts: Date.now(), throttleBypass: 1 }
+        : { ts: Date.now(), throttleWaits: 1, throttleWaitMs: admitted.waitedMs });
     }
     throttleGate.acquire(account.id);
     res.once("close", () => throttleGate.release(account.id));
