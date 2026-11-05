@@ -103,7 +103,9 @@ const unifiedHeaders = (res: Response) => [...res.headers.keys()].filter(k => k.
 
 it.concurrent("turns one account's weekly 429 into a 1s retry that another account serves", async () => {
   const reset = Math.floor(Date.now() / 1000) + 2 * 86_400;
-  await withRouter(["alpha", "beta"], {}, t => t === "alpha" ? WEEKLY_429(reset) : OK, async ({ send, seen, logs }) => {
+  // Failover off: this is the client-retry path. With failover on, beta answers
+  // the same request instead (in-router-failover.test.ts).
+  await withRouter(["alpha", "beta"], { routing: { failover: { enabled: false } } }, t => t === "alpha" ? WEEKLY_429(reset) : OK, async ({ send, seen, logs }) => {
     // Whichever account the session lands on first, make it the refusing one.
     let first = await send();
     if (first.status === 200) { await first.text(); first = await send(); }
