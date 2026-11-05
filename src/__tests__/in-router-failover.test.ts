@@ -51,7 +51,7 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-interface Seen { account: string; body: string }
+interface Seen { account: string; body: string; url: string }
 interface Ctx {
   send: (opts?: { body?: Record<string, unknown>; headers?: Record<string, string> }) => Promise<Response>;
   seen: Seen[];
@@ -73,7 +73,7 @@ async function withRouter(
     let raw = "";
     req.on("data", c => { raw += c; });
     req.on("end", () => {
-      seen.push({ account, body: raw });
+      seen.push({ account, body: raw, url: req.url ?? "" });
       const n = (counts.get(account) ?? 0) + 1;
       counts.set(account, n);
       const b = behave(account, n);
@@ -181,8 +181,10 @@ describe("in-router failover through a real router", () => {
         expect(seen).toHaveLength(2);
         expect(new Set(accountsSeen(seen)).size).toBe(2);
         expect(body.id).toBe(seen[1].account);
-        // Byte for byte the same request.
+        // Byte for byte the same request, to the same path: the proxy's
+        // pathRewrite edits req.url in place, and a retry must not double it.
         expect(seen[1].body).toBe(seen[0].body);
+        expect(seen.every(s => s.url === "/v1/messages")).toBe(true);
         expect(logs()).toMatch(new RegExp(`failover: ${seen[0].account} answered HTTP ${status}; retrying on ${seen[1].account}`));
       });
     }, 30_000);
@@ -208,6 +210,7 @@ describe("in-router failover through a real router", () => {
       expect(res.status).toBe(503);
       expect(await res.json()).toEqual({ type: "error", error: { type: "api_error", message: "refused 503" } });
       expect(accountsSeen(seen).sort()).toEqual(["alpha", "beta", "gamma"]);
+      expect(seen.every(s => s.url === "/v1/messages")).toBe(true);
       expect(logs()).toContain("failover: no account left after 3 tried; relaying the last refusal (HTTP 503)");
     });
   }, 30_000);
