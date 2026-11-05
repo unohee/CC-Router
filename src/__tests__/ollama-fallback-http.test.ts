@@ -170,9 +170,13 @@ async function withRouter(
     id: "fixture", accessToken: "fixture", refreshToken: "fixture",
     expiresAt: Date.now() + 86_400_000, scopes: [], enabled: true,
   }]));
+  // In-router failover off: these tests cover the path where the client gets
+  // the upstream 429 and its next request goes to Ollama. The failover path
+  // (the same request answered by Ollama) is in-router-failover.test.ts.
+  const routing = { failover: { enabled: false } };
   writeFileSync(join(dir, "config.json"), JSON.stringify(opts.ollamaConfig
-    ? { ollamaFallback: { baseUrl: `http://127.0.0.1:${ollamaPort}`, apiKeyEnv: "CC_ROUTER_TEST_OLLAMA_KEY", ...opts.ollamaConfig } }
-    : {}));
+    ? { routing, ollamaFallback: { baseUrl: `http://127.0.0.1:${ollamaPort}`, apiKeyEnv: "CC_ROUTER_TEST_OLLAMA_KEY", ...opts.ollamaConfig } }
+    : { routing }));
 
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
     `import {startServer} from './src/proxy/server.ts'; await startServer({port:${port}, litellmUrl:'http://127.0.0.1:${anthropicPort}'});`], {

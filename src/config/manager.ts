@@ -348,6 +348,9 @@ export interface ProxyConfig {
     /** Weekly pacing: prefer seats spending their 7-day window no faster than
      *  the week elapses. Opt-in: off unless `enabled` is true. */
     weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number; fiveHour?: boolean; fiveHourSlack?: number };
+    /** In-router failover for POST /v1/messages (server.ts). On unless
+     *  `enabled` is explicitly false. */
+    failover?: { enabled?: boolean };
     /** Demand governor (proxy/demand-governor.ts). Off unless `enabled`;
      *  observe-only unless `enforce` too. */
     governor?: {
@@ -431,6 +434,11 @@ export function getSoftCapUtil(): number | undefined {
  * Weekly pacing settings, or undefined when it is off. Out-of-range values
  * fall back to the defaults rather than disabling or inverting the rule.
  */
+/** In-router failover: on unless `routing.failover.enabled` is false. */
+export function getFailoverEnabled(): boolean {
+  return readConfig().routing?.failover?.enabled !== false;
+}
+
 /** `routing.governor`, every bad field at its default; off when absent. */
 export function getGovernorConfig(): GovernorConfig {
   return resolveGovernorConfig(readConfig().routing?.governor);

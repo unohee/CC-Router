@@ -1,6 +1,6 @@
 import express from "express";
 import type { BridgeUsage } from "../protocol/openai-usage.js";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, type Options as ProxyOptions } from "http-proxy-middleware";
 import { ServerResponse } from "http";
 import { timingSafeEqual } from "crypto";
 import type { IncomingMessage } from "http";
@@ -14,7 +14,7 @@ import {
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getGovernorConfig, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -26,6 +26,7 @@ import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
 import { hasClaudeCodeIdentity } from "./client-identity.js";
+import { isFailoverStatus, readCapped, relayResponse, type FailoverState, type StoredRefusal } from "./failover.js";
 import { DemandGovernor, PRIORITY_HEADER, governedSpill, governedThrottleUtil, governedWeeklyPace } from "./demand-governor.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample, DAY_MS, HOUR_MS } from "./usage-history.js";
@@ -65,6 +66,11 @@ declare module "express-serve-static-core" {
     _ccAccount?: Account;
     _startTime?: number;
     _pendingLog?: Partial<LogEntry>;
+    /** In-router failover for this request (POST /v1/messages only). */
+    _ccFailover?: FailoverState;
+    /** Set by the cross-provider route: answer from Ollama once every account
+     *  has refused. True when it answered (or the client is gone). */
+    _ccOllamaFailover?: () => Promise<boolean>;
   }
 }
 
@@ -1342,18 +1348,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   });
 
   // ─── Proxy middleware ──────────────────────────────────────────────────────
-  // IMPORTANT: selfHandleResponse must be false (default) for SSE streaming to
-  // work transparently. Setting it to true breaks streaming.
-  const proxy = createProxyMiddleware<Request, ServerResponse>({
-    target,
-    changeOrigin: true,
-    // Express strips the /v1 mount prefix from req.url before passing it to middleware.
-    // pathRewrite restores it so the proxy forwards /v1/messages, not /messages.
-    pathRewrite: (path) => `/v1${path}`,
-    // Long timeouts — Claude Code requests can be >5min (thinking, agents)
-    proxyTimeout: proxyRequestTimeoutMs,
-    timeout: proxyRequestTimeoutMs,
-    on: {
+  // The event handlers below do all the per-response accounting (rate-limit
+  // readings, cooldowns, usage, logs). Two proxies share them: the plain one
+  // pipes every response straight through, and the failover one (POST
+  // /v1/messages) looks at the status first and may try another account.
+  const proxyOn: NonNullable<ProxyOptions<Request, ServerResponse>["on"]> = {
       proxyReq: (proxyReq, req) => {
         const account = (req as Request)._ccAccount;
         if (!account) return;
@@ -1668,6 +1667,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           stats.addLog(pendingLog as LogEntry);
         }
 
+        // The failover proxy answers this itself, on another account or with
+        // the final refusal.
+        if ((_req as Request)._ccFailover?.suppressErrorReply) return;
+
         // res may be a Socket (WebSocket upgrade) — only respond on HTTP ServerResponse
         if (res instanceof ServerResponse && !res.headersSent) {
           // Match Anthropic's error response format so Claude Code handles it gracefully
@@ -1678,8 +1681,125 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           }));
         }
       },
+  };
+
+  // IMPORTANT: the plain proxy keeps selfHandleResponse false (the default):
+  // http-proxy pipes the response, SSE included, without our involvement.
+  const proxyOptions = {
+    target,
+    changeOrigin: true,
+    // Express strips the /v1 mount prefix from req.url before passing it to middleware.
+    // pathRewrite restores it so the proxy forwards /v1/messages, not /messages.
+    pathRewrite: (path: string) => `/v1${path}`,
+    // Long timeouts — Claude Code requests can be >5min (thinking, agents)
+    proxyTimeout: proxyRequestTimeoutMs,
+    timeout: proxyRequestTimeoutMs,
+  };
+  const proxy = createProxyMiddleware<Request, ServerResponse>({ ...proxyOptions, on: proxyOn });
+
+  // ─── In-router failover (POST /v1/messages) ───────────────────────────────
+  // 429, 529, 500/502/503/504 and connection errors before any response byte
+  // are retried on the next eligible account with the identical raw body, once
+  // per account; then the Ollama fallback; then the last refusal is relayed.
+  // The decision is taken at the response headers, before anything reaches the
+  // client, so nothing is retried after the first byte. Every other response
+  // is piped through exactly as the plain proxy would (relayResponse).
+  const failoverEnabled = getFailoverEnabled();
+  const failoverProxy = createProxyMiddleware<Request, ServerResponse>({
+    ...proxyOptions,
+    selfHandleResponse: true,
+    on: {
+      proxyReq: proxyOn.proxyReq,
+      proxyRes: (proxyRes, req, res) => {
+        proxyOn.proxyRes!(proxyRes, req, res);
+        void onFailoverResponse(proxyRes, req, res).catch(err => {
+          logError("proxy", 0, `failover: ${(err as Error).message}`);
+          if (!res.headersSent && !res.destroyed) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ type: "error", error: { type: "proxy_error", message: "failover failed" } }));
+          }
+        });
+      },
+      error: (err, req, res) => {
+        const r = req as Request;
+        const canRetry = r._ccFailover !== undefined && res instanceof ServerResponse && !res.headersSent;
+        if (canRetry) r._ccFailover!.suppressErrorReply = true;
+        proxyOn.error!(err, req, res, undefined as never);
+        if (!canRetry) return;
+        r._ccFailover!.suppressErrorReply = false;
+        const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "proxy_error", message: err.message } }));
+        void failoverNext(r, res as ServerResponse, {
+          status: 502, headers: { "content-type": "application/json", "content-length": String(body.length) }, body,
+          reason: `connection error (${err.message.slice(0, 80)})`,
+        });
+      },
     },
   });
+
+  /** Which status codes, for which requests, go to the next account. */
+  const shouldFailover = (proxyRes: IncomingMessage, req: Request): boolean => {
+    const status = proxyRes.statusCode ?? 0;
+    if (!isFailoverStatus(status)) return false;
+    if (status !== 429) return true;
+    // A bare 429 for a client without Claude Code identity is upstream refusing
+    // that client: another account would refuse it too.
+    const raw = proxyRes.headers["retry-after"];
+    const stated = parseRetryAfterSeconds(Array.isArray(raw) ? raw[0] : raw);
+    const rl = extractRateLimits(proxyRes.headers as Record<string, string | string[] | undefined>);
+    return !(isBare429(stated, rl, req._ccAnthropicModel) && !hasClaudeCodeIdentity(req.headers));
+  };
+
+  async function onFailoverResponse(proxyRes: IncomingMessage, req: Request, res: ServerResponse): Promise<void> {
+    if (res.headersSent || res.destroyed || !req._ccFailover || !shouldFailover(proxyRes, req)) {
+      relayResponse(proxyRes, res);
+      return;
+    }
+    const status = proxyRes.statusCode ?? 0;
+    const body = await readCapped(proxyRes);
+    await failoverNext(req, res, { status, headers: { ...proxyRes.headers }, body, reason: `HTTP ${status}` });
+  }
+
+  /** The next account to try: usable for this model, not tried yet, coolest first. */
+  const nextFailoverAccount = (tried: ReadonlySet<string>, model: string | undefined): Account | null => {
+    const candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+    if (candidates.length === 0) return null;
+    const pick = candidates.reduce((best, a) => (accountUtil(a) < accountUtil(best) ? a : best));
+    pick.requestCount++;
+    pick.lastUsed = Date.now();
+    return pick;
+  };
+
+  async function failoverNext(req: Request, res: ServerResponse, refusal: StoredRefusal): Promise<void> {
+    const st = req._ccFailover!;
+    st.last = refusal;
+    const from = req._ccAccount?.id ?? "?";
+    if (st.throttleHeld) throttleGate.release(st.throttleHeld);
+    st.throttleHeld = undefined;
+    if (res.destroyed) return;
+    for (;;) {
+      const next = nextFailoverAccount(st.tried, req._ccAnthropicModel);
+      if (!next) break;
+      st.tried.add(next.id);
+      st.retries++;
+      const msg = `failover: ${from} answered ${refusal.reason}; retrying on ${next.id} (attempt ${st.tried.size})`;
+      console.log(chalk.yellow(`  ${msg}`));
+      stats.addLog({ ts: Date.now(), accountId: next.id, model: req._ccAnthropicModel ?? "-", type: "route", details: msg });
+      req.url = st.url;
+      if (!(await prepareAttempt(req, res, next, true))) continue;
+      void failoverProxy(req, res, st.next);
+      return;
+    }
+    // Every eligible account has refused: the Ollama fallback, then the refusal.
+    if (req._ccOllamaFailover && await req._ccOllamaFailover()) return;
+    if (res.headersSent || res.destroyed) return;
+    if (st.retries > 0) {
+      const msg = `failover: no account left after ${st.tried.size} tried; relaying the last refusal (${refusal.reason})`;
+      console.log(chalk.yellow(`  ${msg}`));
+      stats.addLog({ ts: Date.now(), accountId: from, model: req._ccAnthropicModel ?? "-", type: "error", statusCode: refusal.status, details: msg });
+    }
+    res.writeHead(refusal.status, refusal.headers);
+    res.end(refusal.body);
+  }
 
   // ─── /v1/* — select account, refresh if needed, then proxy ───────────────
   // CRITICAL: Do NOT use express.json() here — it consumes the body stream
@@ -1732,6 +1852,43 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       throw err;
     }
 
+    // Stage 4: a low-priority request waits a moment first. Never an opus-tier
+    // one, and never a refusal: it is sent after the wait like any other.
+    const governorDelay = governor.delayFor(req.body, req._ccAnthropicModel, req.headers[PRIORITY_HEADER]);
+    if (governorDelay > 0) {
+      governor.noteDelayed();
+      await new Promise(r => setTimeout(r, governorDelay));
+    }
+
+    // POST /v1/messages goes through the failover proxy, which may try the
+    // other accounts before answering. Everything else is piped as before.
+    const failover = failoverEnabled && req.method === "POST" && req.path === "/messages";
+    if (failover) {
+      req._ccFailover = { tried: new Set([account.id]), url: req.url, next, retries: 0 };
+    }
+    res.once("close", () => {
+      const held = req._ccFailover ? req._ccFailover.throttleHeld : req._ccAccount?.id;
+      if (held) throttleGate.release(held);
+    });
+    if (!(await prepareAttempt(req, res, account, false))) {
+      // Its token could not be refreshed: under failover the next account
+      // gets the request, otherwise the client gets the 401.
+      if (!failover) return;
+      const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "Anthropic subscription token refresh failed" } }));
+      await failoverNext(req, res, { status: 401, headers: { "content-type": "application/json", "content-length": String(body.length) }, body, reason: "token refresh failed" });
+      return;
+    }
+    if (failover) void failoverProxy(req, res, next);
+    else void proxy(req, res, next);
+  });
+
+  /**
+   * Everything between picking an account and sending: token refresh, the
+   * admission throttle, the pending log entry. False when the token could not
+   * be refreshed (the plain path has then answered 401). Run again for each
+   * failover attempt, with `retry` set.
+   */
+  async function prepareAttempt(req: Request, res: ServerResponse, account: Account, retry: boolean): Promise<boolean> {
     // Synchronous refresh if token expires within the buffer window
     if (needsRefresh(account)) {
       const ok = await refreshAccountToken(account);
@@ -1739,14 +1896,17 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       if (!ok) {
         stats.totalErrors++;
         logError(account.id, 401, "Token refresh failed");
-        res.status(401).json({
-          type: "error",
-          error: {
-            type: "authentication_error",
-            message: "Anthropic subscription token refresh failed",
-          },
-        });
-        return;
+        if (!req._ccFailover) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            type: "error",
+            error: {
+              type: "authentication_error",
+              message: "Anthropic subscription token refresh failed",
+            },
+          }));
+        }
+        return false;
       }
     }
 
@@ -1757,13 +1917,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // Short one-shot requests (a plugin's prompt classifier, say) skip the wait
     // but still count as in flight: queued behind the session's own long
     // streams, their answer would arrive after it stopped mattering.
-    // Stage 4: a low-priority request waits a moment first. Never an opus-tier
-    // one, and never a refusal: it is sent after the wait like any other.
-    const governorDelay = governor.delayFor(req.body, req._ccAnthropicModel, req.headers[PRIORITY_HEADER]);
-    if (governorDelay > 0) {
-      governor.noteDelayed();
-      await new Promise(r => setTimeout(r, governorDelay));
-    }
     // Stage 2: an account ahead of pace looks hotter to the throttle, so its
     // sends are paced earlier. A no-op while the throttle is off.
     const pace = paceInForce() ?? DEFAULT_WEEKLY_PACE;
@@ -1780,7 +1933,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         : { ts: Date.now(), throttleWaits: 1, throttleWaitMs: admitted.waitedMs });
     }
     throttleGate.acquire(account.id);
-    res.once("close", () => throttleGate.release(account.id));
+    if (req._ccFailover) req._ccFailover.throttleHeld = account.id;
     reportSaturation(account);
 
     req._ccAccount = account;
@@ -1802,7 +1955,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       source,
       ...(sessionId ? { sessionId } : {}),
     };
-    stats.totalRequests++;
+    // A failover attempt is the same client request, not another one.
+    if (!retry) stats.totalRequests++;
 
     logRoute(
       account.id,
@@ -1812,9 +1966,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         ? String(req.headers["x-claude-code-session-id"] ?? "")
         : undefined,
     );
-
-    next();
-  }, proxy);
+    return true;
+  }
 
   // ─── Catch-all — forward everything else (LiteLLM UI, /v1/models, etc.) ──
   app.use("/", createProxyMiddleware<Request, ServerResponse>({

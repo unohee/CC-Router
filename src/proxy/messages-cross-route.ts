@@ -1011,40 +1011,46 @@ export function mountMessagesCrossProviderRoute(
       // account frees up. A session pinned to an Anthropic account reaches this
       // point too: the migration hold above only applies while an alternative
       // account exists, and with none the pin cannot be retained downstream.
-      if (ollama && !res.headersSent) {
+      // The same attempt, kept for the in-router failover (server.ts): once every
+      // account has refused this request, the pool is blocked and the decision
+      // can come out the other way. True when Ollama answered or the client left.
+      const tryOllama = async (): Promise<boolean> => {
+        if (!ollama || res.headersSent) return false;
         const decision = decideOllama(route.upstreamModel, estimatedPromptTokens);
-        if (decision.use) {
-          const outcome = await forwardToOllama({
-            baseUrl: ollama.config.baseUrl,
-            apiKey: ollama.apiKey(),
+        if (!decision.use) return false;
+        const outcome = await forwardToOllama({
+          baseUrl: ollama.config.baseUrl,
+          apiKey: ollama.apiKey(),
+          upstreamModel: decision.model,
+          publicModel: req.body.model ?? route.publicModel,
+          effort: decision.effort,
+          body: req.body as unknown as Record<string, unknown>,
+          timeoutMs: ollama.timeoutMs,
+          fetchImpl: ollama.fetchImpl,
+        }, res);
+        if (outcome.ok) {
+          opts.onOllamaFallback?.({
             upstreamModel: decision.model,
-            publicModel: req.body.model ?? route.publicModel,
-            effort: decision.effort,
-            body: req.body as unknown as Record<string, unknown>,
-            timeoutMs: ollama.timeoutMs,
-            fetchImpl: ollama.fetchImpl,
-          }, res);
-          if (outcome.ok) {
-            opts.onOllamaFallback?.({
-              upstreamModel: decision.model,
-              poolWaitSeconds: decision.waitSeconds,
-              ...(decision.spill ? { spill: true } : {}),
-              usage: outcome.usage,
-              failedAfterStart: outcome.failedAfterStart,
-              clientClosed: outcome.clientClosed,
-              ...openAIActivity(req, res, startedAt, sessionId),
-            });
-            return;
-          }
-          // The client hung up before Ollama answered. Nothing failed, and the
-          // pool's 429 would only be logged for a request nobody is waiting on.
-          if (outcome.reason === "client_closed" || res.destroyed) return;
-          // Nothing was written: the client gets the pool's own 429, whose
-          // Retry-After says when Claude is back. Ollama's error says nothing
-          // useful about that.
-          opts.onOllamaSkip?.(`ollama-failed (${outcome.reason}${outcome.status ? ` ${outcome.status}` : ""}: ${outcome.detail.slice(0, 120)})`);
+            poolWaitSeconds: decision.waitSeconds,
+            ...(decision.spill ? { spill: true } : {}),
+            usage: outcome.usage,
+            failedAfterStart: outcome.failedAfterStart,
+            clientClosed: outcome.clientClosed,
+            ...openAIActivity(req, res, startedAt, sessionId),
+          });
+          return true;
         }
-      }
+        // The client hung up before Ollama answered. Nothing failed, and the
+        // pool's 429 would only be logged for a request nobody is waiting on.
+        if (outcome.reason === "client_closed" || res.destroyed) return true;
+        // Nothing was written: the client gets the pool's own 429, whose
+        // Retry-After says when Claude is back. Ollama's error says nothing
+        // useful about that.
+        opts.onOllamaSkip?.(`ollama-failed (${outcome.reason}${outcome.status ? ` ${outcome.status}` : ""}: ${outcome.detail.slice(0, 120)})`);
+        return false;
+      };
+      if (await tryOllama()) return;
+      if (ollama) req._ccOllamaFailover = tryOllama;
 
       next();
     },
