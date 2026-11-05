@@ -7,7 +7,7 @@
  * through a fake DOM; here it is plain functions over plain data.
  */
 
-import { DAY_MS, HOUR_MS, type UsageBucket } from "./usage-history.js";
+import { DAY_MS, HOUR_MS, INCIDENT_FIELDS, type IncidentBucket, type IncidentCounts, type UsageBucket } from "./usage-history.js";
 
 export interface Totals {
   /** input + output + cacheRead + cacheCreation. */
@@ -76,11 +76,61 @@ export interface UsageSummary {
     activeDays: number;
     recordedDays: number;
   };
+  incidents: IncidentSummary;
+}
+
+/** Hours of incidents listed one by one, ending with the current hour. */
+export const INCIDENT_HOURS = 24;
+
+export interface IncidentHour extends IncidentCounts {
+  /** Start of the hour, epoch ms. */
+  start: number;
+  /** The viewer's calendar date the hour starts on, YYYY-MM-DD. */
+  date: string;
+}
+
+export interface IncidentSummary {
+  /** Same rolling windows as the token totals. */
+  windows: Record<WindowKey, IncidentCounts>;
+  /** The last `INCIDENT_HOURS` whole hours, oldest first; quiet hours are zeros. */
+  hours: IncidentHour[];
 }
 
 export interface UsageSource {
   buckets(): UsageBucket[];
+  /** Optional so a token-only source (a test fake, say) still summarizes. */
+  incidents?(): IncidentBucket[];
   readonly since: number | null;
+}
+
+export function emptyIncidents(): IncidentCounts {
+  return { errors: 0, rateLimited: 0, throttleWaits: 0, throttleWaitMs: 0, throttleBypass: 0 };
+}
+
+function addIncidents(into: IncidentCounts, b: IncidentCounts): void {
+  for (const f of INCIDENT_FIELDS) into[f] += b[f];
+}
+
+/** Incidents by rolling window and by hour, under the same bucket rule as tokens. */
+export function summarizeIncidents(src: UsageSource, now: number, dateOf: (ms: number) => string): IncidentSummary {
+  const rows = (src.incidents?.() ?? []).filter(b => b.hour <= now);
+  const windows = {} as Record<WindowKey, IncidentCounts>;
+  for (const { key, days } of WINDOWS) {
+    const t = emptyIncidents();
+    for (const b of rows) if (b.hour + HOUR_MS / 2 > now - days * DAY_MS) addIncidents(t, b);
+    windows[key] = t;
+  }
+  const byHour = new Map(rows.map(b => [b.hour, b]));
+  const last = Math.floor(now / HOUR_MS) * HOUR_MS;
+  const hours: IncidentHour[] = [];
+  for (let i = INCIDENT_HOURS - 1; i >= 0; i--) {
+    const start = last - i * HOUR_MS;
+    const t = emptyIncidents();
+    const b = byHour.get(start);
+    if (b) addIncidents(t, b);
+    hours.push({ start, date: dateOf(start), ...t });
+  }
+  return { windows, hours };
 }
 
 const TZ_PATTERN = /^[A-Za-z0-9_+\-/]{1,64}$/;
@@ -252,6 +302,7 @@ export function summarizeUsage(
       activeDays: dayCells.filter(c => c.total > 0).length,
       recordedDays: dayCells.filter(c => c.level !== null).length,
     },
+    incidents: summarizeIncidents(src, now, dateOf),
   };
 }
 

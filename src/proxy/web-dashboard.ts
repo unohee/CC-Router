@@ -126,6 +126,9 @@ td:empty{display:none}
 dl.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
 dl.kv dt{color:var(--ink2)}
 dl.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.inchours{display:flex;align-items:flex-end;gap:2px;height:48px;margin-top:6px}
+.inchours span{flex:1 1 0;min-width:0;background:var(--track);border-radius:1px;min-height:1px}
+.inchours span.hit{background:var(--crit)}
 .usegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:16px;align-items:start}
 .usegrid .card{margin-top:0}
 .mlist{list-style:none;margin:0;padding:0;display:grid;gap:10px}
@@ -318,6 +321,12 @@ const BODY = String.raw`
           <ul id="mixlist" class="mlist"></ul>
         </section>
       </div>
+      <section class="card" aria-labelledby="inc-h" id="inccard" hidden>
+        <div class="cardhead"><h2 id="inc-h">Incidents</h2><span id="incsum" class="sum"></span></div>
+        <dl id="inclist" class="kv"></dl>
+        <h3 class="subhead">Last 24 hours, 429s and errors by hour</h3>
+        <div id="inchours" class="inchours" role="img"></div>
+      </section>
       <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI rows recorded since 27 Oct 2026 split cached input out; earlier OpenAI rows count it inside input. Because the two cannot be told apart, the cache ratio covers Claude accounts only.</p>
     </section>
     <section class="card" aria-labelledby="log-h">
@@ -989,6 +998,23 @@ const SCRIPT = String.raw`
     if (!x || typeof x !== "object" || !isNum(x.displayDays) || !isNum(x.activeDays) || !isNum(x.recordedDays)) return false;
     return true;
   }
+  // Incidents arrived after the token history: an older router sends none, and
+  // a bad incidents block only hides its own card, never the token history.
+  var INC_FIELDS = ["errors", "rateLimited", "throttleWaits", "throttleWaitMs", "throttleBypass"];
+  function validIncidentCounts(t) {
+    if (!t || typeof t !== "object") return false;
+    for (var i = 0; i < INC_FIELDS.length; i++) if (!isNum(t[INC_FIELDS[i]])) return false;
+    return true;
+  }
+  function validIncidents(v) {
+    if (!v || typeof v !== "object" || !v.windows || !Array.isArray(v.hours) || v.hours.length > 200) return false;
+    for (var i = 0; i < WINDOWS.length; i++) if (!validIncidentCounts(v.windows[WINDOWS[i][0]])) return false;
+    for (var j = 0; j < v.hours.length; j++) {
+      var h = v.hours[j];
+      if (!validIncidentCounts(h) || !isNum(h.start)) return false;
+    }
+    return true;
+  }
 
   function pct(x) { return Math.round(x * 100) + "%"; }
   function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
@@ -1164,6 +1190,39 @@ const SCRIPT = String.raw`
     mix.replaceChildren.apply(mix, mixKids);
   }
 
+  function renderIncidents(d) {
+    var card = $("inccard");
+    var v = d.incidents;
+    if (!validIncidents(v)) { card.hidden = true; return; }
+    card.hidden = false;
+    var w = v.windows;
+    function three(f, fmt) {
+      return ["1d", "7d", "30d"].map(function (k) { return fmt ? fmt(w[k][f]) : num(w[k][f]); }).join(" · ");
+    }
+    function waitFmt(ms) { return ms > 0 ? dur(ms) : "0"; }
+    $("incsum").textContent = "last 1 · 7 · 30 days";
+    kv($("inclist"), [
+      ["Rate limited (429)", three("rateLimited"), "Upstream 429 answers, all accounts."],
+      ["Upstream errors", three("errors"), "Upstream 5xx (overloaded included) and connections that failed before an answer."],
+      ["Throttle waits", three("throttleWaits"), "Requests the admission throttle held back before sending."],
+      ["Throttle wait time", three("throttleWaitMs", waitFmt), "Total time those requests were held."],
+      ["Throttle bypasses", three("throttleBypass"), "Short requests that skipped the throttle's wait."]
+    ]);
+    var max = 0;
+    v.hours.forEach(function (h) { max = Math.max(max, h.rateLimited + h.errors); });
+    var bars = v.hours.map(function (h) {
+      var n = h.rateLimited + h.errors;
+      var b = el("span", n > 0 ? "hit" : "");
+      b.style.height = (max > 0 && n > 0 ? Math.max(8, Math.round(n / max * 100)) : 2) + "%";
+      b.title = h.date + " " + new Date(h.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        + ": " + h.rateLimited + " × 429, " + h.errors + " errors, " + h.throttleWaits + " throttle waits";
+      return b;
+    });
+    var box = $("inchours");
+    box.setAttribute("aria-label", "429s and errors per hour over the last 24 hours, peak " + max);
+    box.replaceChildren.apply(box, bars);
+  }
+
   function renderUsage(d) {
     var none = d.since === null;
     $("usesum").textContent = none
@@ -1172,6 +1231,7 @@ const SCRIPT = String.raw`
     renderHeatmap(d);
     renderModels(d);
     renderDetails(d);
+    renderIncidents(d);
   }
 
   function usageState(msg) {

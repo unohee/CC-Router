@@ -57,7 +57,47 @@ export interface UsageBucket {
   requests: number;
 }
 
-/** On-disk shape. Rows are tuples to keep the file small. */
+/**
+ * What went wrong in one hour, pool-wide: the supply side of the history.
+ *
+ * Kept per hour only (no provider, no model, no account): the question it
+ * answers is "when did the pool struggle", and the open usage endpoint must not
+ * carry account ids.
+ */
+export interface IncidentCounts {
+  /** Upstream 5xx (529 included) and connection failures before an answer. */
+  errors: number;
+  /** Upstream 429s. */
+  rateLimited: number;
+  /** Requests the admission throttle held back, and for how long in total. */
+  throttleWaits: number;
+  throttleWaitMs: number;
+  /** Short requests that skipped the throttle's wait. */
+  throttleBypass: number;
+}
+
+export interface IncidentBucket extends IncidentCounts {
+  /** Start of the hour, epoch ms. */
+  hour: number;
+}
+
+export interface IncidentSample extends Partial<IncidentCounts> {
+  /** When it happened. Clamped into the retention window. */
+  ts: number;
+}
+
+export const INCIDENT_FIELDS: ReadonlyArray<keyof IncidentCounts> = [
+  "errors", "rateLimited", "throttleWaits", "throttleWaitMs", "throttleBypass",
+];
+
+/**
+ * On-disk shape. Rows are tuples to keep the file small.
+ *
+ * `incidents` was added later without bumping `version`: a router rolled back
+ * to a build that predates it still reads the file (and drops only the
+ * incidents), where a new version number would make it discard the whole
+ * history.
+ */
 export interface UsageFile {
   version: 1;
   /** First time anything was recorded; never pruned. Null until then. */
@@ -65,6 +105,10 @@ export interface UsageFile {
   rows: Array<[
     hourSec: number, provider: UsageProvider, model: string,
     input: number, output: number, cacheRead: number, cacheCreation: number, requests: number,
+  ]>;
+  incidents?: Array<[
+    hourSec: number, errors: number, rateLimited: number,
+    throttleWaits: number, throttleWaitMs: number, throttleBypass: number,
   ]>;
 }
 
@@ -105,6 +149,7 @@ export class UsageHistory {
   // would not behave.
   private readonly byKey = new Map<string, UsageBucket>();
   private readonly models = new Set<string>();
+  private readonly incidentByHour = new Map<number, IncidentBucket>();
   private firstSeen: number | null = null;
   private isDirty = false;
   private lastPruneHour = -Infinity;
@@ -148,6 +193,30 @@ export class UsageHistory {
     return [...this.byKey.values()].map(b => ({ ...b }));
   }
 
+  /**
+   * Add one incident. Bad numbers count as 0, and a sample that adds nothing
+   * leaves no bucket behind (an hour with no row reads as a quiet hour anyway).
+   *
+   * `since` is not moved: it marks when token usage began to be recorded, and
+   * the page uses it to tell "no data" from "nothing used".
+   */
+  recordIncident(sample: IncidentSample): void {
+    const add = INCIDENT_FIELDS.map(f => count(sample[f]));
+    if (add.every(n => n === 0)) return;
+    const now = this.now();
+    const ts = Number.isFinite(sample.ts) ? Math.min(Math.max(sample.ts, now - this.retentionMs), now) : now;
+    const hour = Math.floor(ts / HOUR_MS) * HOUR_MS;
+    const bucket = this.incidentBucketFor(hour);
+    INCIDENT_FIELDS.forEach((f, i) => { bucket[f] += add[i]; });
+    this.isDirty = true;
+    if (hour > this.lastPruneHour) this.prune();
+  }
+
+  /** A copy, so callers cannot mutate the store through it. */
+  incidents(): IncidentBucket[] {
+    return [...this.incidentByHour.values()].map(b => ({ ...b }));
+  }
+
   /** Drop buckets that have aged out. Returns how many went. */
   prune(): number {
     const now = this.now();
@@ -156,6 +225,9 @@ export class UsageHistory {
     let removed = 0;
     for (const [key, b] of this.byKey) {
       if (b.hour + HOUR_MS <= cutoff) { this.byKey.delete(key); removed++; }
+    }
+    for (const [hour] of this.incidentByHour) {
+      if (hour + HOUR_MS <= cutoff) { this.incidentByHour.delete(hour); removed++; }
     }
     if (removed > 0) {
       this.models.clear();
@@ -169,7 +241,10 @@ export class UsageHistory {
     const rows = [...this.byKey.values()]
       .sort((a, b) => a.hour - b.hour || (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0))
       .map(b => [b.hour / 1000, b.provider, b.model, b.input, b.output, b.cacheRead, b.cacheCreation, b.requests] as UsageFile["rows"][number]);
-    return { version: 1, since: this.firstSeen, rows };
+    const incidents = [...this.incidentByHour.values()]
+      .sort((a, b) => a.hour - b.hour)
+      .map(b => [b.hour / 1000, b.errors, b.rateLimited, b.throttleWaits, b.throttleWaitMs, b.throttleBypass] as NonNullable<UsageFile["incidents"]>[number]);
+    return { version: 1, since: this.firstSeen, rows, incidents };
   }
 
   /** Call only after the snapshot reached disk; a failed write must stay dirty. */
@@ -182,7 +257,7 @@ export class UsageHistory {
    */
   restore(raw: unknown): boolean {
     if (typeof raw !== "object" || raw === null) return false;
-    const file = raw as { version?: unknown; since?: unknown; rows?: unknown };
+    const file = raw as { version?: unknown; since?: unknown; rows?: unknown; incidents?: unknown };
     if (file.version !== 1 || !Array.isArray(file.rows)) return false;
 
     for (const row of file.rows as unknown[]) {
@@ -196,6 +271,16 @@ export class UsageHistory {
       b.cacheRead += count(cacheRead);
       b.cacheCreation += count(cacheCreation);
       b.requests += count(requests);
+    }
+    // Absent in files written before incidents were kept: those load with none.
+    if (Array.isArray(file.incidents)) {
+      for (const row of file.incidents as unknown[]) {
+        if (!Array.isArray(row) || row.length !== 1 + INCIDENT_FIELDS.length) continue;
+        const [hourSec, ...values] = row as unknown[];
+        if (typeof hourSec !== "number" || !Number.isFinite(hourSec)) continue;
+        const b = this.incidentBucketFor(Math.floor(hourSec * 1000 / HOUR_MS) * HOUR_MS);
+        INCIDENT_FIELDS.forEach((f, i) => { b[f] += count(values[i]); });
+      }
     }
     if (typeof file.since === "number" && Number.isFinite(file.since)
       && (this.firstSeen === null || file.since < this.firstSeen)) {
@@ -214,6 +299,15 @@ export class UsageHistory {
       bucket = { hour, provider, model, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, requests: 0 };
       this.byKey.set(key, bucket);
       this.trackModel(model);
+    }
+    return bucket;
+  }
+
+  private incidentBucketFor(hour: number): IncidentBucket {
+    let bucket = this.incidentByHour.get(hour);
+    if (!bucket) {
+      bucket = { hour, errors: 0, rateLimited: 0, throttleWaits: 0, throttleWaitMs: 0, throttleBypass: 0 };
+      this.incidentByHour.set(hour, bucket);
     }
     return bucket;
   }
