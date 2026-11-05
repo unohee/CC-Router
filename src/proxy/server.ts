@@ -22,7 +22,8 @@ import { logOllamaFallback, logOllamaTransition } from "./logger.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient, logThrottleWait } from "./logger.js";
 import { stats } from "./stats.js";
 import type { LogEntry } from "./stats.js";
-import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH } from "../config/paths.js";
+import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH } from "../config/paths.js";
+import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
 import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
@@ -71,6 +72,8 @@ export interface ServerOptions {
   accountsPath?: string;
   /** Where hourly usage history is kept. Defaults to usage.json beside accounts.json. */
   usagePath?: string;
+  /** Where per-account quota readings are kept. Defaults to quota-history.json beside accounts.json. */
+  quotaHistoryPath?: string;
 }
 
 export interface HealthAccountView {
@@ -470,6 +473,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const flushUsage = createUsageFlusher(usageHistory, usagePath, msg => console.log(chalk.yellow(`  ${msg}`)));
   setInterval(flushUsage, 30_000).unref();
   process.on("exit", flushUsage);
+
+  // Per-account quota readings, restored and saved the same way as the usage
+  // history above. A file that cannot be used is kept aside, never overwritten.
+  const quotaPath = opts.quotaHistoryPath ?? QUOTA_HISTORY_PATH;
+  const quotaRead = readUsageFile(quotaPath);
+  if (quotaRead.status === "corrupt") {
+    console.log(chalk.yellow(`  quota history at ${quotaPath} could not be read${quotaRead.movedTo ? ` — kept as ${quotaRead.movedTo}` : ""}; starting empty`));
+  } else if (quotaRead.status === "ok" && !quotaHistory.restore(quotaRead.data)) {
+    const moved = quarantineUsageFile(quotaPath);
+    console.log(chalk.yellow(`  quota history at ${quotaPath} is not a quota history file${moved ? ` — kept as ${moved}` : ""}; starting empty`));
+  }
+  const flushQuota = createUsageFlusher(quotaHistory, quotaPath, msg => console.log(chalk.yellow(`  ${msg}`)), undefined, "quota history");
+  setInterval(flushQuota, 30_000).unref();
+  process.on("exit", flushQuota);
   // One ask per session per window, held for the life of the process: the
   // client answers the ask by compacting and retrying, and a retry that is
   // still large must not be asked again or the session compacts in a loop.
@@ -732,6 +749,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   }
 
   // ─── Health endpoint (cc-router internal, NOT proxied) ────────────────────
+  // Per-account quota readings. Registered after the secret check, unlike the
+  // usage history: these rows name accounts, and no page needs them unauthenticated.
+  app.get("/cc-router/quota-history", (req, res) => {
+    const raw = req.query["days"];
+    const days = parseQuotaDays(typeof raw === "string" ? raw : undefined);
+    res.set("cache-control", "no-store");
+    res.json(quotaHistoryView(quotaHistory, { now: Date.now(), days }));
+  });
+  // Read-only: without this, any other method would fall through to the
+  // catch-all proxy below and reach upstream.
+  app.all("/cc-router/quota-history", (_req, res) => {
+    res.set("allow", "GET, HEAD").status(405).json({ error: "method not allowed" });
+  });
+
   app.get("/cc-router/health", (_req, res) => {
     // Sweep expired cooldowns on each poll so the dashboard reflects recovery
     // even during idle periods when no /v1 request would trigger getNext().
@@ -1332,6 +1363,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           // weekly window at all has to be remembered here, not read back from it.
           account.quotaReadings = (account.quotaReadings ?? 0) + 1;
           if (rl.sevenDayReset > 0 || rl.sevenDayUtil > 0) account.sevenDayWindowSeen = true;
+          // At most one reading per account per hour; later ones are ignored.
+          quotaHistory.sample(account.id, rl);
         }
 
         // A served request ends a bare-429 streak: the "consecutive" in the
@@ -1725,6 +1758,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // final assignments is what makes a restart rewrite every prompt cache.
     writeSessionAssignments(sessionRouter.snapshot());
     flushUsage();
+    flushQuota();
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();
     }
