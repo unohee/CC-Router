@@ -55,8 +55,10 @@ export interface SessionRouterOptions {
    * Weekly pacing (opt-in). Seats spending their 7-day window faster than the
    * week elapses take new sessions only after on-pace seats, and a pin on a
    * seat far ahead moves to an on-pace seat. Pace never makes a seat unusable.
+   * A function is read on every decision, so the demand governor can turn
+   * pacing on and off without a restart.
    */
-  weeklyPace?: WeeklyPaceConfig;
+  weeklyPace?: WeeklyPaceConfig | (() => WeeklyPaceConfig | null | undefined);
   /** Fired when an existing session is moved to a different target. */
   onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget; reason: ReassignReason }) => void;
   /** Fired whenever the assignment set changes, so it can be persisted. */
@@ -113,7 +115,7 @@ export class SessionRouter {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly softCapUtil: number | null;
-  private readonly weeklyPace: WeeklyPaceConfig | null;
+  private readonly paceSource: () => WeeklyPaceConfig | null;
   private readonly onReassign?: SessionRouterOptions["onReassign"];
   private readonly onAssignmentsChanged?: SessionRouterOptions["onAssignmentsChanged"];
 
@@ -122,7 +124,8 @@ export class SessionRouter {
     this.now = opts.now ?? (() => Date.now());
     const cap = opts.softCapUtil;
     this.softCapUtil = typeof cap === "number" && cap > 0 && cap < 1 ? cap : null;
-    this.weeklyPace = opts.weeklyPace ?? null;
+    const pace = opts.weeklyPace;
+    this.paceSource = typeof pace === "function" ? () => pace() ?? null : () => pace ?? null;
     this.onReassign = opts.onReassign;
     this.onAssignmentsChanged = opts.onAssignmentsChanged;
   }
@@ -328,6 +331,9 @@ export class SessionRouter {
   ): boolean {
     return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
   }
+
+  /** The pacing config in force right now, or null when pacing is off. */
+  private get weeklyPace(): WeeklyPaceConfig | null { return this.paceSource(); }
 
   /** Pace of a target's weekly window, or null when pacing is off. */
   private paceOf(

@@ -14,7 +14,7 @@ import {
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getGovernorConfig, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -25,8 +25,9 @@ import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH } from "../config/paths.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
+import { DemandGovernor, PRIORITY_HEADER, governedSpill, governedThrottleUtil, governedWeeklyPace } from "./demand-governor.js";
 import { readUsageFile, quarantineUsageFile, createUsageFlusher } from "../config/usage-store.js";
-import { usageHistory, openAISample, ollamaSample } from "./usage-history.js";
+import { usageHistory, openAISample, ollamaSample, DAY_MS, HOUR_MS } from "./usage-history.js";
 import { resolveOllamaFallbackConfig, readOllamaApiKey, ollamaReadiness, decideOllamaFallback } from "../providers/ollama/fallback-policy.js";
 import { createOllamaQuotaMonitor } from "../providers/ollama/cloud-quota.js";
 import { OllamaDailyBudget, budgetBalanceOf, resolveOllamaDailyBudgetConfig } from "../providers/ollama/daily-budget.js";
@@ -433,9 +434,31 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   let sessionFlush: NodeJS.Timeout | null = null;
   const softCapUtil = getSoftCapUtil();
   const weeklyPaceCfg = getWeeklyPace();
+  // The demand governor (demand-governor.ts). Off by default; enabled without
+  // `enforce` it judges and logs a stage but applies nothing.
+  const governor = new DemandGovernor(getGovernorConfig(), {
+    onChange: ({ from, to, reason, enforce }) => {
+      const msg = `governor stage ${from} → ${to}${enforce ? "" : " (observe only)"} — ${reason}`;
+      console.log(chalk.yellow(`  ${msg}`));
+      stats.addLog({ ts: Date.now(), accountId: "pool", model: "-", type: "route", details: msg });
+    },
+  });
+  // Judged once at start and then every minute, from the supply model and the
+  // last day's Anthropic spend. A pinned stage takes effect from the start.
+  const governorTick = (): void => {
+    if (!governor.config.enabled) return;
+    const now = Date.now();
+    const supply = supplySnapshot(pool.getAll(), now);
+    const spentLast24h = usageHistory.buckets()
+      .filter(b => b.provider === "anthropic" && b.hour + HOUR_MS > now - DAY_MS && b.hour <= now)
+      .reduce((n, b) => n + costWeighted(b), 0);
+    governor.update({ spentLast24h, forecastNext24h: supply.demand.next24h, budget: supply.budget.today });
+  };
+  /** Pacing in force: the configured one, or the governor's from stage 1 on. */
+  const paceInForce = () => governedWeeklyPace(weeklyPaceCfg ?? null, governor.applied);
   const sessionRouter = new SessionRouter({
     softCapUtil,
-    weeklyPace: weeklyPaceCfg,
+    weeklyPace: paceInForce,
     onReassign: ({ sessionId, from, to, reason }) => {
       const why = reason === "soft-cap" ? `soft cap ${Math.round((softCapUtil ?? 0) * 100)}%`
         : reason === "weekly-pace" ? "ahead of weekly pace"
@@ -518,6 +541,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const flushQuota = createUsageFlusher(quotaHistory, quotaPath, msg => console.log(chalk.yellow(`  ${msg}`)), undefined, "quota history");
   setInterval(flushQuota, 30_000).unref();
   process.on("exit", flushQuota);
+  // First judgement once both histories are back, then every minute.
+  governorTick();
+  setInterval(governorTick, 60_000).unref();
   // One ask per session per window, held for the life of the process: the
   // client answers the ask by compacting and retrying, and a retry that is
   // still large must not be asked again or the session compacts in a loop.
@@ -826,6 +852,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Capacity, demand forecast, today's budget and projected exhaustion per
       // account. Cost-weighted tokens; "unknown" until enough readings pair up.
       supply: supplySnapshot(pool.getAll(), Date.now()),
+      governor: governor.snapshot(),
       // The one verdict both status surfaces draw. The 429 count reads the whole
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
@@ -1241,11 +1268,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         timeoutMs: proxyRequestTimeoutMs,
         matchedTiers: () => tierDiscovery?.ollama() ?? {},
         ...(ollamaBudget ? { budget: budgetSnapshot } : {}),
-        ...(ollamaConfig.spill ? {
-          // Tight = no usable account still has 5-hour room below the spill line.
-          poolTight: (model?: string) => !pool.getAll().some(a =>
-            a.enabled && a.healthy && pool.canServe(a.id, model) && a.rateLimits.fiveHourUtil < ollamaConfig.spill!.poolUtil),
-        } : {}),
+        // The spill in force: as configured, widened by the governor from stage 3.
+        spill: () => governedSpill(ollamaConfig.spill, governor.applied, governor.config),
+        // Tight = no usable account still has 5-hour room below the spill line.
+        poolTight: (model?: string) => {
+          const spill = governedSpill(ollamaConfig.spill, governor.applied, governor.config);
+          return spill !== null && !pool.getAll().some(a =>
+            a.enabled && a.healthy && pool.canServe(a.id, model) && a.rateLimits.fiveHourUtil < spill.poolUtil);
+        },
       },
     } : {}),
     onOllamaSkip: (reason) => {
@@ -1718,7 +1748,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // Short one-shot requests (a plugin's prompt classifier, say) skip the wait
     // but still count as in flight: queued behind the session's own long
     // streams, their answer would arrive after it stopped mattering.
-    const util = accountUtil(account);
+    // Stage 4: a low-priority request waits a moment first. Never an opus-tier
+    // one, and never a refusal: it is sent after the wait like any other.
+    const governorDelay = governor.delayFor(req.body, req._ccAnthropicModel, req.headers[PRIORITY_HEADER]);
+    if (governorDelay > 0) {
+      governor.noteDelayed();
+      await new Promise(r => setTimeout(r, governorDelay));
+    }
+    // Stage 2: an account ahead of pace looks hotter to the throttle, so its
+    // sends are paced earlier. A no-op while the throttle is off.
+    const pace = paceInForce() ?? DEFAULT_WEEKLY_PACE;
+    const ahead = Math.max(
+      weeklyPace(account.rateLimits.sevenDayUtil, account.rateLimits.sevenDayReset, Date.now(), pace.slack).ahead,
+      weeklyPace(account.rateLimits.fiveHourUtil, account.rateLimits.fiveHourReset, Date.now(), pace.fiveHourSlack, FIVE_HOUR_SEC).ahead,
+    );
+    const util = governedThrottleUtil(accountUtil(account), ahead, governor.applied, governor.config);
     const admitted = await throttleGate.admit(account.id, util, { short: isShortRequest(req.body) });
     if (admitted.waitedMs > 0 || admitted.bypassed) {
       logThrottleWait({ accountId: account.id, util, ...admitted });

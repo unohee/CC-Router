@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "fs";
 import { DEFAULT_WEEKLY_PACE, type WeeklyPaceConfig } from "../proxy/weekly-pace.js";
+import { resolveGovernorConfig, type GovernorConfig } from "../proxy/demand-governor.js";
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH, SESSIONS_PATH } from "./paths.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
@@ -347,6 +348,12 @@ export interface ProxyConfig {
     /** Weekly pacing: prefer seats spending their 7-day window no faster than
      *  the week elapses. Opt-in: off unless `enabled` is true. */
     weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number; fiveHour?: boolean; fiveHourSlack?: number };
+    /** Demand governor (proxy/demand-governor.ts). Off unless `enabled`;
+     *  observe-only unless `enforce` too. */
+    governor?: {
+      enabled?: boolean; enforce?: boolean; stageOverride?: number;
+      thresholds?: number[]; hysteresis?: number; delayMs?: number; throttleBoost?: number; spillPoolUtil?: number;
+    };
   };
   /** Present only when this machine is in "client" mode (connected to a remote CC-Router) */
   client?: ClientConfig;
@@ -424,6 +431,11 @@ export function getSoftCapUtil(): number | undefined {
  * Weekly pacing settings, or undefined when it is off. Out-of-range values
  * fall back to the defaults rather than disabling or inverting the rule.
  */
+/** `routing.governor`, every bad field at its default; off when absent. */
+export function getGovernorConfig(): GovernorConfig {
+  return resolveGovernorConfig(readConfig().routing?.governor);
+}
+
 export function getWeeklyPace(): WeeklyPaceConfig | undefined {
   const raw = readConfig().routing?.weeklyPace;
   if (!raw || raw.enabled !== true) return undefined;

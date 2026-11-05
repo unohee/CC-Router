@@ -93,6 +93,9 @@ export interface OllamaFallbackRouteOptions {
   budget?: () => OllamaBudgetVerdict | null;
   /** Whether the pool's 5-hour headroom is nearly gone (see `spill`). */
   poolTight?: (model?: string) => boolean;
+  /** The spill config in force for this request, when it can change at run
+   *  time (the demand governor widens it). Absent: `config.spill` as loaded. */
+  spill?: () => ResolvedOllamaFallbackConfig["spill"];
 }
 
 export interface MessagesCrossProviderRouteOptions {
@@ -673,7 +676,7 @@ export function mountMessagesCrossProviderRoute(
 
   const decideOllama = (claudeModel: string, estimatedPromptTokens: number | null): OllamaDecision => {
     const decision = decideOllamaFallback({
-      config: ollama?.config ?? null,
+      config: ollama ? (ollama.spill ? { ...ollama.config, spill: ollama.spill() } : ollama.config) : null,
       claudeModel,
       anthropicAvailable: () => opts.hasAvailableAnthropicAccount?.(claudeModel) ?? true,
       poolWaitSeconds: () => ollama?.poolWaitSeconds(claudeModel) ?? 0,
