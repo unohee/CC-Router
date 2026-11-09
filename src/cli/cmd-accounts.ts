@@ -4,7 +4,17 @@ import { loadAccounts, loadOpenAIAccounts, accountsFileExists, upsertAccountReco
 import { saveAccounts } from "../proxy/token-refresher.js";
 import { formatExpiry, redactToken } from "../utils/token-extractor.js";
 import { PROXY_PORT } from "../config/paths.js";
-import { probeRouter, addAccountToRouter, removeAccountFromRouter, listLiveAccounts } from "./live-router.js";
+import { probeRouter, addAccountToRouter, removeAccountFromRouter, replaceAccountInRouter, listLiveAccounts } from "./live-router.js";
+import { reloginSeat } from "./relogin.js";
+import { extractFromCredentialsDir, extractFromKeychain } from "../utils/token-extractor.js";
+import { fetchOAuthProfile, describeProfile } from "../utils/oauth-profile.js";
+import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS } from "../proxy/types.js";
+import { spawnSync } from "node:child_process";
+import { removeAccountLoginFromKeychain } from "../utils/keychain-login.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { confirm } from "@inquirer/prompts";
 import { createOpenAIAccountRecord } from "../providers/openai/account-record.js";
 import { loginOpenAIWithDeviceCode } from "../providers/openai/device-oauth.js";
 import type { Account } from "../proxy/types.js";
@@ -148,6 +158,83 @@ export function registerAccounts(program: Command): void {
       saveAccounts(merged);
       console.log(chalk.green(`\n✓ Account "${account.id}" added (${merged.length} total).\n`));
       console.log(chalk.gray("  Start the proxy to load it: cc-router start\n"));
+    });
+
+  // ── accounts relogin ─────────────────────────────────────────────────────
+  accounts
+    .command("relogin <id>")
+    .description("Replace a seat whose refresh token was refused, after a fresh login (keeps pins and caps)")
+    .option("--from-dir <dir>", "Read the login from a Claude config directory instead of running one")
+    .option("--from-keychain", "macOS: use the default Keychain login, then remove the account login from it so nothing else can rotate the token")
+    .option("--expect <text>", "Abort unless the logged-in email contains this text")
+    .option("-y, --yes", "Do not ask for confirmation (needed without a terminal)")
+    .action(async (id: string, flags: { fromDir?: string; fromKeychain?: boolean; expect?: string; yes?: boolean }) => {
+      let tempDir: string | undefined;
+      const obtainTokens = async () => {
+        if (flags.fromDir) return extractFromCredentialsDir(flags.fromDir);
+        if (flags.fromKeychain) return extractFromKeychain();
+        // A throwaway config dir keeps this login from touching, or being
+        // refreshed by, the login the machine normally uses. The real `claude`
+        // does the OAuth/PKCE exchange; run it over ssh and open its URL anywhere.
+        tempDir = mkdtempSync(join(tmpdir(), "cc-router-relogin-"));
+        const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: tempDir };
+        for (const k of ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]) delete env[k];
+        console.log(chalk.gray(`  Running: claude auth login  (config dir ${tempDir})`));
+        const run = spawnSync("claude", ["auth", "login"], { stdio: "inherit", env });
+        if (run.error || run.status !== 0) {
+          console.error(chalk.red(`  claude auth login failed${run.error ? `: ${run.error.message}` : ` (exit ${run.status})`}`));
+          return null;
+        }
+        const tokens = extractFromCredentialsDir(tempDir);
+        if (!tokens && process.platform === "darwin") {
+          console.error(chalk.yellow("  On macOS the login is kept in the Keychain, not in a file. Log in on the server (ssh), or use --from-keychain."));
+        }
+        return tokens;
+      };
+
+      const result = await reloginSeat(
+        { id, expect: flags.expect, yes: flags.yes },
+        {
+          probe: () => probeRouter(PROXY_PORT),
+          knownIds: async (probe) =>
+            probe.state === "live"
+              ? (await listLiveAccounts(probe.router)).filter(a => a.provider === "anthropic_subscription").map(a => a.id)
+              : (accountsFileExists() ? loadAccounts() : []).map(a => a.id),
+          obtainTokens,
+          fetchProfile: fetchOAuthProfile,
+          describe: describeProfile,
+          confirm: process.stdin.isTTY ? (message) => confirm({ message, default: false }) : undefined,
+          replaceLive: (probe, account) => replaceAccountInRouter(probe.router, account),
+          replaceInFile: (seat, tokens) => {
+            const all = loadAccounts();
+            saveAccounts(all.map(a => a.id === seat
+              ? { ...a, tokens, healthy: true, consecutiveErrors: 0, authState: "ok" as const }
+              : a));
+          },
+          cleanup: () => {
+            if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+            if (flags.fromKeychain) {
+              // Only the account login goes; MCP server logins share that Keychain item.
+              const done = removeAccountLoginFromKeychain();
+              if (done !== "kept") console.log(chalk.gray("  Removed the account login from the Keychain (the router now owns this refresh token); MCP logins were left in place."));
+            }
+          },
+          log: (line) => console.log(line),
+        },
+        (seat, tokens): Account => ({
+          id: seat, tokens, healthy: true, busy: false, requestCount: 0, errorCount: 0, lastUsed: 0,
+          lastRefresh: 0, consecutiveErrors: 0, rateLimits: { ...DEFAULT_RATE_LIMITS }, ...ACCOUNT_USER_DEFAULTS,
+        }),
+      );
+
+      // A login that did not end in a replacement still left a credentials directory behind.
+      if (!result.ok && tempDir) rmSync(tempDir, { recursive: true, force: true });
+      if (!result.ok) {
+        console.error(chalk.red(`\n✗ ${result.reason}\n`));
+        process.exitCode = 1;
+        return;
+      }
+      console.log(chalk.green(`\n✓ "${result.id}" replaced (${result.identity}) ${result.via === "router" ? "in the running router" : "in accounts.json"}.\n`));
     });
 
   // ── accounts add-openai ──────────────────────────────────────────────────

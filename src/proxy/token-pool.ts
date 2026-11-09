@@ -1,4 +1,4 @@
-import type { Account, AccountRecord } from "./types.js";
+import type { Account, AccountRecord, OAuthTokens } from "./types.js";
 import type { PinBlock } from "./session-migration.js";
 import { cooldownDeadline } from "./model-cooldown.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "./types.js";
@@ -410,6 +410,28 @@ export class TokenPool {
       a.weeklyLimitPercent = clampPercent(patch.weeklyLimitPercent);
     }
     return a;
+  }
+
+  /**
+   * Swap an existing account's credentials in place, e.g. after a re-login.
+   *
+   * The Account object stays where it is, so session pins, user caps, quota
+   * readings and counters survive — remove-then-add would drop all of them.
+   * Auth state is reset because the new refresh token has no history.
+   * Returns the previous tokens (for rollback), or null if the id is unknown.
+   */
+  replaceTokens(id: string, tokens: OAuthTokens): OAuthTokens | null {
+    const a = this.findById(id);
+    if (!a) return null;
+    const previous = a.tokens;
+    a.tokens = { ...tokens };
+    a.healthy = true;
+    a.consecutiveErrors = 0;
+    a.authState = "ok";
+    a.lastRefreshError = undefined;
+    a.lastRefreshAttempt = undefined;
+    a.nextRefreshAt = undefined;
+    return previous;
   }
 
   /**

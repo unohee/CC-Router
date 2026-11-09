@@ -29,6 +29,8 @@ export const DEFAULT_RATE_LIMITS: AccountRateLimits = {
   lastUpdated: 0,
 };
 
+export type AuthState = "ok" | "refresh-failing" | "needs-relogin";
+
 export interface Account {
   id: string;
   tokens: OAuthTokens;
@@ -53,6 +55,16 @@ export interface Account {
   quotaReadings?: number;
   /** Runtime-only: some response has carried a 7-day window for this account. */
   sevenDayWindowSeen?: boolean;
+  /** Runtime-only: what the last token refresh told us. "needs-relogin" means the
+   *  refresh token itself was refused (invalid_grant) — retrying cannot help, only
+   *  a fresh login can. Never persisted; `serialize` picks fields explicitly. */
+  authState?: AuthState;
+  /** Runtime-only: the last refresh failure, for health and the dashboard. */
+  lastRefreshError?: string;
+  /** Runtime-only: when the last refresh was attempted (epoch ms). */
+  lastRefreshAttempt?: number;
+  /** Runtime-only: no early (lead-window) refresh before this time. */
+  nextRefreshAt?: number;
   requestCount: number;
   errorCount: number;
   lastUsed: number;      // Unix timestamp in ms

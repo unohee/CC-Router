@@ -48,11 +48,34 @@ cc-router status --json | python3 -m json.tool
 cc-router stop && cc-router start
 ```
 
-**If the refresh token itself expired**, you need to re-add the account:
+**If the refresh token itself was refused** (`invalid_grant — Refresh token expired` in the log), restarting
+cannot help; the seat needs a new login. See the next section.
+
+---
+
+## A seat says "needs re-login"
+
+Health reports `accounts[].auth.state` as `ok`, `refresh-failing` or `needs-relogin`, and the dashboard,
+the `status` TUI and the severity headline show `heewon needs re-login (3h0m left)`.
+
+- `refresh-failing`: the refresh call failed for a passing reason (network, 5xx). The router retries with
+  a backoff and the seat keeps serving. No action.
+- `needs-relogin`: the server refused the refresh token (`invalid_grant`). The router asks **once** and then
+  stops. The seat keeps serving until its access token runs out; the countdown is in the headline. The
+  background loop refreshes at half-life (`tokenRefresh.leadMinutes`, default 240), so this shows up hours
+  before the outage rather than ten minutes before.
+
 ```bash
-cc-router setup --add
-# Log out and back in with that account in Claude Code first
+cc-router accounts relogin heewon --expect heewon@     # runs `claude auth login`; open the URL anywhere
+cc-router accounts relogin heewon --from-keychain      # macOS: use the Keychain login, then remove it
 ```
+
+It checks who logged in (`/api/oauth/profile`) before touching anything, then replaces the seat in the
+running router, keeping its caps and session pins. Without a terminal it needs `--yes` or `--expect`.
+
+**Why it happens.** A refresh token rotates on use, so only one holder of it can stay valid. A leftover
+`claude` login holding the same token (Keychain, `~/.claude/.credentials.json`, another machine) refreshes
+it behind the router's back. After a re-login, do not leave that copy behind; `--from-keychain` removes it.
 
 ---
 

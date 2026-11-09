@@ -340,6 +340,10 @@ export interface ProxyConfig {
     askClientToCompact?: boolean;
   };
   /** Session placement tuning. */
+  /** Token refresh tuning. `leadMinutes`: how long before an access token
+   *  expires the background loop refreshes it (default 240). A dead refresh
+   *  token is found that long before the outage instead of ten minutes before. */
+  tokenRefresh?: { leadMinutes?: number };
   routing?: {
     /** Utilization (0–1) at which an account stops taking new sessions and
      *  hands its pinned ones to an account with room — only while one exists.
@@ -437,6 +441,16 @@ export function getSoftCapUtil(): number | undefined {
 /** In-router failover: on unless `routing.failover.enabled` is false. */
 export function getFailoverEnabled(): boolean {
   return readConfig().routing?.failover?.enabled !== false;
+}
+
+/** Access tokens last 8 h; refresh at half-life by default. */
+export const DEFAULT_REFRESH_LEAD_MINUTES = 240;
+
+/** `tokenRefresh.leadMinutes` in ms, bad values at the default, clamped to 10 min – 7 h. */
+export function getRefreshLeadMs(): number {
+  const raw = readConfig().tokenRefresh?.leadMinutes;
+  const min = typeof raw === "number" && Number.isFinite(raw) ? raw : DEFAULT_REFRESH_LEAD_MINUTES;
+  return Math.min(420, Math.max(10, min)) * 60_000;
 }
 
 /** `routing.governor`, every bad field at its default; off when absent. */

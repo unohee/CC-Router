@@ -69,5 +69,14 @@ export const CONFIG_PATH =
 // Daemon PID file — written by daemon process, read by stop/status
 export const PID_PATH = path.join(CONFIG_DIR, "cc-router.pid");
 
+// Where the running router says it listens ({host, port, pid}). Written by the
+// server in every run mode, so CLI commands find a router that is bound to a
+// non-loopback address (HOST=...) instead of concluding that none is running.
+// Beside accounts.json, like the other state files, so a test that points
+// ACCOUNTS_PATH at a temp directory never touches the real router's record.
+export const ENDPOINT_PATH =
+  process.env["ENDPOINT_PATH"] ||
+  path.join(path.dirname(ACCOUNTS_PATH), "router.json");
+
 // Log file — daemon stdout/stderr redirect here
 export const LOG_PATH = path.join(CONFIG_DIR, "cc-router.log");

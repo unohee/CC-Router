@@ -60,25 +60,28 @@ Output:
 
 ## Adding multiple accounts
 
-To add a second Claude Max account on macOS:
+**Never leave a login behind that something else can refresh.** The refresh token rotates on every use, so
+two holders of the same one cannot both stay valid: whichever refreshes first kills the other's copy, and
+the router then finds `invalid_grant` hours later. The Keychain (or `~/.claude/.credentials.json`) copy that
+`claude login` leaves is exactly such a holder.
+
+Preferred: let `cc-router` run the login in a throwaway config directory and hand the tokens to the router.
 
 ```bash
-# 1. Log out of your current account
-claude logout
+# Replace a seat whose refresh token was refused (keeps its caps and session pins)
+cc-router accounts relogin heewon --expect heewon@
 
-# 2. Log in with the second account
-claude login
-
-# 3. Extract the tokens
-security find-generic-password -s 'Claude Code-credentials' -w
-
-# 4. Paste them when prompted by: cc-router setup --add
-
-# 5. Log back in with your primary account
-claude logout && claude login
+# On a server, over ssh: it runs `claude auth login` and prints the URL to open anywhere.
 ```
 
-On Linux/Windows, the flow is identical — `~/.claude/.credentials.json` will contain the credentials of whichever account is currently logged in.
+On macOS the login lives in the Keychain, so use `cc-router accounts relogin <id> --from-keychain`: it
+reads the Keychain login, replaces the seat, then removes the **account login** from the Keychain so the
+router is the only holder. MCP server logins (Linear, Notion, Slack, …) live in the same Keychain item and are
+kept. Do not delete the whole item with `security delete-generic-password`: it signs you out of every MCP
+server. Do not `claude auth logout` either; it can revoke the token the router now uses.
+
+To add a *new* seat the old way: log in with `claude auth login`, run `cc-router accounts add` (Keychain
+or credentials file), then remove the CLI's copy with `relogin --from-keychain`, and log back in with your own account.
 
 ## Token scopes
 
@@ -103,7 +106,7 @@ Content-Type: application/json
 }
 ```
 
-The refresh loop runs every 5 minutes and refreshes any token expiring within 10 minutes. New tokens are written atomically (write to `.tmp`, rename) to prevent file corruption.
+The refresh loop runs every 5 minutes and refreshes any token with less than `tokenRefresh.leadMinutes` left (default 240, i.e. at half-life). Refreshing that early is deliberate: a refresh token that has died is found hours before the outage. The per-request path still refreshes inside the last 10 minutes. New tokens are written atomically (write to `.tmp`, rename) to prevent file corruption.
 
 ## OpenAI ChatGPT/Codex subscription tokens
 

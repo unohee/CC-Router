@@ -36,7 +36,12 @@ export async function extractFromKeychain(): Promise<OAuthTokens | null> {
  * No shell — pure Node.js file read.
  */
 export function extractFromCredentialsFile(): OAuthTokens | null {
-  const credPath = join(os.homedir(), ".claude", ".credentials.json");
+  return extractFromCredentialsDir(join(os.homedir(), ".claude"));
+}
+
+/** The same read for a Claude config directory (a login made under `CLAUDE_CONFIG_DIR`). */
+export function extractFromCredentialsDir(dir: string): OAuthTokens | null {
+  const credPath = join(dir, ".credentials.json");
   if (!existsSync(credPath)) return null;
   try {
     const raw = JSON.parse(readFileSync(credPath, "utf-8"));

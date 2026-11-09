@@ -316,6 +316,7 @@ cc-router logs --lines 100   Show last 100 lines
 
 cc-router accounts list      List configured accounts (live stats if proxy is running)
 cc-router accounts add       Add an account interactively
+cc-router accounts relogin   Replace a seat whose refresh token was refused (keeps caps and pins)
 cc-router accounts login-openai  Sign in to OpenAI subscription auth with device code
 cc-router accounts add-openai  Add an OpenAI subscription account manually (experimental)
 cc-router accounts remove <id>  Remove a Claude or OpenAI account
@@ -900,6 +901,18 @@ It is read-only and appears in health as `supply`, with a Supply card on the das
 | `spillPoolUtil` | `0.75` | Stage 3 spill line. |
 
 It never refuses a request, and it never delays anything opus-tier. With no budget yet (capacity still unknown), it holds stage 0. Every stage change is logged as `governor stage 0 → 2 — demand at 104% of today's budget`. Health shows `governor` with the stage, what is applied, the pressure, the reason and the last 24 hours.
+
+### Token health
+
+Every account reports `auth.state` in health: `ok`, `refresh-failing` (a passing error, retried) or
+`needs-relogin` (the refresh token was refused, so only a new login helps). The background loop refreshes
+a token when less than `tokenRefresh.leadMinutes` remain (default 240), so a dead refresh token is found hours
+before the outage. Recover a seat with `cc-router accounts relogin <id>`; see
+[docs/oauth-tokens.md](docs/oauth-tokens.md) for why a leftover CLI login breaks refresh.
+
+```json
+{ "tokenRefresh": { "leadMinutes": 240 } }
+```
 
 ### State that survives a restart
 

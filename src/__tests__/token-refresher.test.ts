@@ -120,22 +120,39 @@ describe("refreshAccountToken", () => {
     expect(account.consecutiveErrors).toBe(1);
   });
 
-  it("marks account unhealthy immediately when OAuth refresh is rejected", async () => {
+  it("flags a refused refresh token but keeps serving while the access token is valid", async () => {
     const account = makeAccount(Date.now() + 5 * 60 * 1000);
 
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: false,
       status: 400,
-      text: async () => "invalid_grant",
+      text: async () => JSON.stringify({ error: "invalid_grant", error_description: "Refresh token expired" }),
     } as Response);
 
     const result = await refreshAccountToken(account);
 
     expect(result).toBe(false);
-    expect(account.healthy).toBe(false);
+    expect(account.authState).toBe("needs-relogin");
+    // The access token still works; taking the seat out now would only lose its last minutes.
+    expect(account.healthy).toBe(true);
   });
 
-  it("marks account unhealthy after 3 consecutive errors", async () => {
+  it("marks the account unhealthy once the access token has run out", async () => {
+    const account = makeAccount(Date.now() - 1_000);
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: "invalid_grant" }),
+    } as Response);
+
+    await refreshAccountToken(account);
+
+    expect(account.healthy).toBe(false);
+    expect(account.authState).toBe("needs-relogin");
+  });
+
+  it("keeps trying after repeated transient errors, and stays healthy while the token is valid", async () => {
     const account = makeAccount(Date.now() + 5 * 60 * 1000);
 
     vi.mocked(fetch).mockResolvedValue({
@@ -149,7 +166,8 @@ describe("refreshAccountToken", () => {
     await refreshAccountToken(account);
 
     expect(account.consecutiveErrors).toBe(3);
-    expect(account.healthy).toBe(false);
+    expect(account.authState).toBe("refresh-failing");
+    expect(account.healthy).toBe(true);
   });
 
   it("returns false and increments errors on network failure", async () => {

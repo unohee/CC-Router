@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { PID_PATH } from "../config/paths.js";
 import type { Account } from "../proxy/types.js";
 import { resolveStatusTarget } from "./cmd-status.js";
+import { pidAlive, readLiveEndpoint } from "../config/endpoint.js";
 
 /**
  * Account edits made to accounts.json while a router is running are lost: the
@@ -30,16 +31,6 @@ function daemonPid(): number | null {
   }
 }
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM: the process exists but belongs to someone else.
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 export async function probeRouter(port: number, timeoutMs = 1_500): Promise<RouterProbe> {
   const target = resolveStatusTarget(port);
   try {
@@ -52,6 +43,15 @@ export async function probeRouter(port: number, timeoutMs = 1_500): Promise<Rout
       return {
         state: "unreachable",
         reason: `process ${pid} holds ${PID_PATH} but ${target.healthUrl} did not answer (${(err as Error).message})`,
+      };
+    }
+    // The server records where it listens in every run mode, so a live record
+    // means a router exists even when the pid file does not.
+    const recorded = readLiveEndpoint();
+    if (recorded) {
+      return {
+        state: "unreachable",
+        reason: `process ${recorded.pid} is listening on ${recorded.host}:${recorded.port} but ${target.healthUrl} did not answer (${(err as Error).message})`,
       };
     }
     return { state: "stopped" };
@@ -91,6 +91,22 @@ export async function addAccountToRouter(router: LiveRouter, account: Account): 
     headers: { "content-type": "application/json", ...router.headers },
     body: JSON.stringify({
       id: account.id,
+      accessToken: account.tokens.accessToken,
+      refreshToken: account.tokens.refreshToken,
+      expiresAt: account.tokens.expiresAt,
+      scopes: account.tokens.scopes,
+    }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  return res.ok ? { ok: true } : describeFailure(res);
+}
+
+/** Replace an existing seat's credentials in place; 404 if the router does not know the ID. */
+export async function replaceAccountInRouter(router: LiveRouter, account: Account): Promise<RouterEdit> {
+  const res = await fetch(`${router.baseUrl}/cc-router/accounts/${encodeURIComponent(account.id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", ...router.headers },
+    body: JSON.stringify({
       accessToken: account.tokens.accessToken,
       refreshToken: account.tokens.refreshToken,
       expiresAt: account.tokens.expiresAt,

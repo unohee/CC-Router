@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { PROXY_PORT } from "../config/paths.js";
 import { readConfig } from "../config/manager.js";
+import { readLiveEndpoint, connectHost } from "../config/endpoint.js";
 
 /**
  * Resolves where the proxy's HTTP API lives and which bearer token to use.
@@ -34,7 +35,11 @@ export function resolveStatusTarget(port: number): StatusTarget {
     };
   }
 
-  const base = `http://localhost:${port}`;
+  // The router records where it listens; a HOST-bound one is not on localhost.
+  const recorded = readLiveEndpoint();
+  const base = recorded
+    ? `http://${connectHost(recorded.host)}:${recorded.port}`
+    : `http://localhost:${port}`;
   const headers: Record<string, string> = {};
   if (cfg.proxySecret) headers["authorization"] = `Bearer ${cfg.proxySecret}`;
   return {

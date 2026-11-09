@@ -201,6 +201,7 @@ function stateWord(a: AccountStat, s: AccountSeverity, now: number): { text: str
   switch (s.state) {
     case "off": return { text: "off", color: "gray", glyph: GLYPH.off };
     case "expired": return { text: "EXPIRED", color: "red", glyph: GLYPH.problem };
+    case "relogin": return { text: "RELOGIN", color: "red", glyph: GLYPH.problem };
     case "cooling": return { text: `COOL ${formatRemaining((s.until ?? now) - now)}`, color: "red", glyph: GLYPH.problem };
     case "limited": return { text: "LIMITED", color: "red", glyph: GLYPH.problem };
     case "unhealthy": return { text: "ERROR", color: "red", glyph: GLYPH.problem };

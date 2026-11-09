@@ -14,17 +14,19 @@ vi.mock("../config/paths.js", () => ({
   SESSIONS_PATH: `${MOCK_DIR}/sessions.json`,
   CLAUDE_SETTINGS_PATH: `${MOCK_DIR}/settings.json`,
   PID_PATH: `${MOCK_DIR}/cc-router.pid`,
+  ENDPOINT_PATH: `${MOCK_DIR}/router.json`,
   PROXY_PORT: 3456,
   LITELLM_PORT: 4000,
   LITELLM_URL: undefined,
 }));
 
-import { probeRouter, addAccountToRouter, removeAccountFromRouter } from "../cli/live-router.js";
+import { probeRouter, addAccountToRouter, removeAccountFromRouter, replaceAccountInRouter } from "../cli/live-router.js";
 import { setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import type { Account } from "../proxy/types.js";
 
 const PID_FILE = `${MOCK_DIR}/cc-router.pid`;
 const ACCOUNTS_FILE = `${MOCK_DIR}/accounts.json`;
+const ENDPOINT_FILE = `${MOCK_DIR}/router.json`;
 
 beforeEach(() => {
   fs.mkdirSync(MOCK_DIR, { recursive: true });
@@ -94,7 +96,69 @@ describe("probeRouter", () => {
   });
 });
 
+describe("probeRouter with a recorded endpoint", () => {
+  const record = (host: string, pid = process.pid) =>
+    fs.writeFileSync(ENDPOINT_FILE, JSON.stringify({ host, port: 3456, pid }));
+
+  it("looks where the router says it listens, not on localhost", async () => {
+    // A router bound to HOST=<tailscale ip> does not answer on localhost; probing
+    // there would call it stopped and let `accounts add` write a file it overwrites.
+    record("100.79.169.99");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+
+    const probe = await probeRouter(3456);
+
+    expect(probe.state).toBe("live");
+    if (probe.state === "live") expect(probe.router.baseUrl).toBe("http://100.79.169.99:3456");
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://100.79.169.99:3456/cc-router/health");
+  });
+
+  it("reaches a bind-all router through loopback", async () => {
+    record("0.0.0.0");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+
+    const probe = await probeRouter(3456);
+
+    if (probe.state === "live") expect(probe.router.baseUrl).toBe("http://127.0.0.1:3456");
+    else throw new Error(`expected live, got ${probe.state}`);
+  });
+
+  it("ignores a record whose process is gone", async () => {
+    const child = spawnSync(process.execPath, ["-e", ""]);
+    record("100.79.169.99", child.pid!);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    expect((await probeRouter(3456)).state).toBe("stopped");
+  });
+
+  it("refuses to guess when the recorded router is alive but silent", async () => {
+    record("100.79.169.99");
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("socket hang up"));
+
+    const probe = await probeRouter(3456);
+
+    expect(probe.state).toBe("unreachable");
+    if (probe.state === "unreachable") expect(probe.reason).toContain("100.79.169.99:3456");
+  });
+});
+
 describe("router account edits", () => {
+  it("replaces a seat in place with PUT", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ account: { id: "heewon" } }), { status: 200 }));
+
+    const result = await replaceAccountInRouter(
+      { baseUrl: "http://router.local", headers: { authorization: "Bearer s" } },
+      account("heewon"),
+    );
+
+    expect(result.ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://router.local/cc-router/accounts/heewon");
+    expect((init as RequestInit).method).toBe("PUT");
+    expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({ accessToken: "sk-ant-oat01-heewon", refreshToken: "sk-ant-ort01-heewon" });
+  });
+
   it("posts the account to the running pool rather than writing the file", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify({ account: { id: "kyte" } }), { status: 201 }));

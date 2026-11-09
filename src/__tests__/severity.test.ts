@@ -280,3 +280,27 @@ describe("whether an account has a weekly window", () => {
     expect(weeklyWindowOf({ sevenDayWindowSeen: true, quotaReadings: 5000 })).toBe("seen");
   });
 });
+
+describe("a refused refresh token", () => {
+  it("is a problem with a countdown while the access token still works", () => {
+    const s = computeSeverity([acct("heewon", { expiresInMs: 3 * 60 * MIN, auth: { state: "needs-relogin" } }), acct("lyra")], [], NOW);
+    expect(s.accounts[0]).toMatchObject({ id: "heewon", rung: "problem", state: "relogin", left: 3 * 60 * MIN });
+    expect(s.pool).toBe("problem");
+    expect(describeSeverity(s)).toContain("heewon needs re-login (3h0m left)");
+  });
+
+  it("reads as expired once the access token has run out", () => {
+    const s = computeSeverity([acct("vega", { expiresInMs: -1, auth: { state: "needs-relogin" } })], [], NOW);
+    expect(s.accounts[0].state).toBe("expired");
+  });
+
+  it("is not raised for a transient refresh failure", () => {
+    const s = computeSeverity([acct("rigel", { auth: { state: "refresh-failing" } })], [], NOW);
+    expect(s.accounts[0].state).toBe("ok");
+  });
+
+  it("does not make a disabled seat look broken", () => {
+    const s = computeSeverity([acct("a", { enabled: false, auth: { state: "needs-relogin" } }), acct("b")], [], NOW);
+    expect(s.accounts[0].state).toBe("off");
+  });
+});
