@@ -813,7 +813,7 @@ Every seat in the pool now has a 5-hour **and** a 7-day window. The pieces below
 
 A `POST /v1/messages` that meets a refusal is retried **inside the router**, before the client sees anything:
 
-1. **The next account.** A 401, a 429, a 529, a 500/502/503/504, a connection that fails before any response byte, a stream whose upstream sends no headers within `streamGuard.firstByteSeconds` (default 120), or a token that could not be refreshed sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most. A seat marked `needs-relogin` is tried only after every other seat, and only while its access token still works.
+1. **The next account.** A 401, a 429, a 529, a 500/502/503/504, a connection that fails before any response byte, an upstream that sends no headers within `streamGuard.firstByteSeconds` (default 120; a non-stream request also gets 20 ms per `max_tokens`), or a token that could not be refreshed sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most. A seat marked `needs-relogin` is tried only after every other seat, and only while its access token still works.
 2. **Ollama.** When every eligible account has refused, the request goes to the Ollama fallback, if `ollamaFallback` is configured and its policy accepts it (minimum wait, size, budget).
 3. **The last refusal.** Otherwise the last upstream refusal is passed to the client as received.
 

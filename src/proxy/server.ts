@@ -25,7 +25,7 @@ import { stats } from "./stats.js";
 import { readBuildInfo } from "./build-info.js";
 import { InFlightCounter, countsAsInFlight } from "./in-flight.js";
 import { drainServer, forceConnectionClose, resolveDrainLimitMs, trackConnections } from "./drain.js";
-import { armFirstByteTimer, guardedRelay, isFirstByteTimeout, resolveStreamGuard, StreamGuardCounters } from "./stream-guard.js";
+import { armFirstByteTimer, guardedRelay, headersDeadlineMs, isFirstByteTimeout, resolveStreamGuard, StreamGuardCounters, STALL_COOLDOWN_SECONDS } from "./stream-guard.js";
 import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
 import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
@@ -1841,10 +1841,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     on: {
       proxyReq: (proxyReq, req, res, options) => {
         proxyOn.proxyReq!(proxyReq, req, res, options);
-        // Headers of a stream come at once; one that sends none is stuck, and
-        // nothing has reached the client yet, so the next seat can answer it.
-        // A non-stream request's headers come only with its whole answer.
-        if ((req as Request).body?.stream === true) armFirstByteTimer(proxyReq, streamGuard.firstByteMs);
+        // An upstream that sends no headers in time is stuck, and nothing has
+        // reached the client yet, so the next seat can answer it. A stream's
+        // headers come at once; a non-stream request's come with its whole
+        // answer, so it gets time to generate max_tokens (headersDeadlineMs).
+        armFirstByteTimer(proxyReq, headersDeadlineMs(streamGuard, (req as Request).body));
       },
       proxyRes: (proxyRes, req, res) => {
         proxyOn.proxyRes!(proxyRes, req, res);
@@ -1865,7 +1866,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         r._ccFailover!.suppressErrorReply = false;
         const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "proxy_error", message: err.message } }));
         const timedOut = isFirstByteTimeout(err);
-        if (timedOut) streamGuardCounters.firstByteTimeouts++;
+        if (timedOut) {
+          streamGuardCounters.firstByteTimeouts++;
+          // Already off this seat for this request; keep new ones off it briefly too.
+          if (r._ccAccount) recordRateLimitCooldown(r._ccAccount, undefined, "", STALL_COOLDOWN_SECONDS);
+        }
         void failoverNext(r, res as ServerResponse, {
           status: timedOut ? 504 : 502, headers: { "content-type": "application/json", "content-length": String(body.length) }, body,
           reason: timedOut ? err.message : `connection error (${err.message.slice(0, 80)})`, kind: timedOut ? "timeout" : "connection",
@@ -1903,6 +1908,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           const what = outcome === "stalled" ? `went silent for ${Math.round(streamGuard.idleMs / 1000)}s`
             : outcome === "broken" ? "broke mid-response" : "ended without message_stop";
           logError(seat, 0, `upstream stream ${what}; ended with overloaded_error so the client retries`);
+          // The client's retry carries the same session: without a pause it
+          // would be pinned straight back onto the seat that just stalled.
+          if (req._ccAccount) recordRateLimitCooldown(req._ccAccount, undefined, "", STALL_COOLDOWN_SECONDS);
         },
       });
       return;
