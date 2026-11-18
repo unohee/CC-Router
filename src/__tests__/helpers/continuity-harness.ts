@@ -104,7 +104,12 @@ export class FakeUpstream {
   readonly server: Server;
   readonly seen: UpstreamRequest[] = [];
   staleTokens = 0;
-  constructor(opts: { chunks?: number; gapMs?: number; oauth?: FakeOAuth } = {}) {
+  /**
+   * `gate`: when given, a stream sends its first event and then waits for it
+   * before the rest, so a test can hold a stream open across an event (a
+   * reload) instead of guessing how long that event takes on a loaded host.
+   */
+  constructor(opts: { chunks?: number; gapMs?: number; oauth?: FakeOAuth; gate?: Promise<void> } = {}) {
     const chunks = opts.chunks ?? 10;
     const gapMs = opts.gapMs ?? 150;
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -132,6 +137,7 @@ export class FakeUpstream {
         const tick = () => {
           if (res.destroyed) return;
           res.write(events[i++]);
+          if (i === 1 && opts.gate) { void opts.gate.then(() => setTimeout(tick, gapMs)); return; }
           if (i < events.length) setTimeout(tick, gapMs);
           else res.end();
         };

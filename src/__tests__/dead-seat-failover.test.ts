@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { TokenPool, NoAvailableAccountError } from "../proxy/token-pool.js";
 import { ACCOUNT_USER_DEFAULTS, DEFAULT_RATE_LIMITS, type Account } from "../proxy/types.js";
-import { waitForListening, waitFor } from "./helpers/router-process.js";
+import { ROUTER_BOOT_MS, waitForListening, waitFor } from "./helpers/router-process.js";
 
 // A seat whose refresh token the server refused (invalid_grant) is dead in a few
 // hours at most. While another seat can serve it takes no work and its sessions
@@ -188,7 +188,8 @@ async function withRouter(
 const auth = async (health: () => Promise<{ accounts: HealthAccount[] }>, id: string) =>
   (await health()).accounts.find(a => a.id === id)?.auth.state;
 
-describe("a dead seat through a real router", () => {
+// Spawns real routers: the process-test budget, not the 5 s unit default.
+describe("a dead seat through a real router", { timeout: 4 * ROUTER_BOOT_MS }, () => {
   it("a revoked access token is answered by another seat, then the seat leaves rotation", async () => {
     // Far from expiry, so only the upstream 401 reveals the dead seat.
     const far = Date.now() + 8 * HOUR;
