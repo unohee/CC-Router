@@ -4,10 +4,15 @@
 #
 # The incoming dir holds release.tgz, params.env and cc-router.service.in.
 # Steps: unpack the release into <root>/releases/<sha> with production deps,
-# render the unit, wait for a quiet moment, switch the `current` symlink,
-# restart, and wait until health reports the new sha with the same account
-# count and the dashboard answers. Any failure restores the previous symlink and
-# unit and restarts the previous build. The last line is DEPLOY OK or DEPLOY FAILED.
+# render the unit, switch the `current` symlink, then either
+#   reload   (unit unchanged and the supervisor running): `systemctl reload`
+#            starts a worker from the new release and lets the old one finish
+#            its streams, so no request is dropped; or
+#   restart  (first install, or the unit changed): wait for a quiet moment,
+#            then a cold restart, which cuts whatever is in flight;
+# and wait until health reports the new sha with the same account count and
+# the dashboard answers. Any failure restores the previous symlink and unit and
+# brings the previous build back. The last line is DEPLOY OK or DEPLOY FAILED.
 set -euo pipefail
 
 inc=${1:?usage: deploy-host.sh <incoming dir>}
@@ -47,6 +52,7 @@ prev_target=""
 unit_backup=""
 unit_changed=0
 swapped=0
+mode=restart
 
 rollback() {
   local status=$?
@@ -64,7 +70,16 @@ rollback() {
     if test -n "$unit_backup"; then cp -p "$unit_backup" "$unit_file"; else rm -f "$unit_file"; fi
     systemctl --user daemon-reload
   fi
-  if test "$swapped" = 1 || test "$unit_changed" = 1; then
+  if test "$mode" = reload && test "$unit_changed" = 0; then
+    # A failed reload leaves the old worker serving; reload again only if the
+    # new one took over, so the previous release comes back the same way.
+    live=$(health | field 'h => h.build && h.build.sha')
+    if test "$swapped" = 1 && test "$live" != "$(basename "${prev_target:-none}")"; then
+      systemctl --user reload "$UNIT"
+      sleep 10
+    fi
+    log "after rollback: $(systemctl --user is-active "$UNIT") sha=$(health | field 'h => h.build && h.build.sha')"
+  elif test "$swapped" = 1 || test "$unit_changed" = 1; then
     systemctl --user restart "$UNIT"
     sleep 5
     log "after rollback: $(systemctl --user is-active "$UNIT") sha=$(health | field 'h => h.build && h.build.sha')"
@@ -111,9 +126,17 @@ else
   log "router answering with $before accounts, build $(health | field 'h => h.build && h.build.sha')"
 fi
 prev_target=$(readlink "$current" 2>/dev/null || true)
+gen_before=$(health | field 'h => h.supervisor && h.supervisor.supervised ? h.supervisor.generation : ""')
+if test -n "$gen_before" && cmp -s "$inc/unit.rendered" "$unit_file"; then
+  mode=reload
+  log "supervisor running (generation $gen_before) and unit unchanged: reloading, nothing is dropped"
+else
+  log "cold restart: ${gen_before:+unit changed}${gen_before:-no supervisor running}"
+fi
 
 # 4. A quiet moment: no client request in flight (builds that report it), or
 #    else a router log that has not grown for 15 s. Best effort, bounded.
+test "$mode" = reload && QUIET_WAIT_SEC=0
 deadline=$(( $(date +%s) + QUIET_WAIT_SEC ))
 quiet=0
 last_size=-1; same_since=$(date +%s)
@@ -127,11 +150,13 @@ while test "$(date +%s)" -lt "$deadline"; do
   fi
   sleep 1
 done
-if test "$quiet" = 1; then log "quiet moment found"; else log "no quiet moment within ${QUIET_WAIT_SEC}s; restarting anyway"; fi
+if test "$mode" = restart; then
+  if test "$quiet" = 1; then log "quiet moment found"; else log "no quiet moment within ${QUIET_WAIT_SEC}s; restarting anyway"; fi
+fi
 
 if test "${DRY_RUN:-0}" = 1; then
   trap - ERR
-  log "dry run: unit would $(cmp -s "$inc/unit.rendered" "$unit_file" && echo stay || echo change); current stays ${prev_target:-none}"
+  log "dry run: would $mode; unit would $(cmp -s "$inc/unit.rendered" "$unit_file" && echo stay || echo change); current stays ${prev_target:-none}"
   log "DEPLOY DRY-RUN OK $SHA"
   exit 0
 fi
@@ -152,16 +177,24 @@ fi
 ln -sfn "$rel" "$current.new"
 mv -Tf "$current.new" "$current"
 swapped=1
-log "current -> $rel (was ${prev_target:-none}); restarting"
-systemctl --user restart "$UNIT"
+log "current -> $rel (was ${prev_target:-none}); ${mode}ing"
+if test "$mode" = reload; then
+  systemctl --user reload "$UNIT"
+else
+  systemctl --user restart "$UNIT"
+fi
 
-# 6. Wait for the new build with the same accounts.
+# 6. Wait for the new build with the same accounts (and, on reload, a new
+#    worker generation). A worker may take up to two minutes to come up.
 ok=0
-for _ in $(seq 1 90); do
+for _ in $(seq 1 180); do
   h=$(health)
   if test "$(printf '%s' "$h" | field 'h => h.build && h.build.sha')" = "$SHA" &&
      test "$(printf '%s' "$h" | field 'h => h.accounts.length')" = "$before"; then
-    ok=1; break
+    if test "$mode" = restart ||
+       test "$(printf '%s' "$h" | field 'h => h.supervisor ? h.supervisor.generation : 0')" -gt "$gen_before"; then
+      ok=1; break
+    fi
   fi
   sleep 1
 done

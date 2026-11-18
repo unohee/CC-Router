@@ -55,7 +55,7 @@ describe("the persistence gate", () => {
 const HOUR = 3_600_000;
 const CHUNKS = 12;
 
-describe("reload under the supervisor", () => {
+describe("reload under the supervisor", { timeout: 90_000 }, () => {
   let router: RouterRun | undefined;
   let upstream: FakeUpstream | undefined;
   let oauth: FakeOAuth | undefined;
@@ -118,6 +118,19 @@ describe("reload under the supervisor", () => {
     expect(upstream!.staleTokens).toBe(0);
     expect(oauth!.calls).toBe(4);
     expect(after.accounts.every(a => a.auth.state === "ok")).toBe(true);
+  });
+
+  it("replaces a worker that crashes, on the same port", async () => {
+    const r = await boot();
+    const first = await r.health();
+    process.kill(first.worker.pid, "SIGKILL");
+    await waitFor(async () => {
+      try { return (await r.health()).supervisor?.generation === 2; } catch { return false; }
+    }, "a replacement worker", 30_000);
+    const h = await r.health();
+    expect(h.worker.pid).not.toBe(first.worker.pid);
+    expect((await sendMessage(r.base, { session: "after-crash" })).status).toBe(200);
+    expect(oauth!.reuses).toBe(0);
   });
 
   it("keeps the old worker serving when the new one cannot start", async () => {

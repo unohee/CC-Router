@@ -47,52 +47,15 @@ export interface SupervisorHandle {
 
 const DRAIN_MARGIN_MS = 30_000;
 
-export function runSupervisor(opts: SupervisorOptions): SupervisorHandle {
-  if (!cluster.isPrimary) throw new Error("runSupervisor must run in the primary process");
-  const log = opts.log ?? ((m: string) => console.log(`[supervisor] ${m}`));
-  const readyTimeoutMs = opts.readyTimeoutMs ?? 120_000;
-  const freezeTimeoutMs = opts.freezeTimeoutMs ?? 15_000;
-  const respawnDelayMs = opts.respawnDelayMs ?? 1_000;
+/** Sends unless the worker is gone; a dead worker's channel throws. */
+function safeSend(w: Worker, m: ToWorker): boolean {
+  if (w.isDead() || !w.isConnected()) return false;
+  try { w.send(m); return true; } catch { return false; }
+}
 
-  // Round-robin: the primary accepts and hands connections out, so the socket
-  // stays bound while workers come and go. (The default on every platform but
-  // Windows; set explicitly so the reload never depends on it.)
-  cluster.schedulingPolicy = cluster.SCHED_RR;
-
-  const startedAt = Date.now();
-  let current: Worker | undefined;
-  let generation = 0;
-  let lastHandoff: HandoffReport | null = null;
-  let failedReloads = 0;
-  let reloading = false;
-  let stopping = false;
-  /** Workers that were told to drain (handoff) or shut down; their exit is expected. */
-  const leaving = new Set<Worker>();
-
-  /** Sends unless the worker is gone; a dead worker's channel throws. */
-  const safeSend = (w: Worker, m: ToWorker): boolean => {
-    if (w.isDead() || !w.isConnected()) return false;
-    try { w.send(m); return true; } catch { return false; }
-  };
-
-  const view = (): SupervisorView => ({
-    supervised: true, supervisorPid: process.pid, generation, startedAt, lastHandoff, failedReloads,
-  });
-  const broadcastView = () => {
-    for (const w of Object.values(cluster.workers ?? {})) {
-      if (w) safeSend(w, { cc: "supervisor", view: view() });
-    }
-  };
-
-  const fork = (): Worker => {
-    cluster.setupPrimary({ exec: opts.exec, args: opts.args, execArgv: opts.execArgv ?? process.execArgv });
-    const w = cluster.fork({ ...opts.env, CC_ROUTER_SUPERVISED: "1" });
-    w.on("exit", (code, signal) => onExit(w, code, signal));
-    return w;
-  };
-
-  /** Resolves true once `w` listens, false if it exits or the timeout passes first. */
-  const waitListening = (w: Worker, timeoutMs: number): Promise<boolean> => new Promise(resolve => {
+/** Resolves true once `w` listens, false if it exits or the timeout passes first. */
+function waitListening(w: Worker, timeoutMs: number): Promise<boolean> {
+  return new Promise(resolve => {
     const done = (ok: boolean) => {
       clearTimeout(timer);
       w.off("listening", onListening);
@@ -105,141 +68,205 @@ export function runSupervisor(opts: SupervisorOptions): SupervisorHandle {
     w.once("listening", onListening);
     w.once("exit", onGone);
   });
+}
 
-  /** The next message of `kind` from `w`, or null on exit or timeout. */
-  const waitMessage = <K extends FromWorker["cc"]>(w: Worker, kind: K, timeoutMs: number): Promise<Extract<FromWorker, { cc: K }> | null> =>
-    new Promise(resolve => {
-      const done = (m: Extract<FromWorker, { cc: K }> | null) => {
-        clearTimeout(timer);
-        w.off("message", onMessage);
-        w.off("exit", onGone);
-        resolve(m);
-      };
-      const onMessage = (m: unknown) => {
-        if (isFromWorker(m) && m.cc === kind) done(m as Extract<FromWorker, { cc: K }>);
-      };
-      const onGone = () => done(null);
-      const timer = setTimeout(() => done(null), timeoutMs);
-      w.on("message", onMessage);
-      w.once("exit", onGone);
-    });
+/** The next message of `kind` from `w`, or null on exit or timeout. */
+function waitMessage<K extends FromWorker["cc"]>(w: Worker, kind: K, timeoutMs: number): Promise<Extract<FromWorker, { cc: K }> | null> {
+  return new Promise(resolve => {
+    const done = (m: Extract<FromWorker, { cc: K }> | null) => {
+      clearTimeout(timer);
+      w.off("message", onMessage);
+      w.off("exit", onGone);
+      resolve(m);
+    };
+    const onMessage = (m: unknown) => {
+      if (isFromWorker(m) && m.cc === kind) done(m as Extract<FromWorker, { cc: K }>);
+    };
+    const onGone = () => done(null);
+    const timer = setTimeout(() => done(null), timeoutMs);
+    w.on("message", onMessage);
+    w.once("exit", onGone);
+  });
+}
 
-  const onExit = (w: Worker, code: number | null, signal: string | null) => {
-    const expected = leaving.delete(w);
-    if (w !== current) return;
-    current = undefined;
-    if (stopping || expected) return;
-    log(`worker ${w.process.pid} exited unexpectedly (code ${code}, signal ${signal}); replacing it in ${respawnDelayMs} ms`);
-    setTimeout(() => { if (!stopping && !current) void startFirst(); }, respawnDelayMs).unref();
-  };
+const exited = (w: Worker): Promise<void> =>
+  (w.isDead() ? Promise.resolve() : new Promise<void>(r => w.once("exit", () => r())));
 
-  const startFirst = async (): Promise<boolean> => {
-    const w = fork();
-    const ok = await waitListening(w, readyTimeoutMs);
-    if (!ok) {
-      log(`worker ${w.process.pid} did not start listening`);
+class Supervisor implements SupervisorHandle {
+  private readonly log: (msg: string) => void;
+  private readonly readyTimeoutMs: number;
+  private readonly freezeTimeoutMs: number;
+  private readonly respawnDelayMs: number;
+  private readonly startedAt = Date.now();
+  private current: Worker | undefined;
+  private generation = 0;
+  private lastHandoff: HandoffReport | null = null;
+  private failedReloads = 0;
+  private reloading = false;
+  private stopping = false;
+  /** Workers told to drain (handoff) or shut down: their exit is expected. */
+  private readonly leaving = new Set<Worker>();
+
+  constructor(private readonly opts: SupervisorOptions) {
+    this.log = opts.log ?? ((m: string) => console.log(`[supervisor] ${m}`));
+    this.readyTimeoutMs = opts.readyTimeoutMs ?? 120_000;
+    this.freezeTimeoutMs = opts.freezeTimeoutMs ?? 15_000;
+    this.respawnDelayMs = opts.respawnDelayMs ?? 1_000;
+  }
+
+  view(): SupervisorView {
+    return {
+      supervised: true, supervisorPid: process.pid, generation: this.generation,
+      startedAt: this.startedAt, lastHandoff: this.lastHandoff, failedReloads: this.failedReloads,
+    };
+  }
+
+  currentPid(): number | undefined {
+    return this.current?.process.pid;
+  }
+
+  private workers(): Worker[] {
+    return Object.values(cluster.workers ?? {}).filter((w): w is Worker => Boolean(w));
+  }
+
+  private broadcastView(): void {
+    for (const w of this.workers()) safeSend(w, { cc: "supervisor", view: this.view() });
+  }
+
+  private fork(): Worker {
+    const { exec, args, execArgv, env } = this.opts;
+    cluster.setupPrimary({ exec, args, execArgv: execArgv ?? process.execArgv });
+    const w = cluster.fork({ ...env, CC_ROUTER_SUPERVISED: "1" });
+    w.on("exit", (code, signal) => this.onExit(w, code, signal));
+    return w;
+  }
+
+  private onExit(w: Worker, code: number | null, signal: string | null): void {
+    const expected = this.leaving.delete(w);
+    if (w !== this.current) return;
+    this.current = undefined;
+    if (this.stopping || expected) return;
+    this.log(`worker ${w.process.pid} exited unexpectedly (code ${code}, signal ${signal}); replacing it in ${this.respawnDelayMs} ms`);
+    this.respawnLater(this.respawnDelayMs);
+  }
+
+  private respawnLater(delayMs: number): void {
+    // Not unref'd: with the last worker gone this timer is all that keeps the
+    // supervisor alive, and an unref'd one let it exit instead of respawning.
+    setTimeout(() => { if (!this.stopping && !this.current) void this.startFirst(); }, delayMs);
+  }
+
+  async startFirst(): Promise<boolean> {
+    const w = this.fork();
+    if (!(await waitListening(w, this.readyTimeoutMs))) {
+      this.log(`worker ${w.process.pid} did not start listening`);
       if (!w.isDead()) w.kill();
-      if (!stopping) setTimeout(() => { if (!stopping && !current) void startFirst(); }, Math.max(respawnDelayMs, 5_000)).unref();
+      if (!this.stopping) this.respawnLater(Math.max(this.respawnDelayMs, 5_000));
       return false;
     }
-    current = w;
-    generation++;
-    log(`worker ${w.process.pid} listening (generation ${generation})`);
-    broadcastView();
+    this.current = w;
+    this.generation++;
+    this.log(`worker ${w.process.pid} listening (generation ${this.generation})`);
+    this.broadcastView();
     return true;
-  };
+  }
 
-  const reload = async (reason = "reload requested"): Promise<boolean> => {
-    if (stopping) return false;
-    if (reloading) { log(`${reason}: a reload is already under way; ignored`); return false; }
-    const old = current;
-    if (!old) { log(`${reason}: no worker running; starting one`); return startFirst(); }
-    reloading = true;
+  /** Gives up on a reload: the old worker resumes writing and refreshing. */
+  private abandon(old: Worker, why: string): false {
+    safeSend(old, { cc: "thaw" });
+    this.failedReloads++;
+    this.log(why);
+    this.broadcastView();
+    return false;
+  }
+
+  async reload(reason = "reload requested"): Promise<boolean> {
+    if (this.stopping) return false;
+    if (this.reloading) { this.log(`${reason}: a reload is already under way; ignored`); return false; }
+    const old = this.current;
+    if (!old) { this.log(`${reason}: no worker running; starting one`); return this.startFirst(); }
+    this.reloading = true;
     try {
-      log(`${reason}: freezing worker ${old.process.pid}`);
-      const frozenReply = waitMessage(old, "frozen", freezeTimeoutMs);
+      this.log(`${reason}: freezing worker ${old.process.pid}`);
+      const frozen = waitMessage(old, "frozen", this.freezeTimeoutMs);
       safeSend(old, { cc: "freeze" });
-      if (!(await frozenReply)) {
-        // Without a confirmed freeze two workers could rotate the same token.
-        safeSend(old, { cc: "thaw" });
-        failedReloads++;
-        log(`worker ${old.process.pid} did not confirm the freeze; reload abandoned`);
-        broadcastView();
-        return false;
-      }
-      const next = fork();
-      if (!(await waitListening(next, readyTimeoutMs))) {
+      // Without a confirmed freeze two workers could rotate the same token.
+      if (!(await frozen)) return this.abandon(old, `worker ${old.process.pid} did not confirm the freeze; reload abandoned`);
+      const next = this.fork();
+      if (!(await waitListening(next, this.readyTimeoutMs))) {
         if (!next.isDead()) next.kill();
-        safeSend(old, { cc: "thaw" });
-        failedReloads++;
-        log(`new worker ${next.process.pid} did not start listening; worker ${old.process.pid} keeps serving`);
-        broadcastView();
-        return false;
+        return this.abandon(old, `new worker ${next.process.pid} did not start listening; worker ${old.process.pid} keeps serving`);
       }
-      current = next;
-      generation++;
-      leaving.add(old);
-      const fromPid = old.process.pid ?? 0;
-      const toPid = next.process.pid ?? 0;
-      const at = Date.now();
-      log(`worker ${toPid} listening (generation ${generation}); worker ${fromPid} drains`);
-      const drained = waitMessage(old, "drained", opts.drainLimitMs + DRAIN_MARGIN_MS);
-      safeSend(old, { cc: "drain" });
-      broadcastView();
-      // The old worker drains in the background: the next reload need not wait for it.
-      void drained.then(report => {
-        lastHandoff = {
-          generation, at, fromPid, toPid,
-          finished: report?.finished ?? 0,
-          dropped: report?.dropped ?? 0,
-          unsaved: report?.unsaved ?? 0,
-          drainMs: report?.drainMs ?? Date.now() - at,
-        };
-        if (!report) log(`worker ${fromPid} sent no drain report`);
-        else log(`worker ${fromPid} drained: ${report.finished} finished, ${report.dropped} ended at the limit, ${report.unsaved} unsaved`);
-        broadcastView();
-        killLater(old);
-      });
+      this.handOver(old, next);
       return true;
     } finally {
-      reloading = false;
+      this.reloading = false;
     }
-  };
+  }
 
-  /** A worker that has reported (or should have) gets a short grace, then is killed. */
-  const killLater = (w: Worker) => {
-    setTimeout(() => { if (!w.isDead()) { log(`worker ${w.process.pid} still alive after draining; killing it`); w.process.kill("SIGKILL"); } }, 5_000).unref();
-  };
+  /** `next` takes over; `old` drains in the background, so the next reload need not wait for it. */
+  private handOver(old: Worker, next: Worker): void {
+    this.current = next;
+    this.generation++;
+    this.leaving.add(old);
+    const generation = this.generation;
+    const fromPid = old.process.pid ?? 0;
+    const toPid = next.process.pid ?? 0;
+    const at = Date.now();
+    this.log(`worker ${toPid} listening (generation ${generation}); worker ${fromPid} drains`);
+    const drained = waitMessage(old, "drained", this.opts.drainLimitMs + DRAIN_MARGIN_MS);
+    safeSend(old, { cc: "drain" });
+    this.broadcastView();
+    void drained.then(report => {
+      this.lastHandoff = {
+        generation, at, fromPid, toPid,
+        finished: report?.finished ?? 0,
+        dropped: report?.dropped ?? 0,
+        unsaved: report?.unsaved ?? 0,
+        drainMs: report?.drainMs ?? Date.now() - at,
+      };
+      if (!report) this.log(`worker ${fromPid} sent no drain report`);
+      else this.log(`worker ${fromPid} drained: ${report.finished} finished, ${report.dropped} ended at the limit, ${report.unsaved} unsaved`);
+      this.broadcastView();
+      // A short grace to exit on its own, then it is killed.
+      setTimeout(() => {
+        if (old.isDead()) return;
+        this.log(`worker ${fromPid} still alive after draining; killing it`);
+        old.process.kill("SIGKILL");
+      }, 5_000).unref();
+    });
+  }
 
-  const stop = async (reason = "stop requested"): Promise<void> => {
-    if (stopping) return;
-    stopping = true;
-    const workers = Object.values(cluster.workers ?? {}).filter((w): w is Worker => Boolean(w));
-    log(`${reason}: ${workers.length} worker(s) drain and save`);
+  async stop(reason = "stop requested"): Promise<void> {
+    if (this.stopping) return;
+    this.stopping = true;
+    const workers = this.workers();
+    this.log(`${reason}: ${workers.length} worker(s) drain and save`);
     for (const w of workers) {
-      leaving.add(w);
+      this.leaving.add(w);
       safeSend(w, { cc: "shutdown" });
     }
     const deadline = setTimeout(() => {
-      for (const w of Object.values(cluster.workers ?? {})) if (w && !w.isDead()) w.process.kill("SIGKILL");
-    }, opts.drainLimitMs + DRAIN_MARGIN_MS);
+      for (const w of this.workers()) if (!w.isDead()) w.process.kill("SIGKILL");
+    }, this.opts.drainLimitMs + DRAIN_MARGIN_MS);
     deadline.unref();
-    await Promise.all(workers.map(w => (w.isDead() ? Promise.resolve() : new Promise<void>(r => w.once("exit", () => r())))));
+    await Promise.all(workers.map(exited));
     clearTimeout(deadline);
-    log("all workers stopped");
-    if (opts.exitWhenStopped !== false) process.exit(0);
-  };
+    this.log("all workers stopped");
+    if (this.opts.exitWhenStopped !== false) process.exit(0);
+  }
+}
 
-  process.on("SIGHUP", () => { void reload("SIGHUP"); });
-  process.on("SIGTERM", () => { void stop("SIGTERM"); });
-  process.on("SIGINT", () => { void stop("SIGINT"); });
-
-  void startFirst();
-
-  return {
-    reload,
-    stop,
-    view,
-    currentPid: () => current?.process.pid,
-  };
+export function runSupervisor(opts: SupervisorOptions): SupervisorHandle {
+  if (!cluster.isPrimary) throw new Error("runSupervisor must run in the primary process");
+  // Round-robin: the primary accepts and hands connections out, so the socket
+  // stays bound while workers come and go. (The default on every platform but
+  // Windows; set explicitly so the reload never depends on it.)
+  cluster.schedulingPolicy = cluster.SCHED_RR;
+  const sup = new Supervisor(opts);
+  process.on("SIGHUP", () => { void sup.reload("SIGHUP"); });
+  process.on("SIGTERM", () => { void sup.stop("SIGTERM"); });
+  process.on("SIGINT", () => { void sup.stop("SIGINT"); });
+  void sup.startFirst();
+  return sup;
 }

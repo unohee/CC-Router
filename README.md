@@ -921,6 +921,33 @@ Recover a seat with `cc-router accounts relogin <id>`; see
 
 Cooldowns (account-wide and per model) and each account's last rate-limit reading are saved to `account-state.json` beside `accounts.json`. The write is atomic and the file is mode 0600, every 10 s when the state changed and at shutdown. On start they are restored unless expired, so a restarted router routes around an account it saw exhausted. `ACCOUNT_STATE_PATH` and `QUOTA_HISTORY_PATH` move the files.
 
+### Reload without dropping a request (`cc-router supervise`)
+
+`cc-router supervise --port 3456` runs the router as a worker under a small supervisor that holds the
+listening socket. `kill -HUP <supervisor pid>` (in systemd: `systemctl --user reload cc-router`) replaces the
+worker without dropping anything:
+
+1. The old worker saves all state, then freezes: it writes nothing more and refreshes no token.
+2. A new worker starts from the release `process.argv[1]` points at now (a `current` symlink switched by the
+   deploy), loads that state, and starts listening. The port is never unbound.
+3. The old worker stops accepting, finishes its in-flight streams and exits. Its report (finished, dropped,
+   unsaved) appears in health as `supervisor.lastHandoff`.
+
+If the new worker does not come up within two minutes, it is killed and the old worker is thawed and keeps
+serving. A worker that crashes is replaced after a second (new connections are refused for that second,
+which clients retry). Only one worker ever refreshes tokens or writes
+`accounts.json` and the history files: a refresh token rotates on use, and two holders would kill it.
+
+Stopping (SIGTERM or Ctrl+C, with or without the supervisor) drains the same way: no new connections, the
+requests in flight finish, then state is saved. A stream still running after `drain.limitSeconds` (default
+600) is ended with an Anthropic `overloaded_error` event, which Claude Code retries. A second signal exits at
+once. Under systemd use `KillMode=mixed` and a `TimeoutStopSec` above the drain limit;
+[deploy/cc-router.service.in](deploy/cc-router.service.in) is the unit `scripts/deploy-remote.sh` installs.
+
+```json
+{ "drain": { "limitSeconds": 600 } }
+```
+
 ---
 
 ## Client mode — connecting to an existing CC-Router
