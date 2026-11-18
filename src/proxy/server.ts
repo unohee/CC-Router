@@ -29,7 +29,8 @@ import { armFirstByteTimer, guardedRelay, headersDeadlineMs, isFirstByteTimeout,
 import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
 import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
-import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH } from "../config/paths.js";
+import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH, CONTINUITY_PATH } from "../config/paths.js";
+import { ContinuityLedger, causeOfStatus } from "./continuity-ledger.js";
 import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
@@ -598,6 +599,18 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const flushQuota = createUsageFlusher(quotaHistory, quotaPath, msg => console.log(chalk.yellow(`  ${msg}`)), undefined, "quota history");
   setInterval(flushQuota, 30_000).unref();
   process.on("exit", flushQuota);
+
+  // Continuity ledger: every failure a client saw, by cause and hour, and every
+  // worker handoff. Kept beside the usage history so a reload does not reset it.
+  const continuity = new ContinuityLedger();
+  const continuityRead = readUsageFile(CONTINUITY_PATH);
+  if (continuityRead.status === "ok" && !continuity.restore(continuityRead.data)) {
+    const moved = quarantineUsageFile(CONTINUITY_PATH);
+    console.log(chalk.yellow(`  continuity ledger at ${CONTINUITY_PATH} is not a ledger${moved ? ` — kept as ${moved}` : ""}; starting empty`));
+  }
+  const flushContinuity = createUsageFlusher(continuity, CONTINUITY_PATH, msg => console.log(chalk.yellow(`  ${msg}`)), undefined, "continuity ledger");
+  setInterval(flushContinuity, 30_000).unref();
+  process.on("exit", flushContinuity);
   // First judgement once both histories are back, then every minute.
   governorTick();
   setInterval(governorTick, 60_000).unref();
@@ -803,7 +816,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const buildInfo = readBuildInfo();
   const inFlight = new InFlightCounter();
   app.use((req, res, next) => {
-    if (countsAsInFlight(req)) inFlight.track(res);
+    if (countsAsInFlight(req)) {
+      inFlight.track(res);
+      // A failure status that reached the client is a continuity failure.
+      res.once("finish", () => {
+        const cause = causeOfStatus(res.statusCode);
+        if (cause) continuity.record(cause);
+      });
+    }
     // Draining: serve this one, then let the client reconnect elsewhere.
     if (draining) forceConnectionClose(res);
     next();
@@ -930,6 +950,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // POST /v1/messages requests retried inside the router, by how they ended
       // and by what refused them. Totals since the router started.
       failover: failoverCounters.snapshot(),
+      // What clients actually saw go wrong, last hour and last day, and every
+      // worker handoff: the evidence for "a session is never cut".
+      continuity: continuity.snapshot(),
       // Upstreams that went quiet: streams failed over before their first byte,
       // and streams ended retryably after a stall, a break or a cut.
       streamGuard: streamGuardCounters.snapshot(streamGuard),
@@ -1903,6 +1926,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         onEnd: outcome => {
           if (outcome === "complete" || outcome === "clientGone") return;
           streamGuardCounters.record(outcome);
+          continuity.record(`stream-${outcome}`);
           stats.totalErrors++;
           usageHistory.recordIncident({ ts: Date.now(), errors: 1 });
           const what = outcome === "stalled" ? `went silent for ${Math.round(streamGuard.idleMs / 1000)}s`
@@ -2179,6 +2203,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     flushAccountState();
     quotaHistory.touch();
     flushQuota();
+    flushContinuity();
   };
 
   const drainLimitMs = resolveDrainLimitMs(readConfig().drain?.limitSeconds);
@@ -2254,6 +2279,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           break;
         case "supervisor":
           supervisorView = m.view;
+          continuity.recordHandoff(m.view.lastHandoff);
+          continuity.noteCrashes(m.view.crashes);
           break;
       }
     });

@@ -250,7 +250,12 @@ const BODY = String.raw`
     <section class="card" aria-labelledby="fo-h" id="focard" hidden>
       <div class="cardhead"><h2 id="fo-h">Failover</h2><span id="fosum" class="sum"></span></div>
       <dl id="fokpis" class="kv"></dl>
-      <p class="foot">POST /v1/messages is retried on the next account after a 429, 529, 5xx or a connection error before any byte reached the client; then the Ollama fallback; then the last refusal is passed on. Refusals the router failed over from are left out of the 429 count above. Totals since the router started.</p>
+      <p class="foot">POST /v1/messages is retried on the next account after a 401, 429, 529, 5xx, a connection error or no headers in time, before any byte reached the client; then the Ollama fallback; then the last refusal is passed on. Refusals the router failed over from are left out of the 429 count above. Totals since the router started.</p>
+    </section>
+    <section class="card" aria-labelledby="ct-h" id="ctcard" hidden>
+      <div class="cardhead"><h2 id="ct-h">Continuity</h2><span id="ctsum" class="sum"></span></div>
+      <dl id="ctkpis" class="kv"></dl>
+      <p class="foot">Failures a client actually saw: a 401, 429 or 5xx answer, or a stream the router ended with overloaded_error (which Claude Code retries). Refusals absorbed by failover are not counted. Handoffs are worker reloads; dropped means a stream outlived the drain limit. Kept across restarts.</p>
     </section>
     <section class="card" aria-labelledby="sup-h" id="supcard" hidden>
       <div class="cardhead"><h2 id="sup-h">Supply</h2><span id="supsum" class="sum"></span></div>
@@ -1009,7 +1014,7 @@ const SCRIPT = String.raw`
     ["refused", "Refused after a retry", "Another account answered with a status that is not retried (a 4xx)."],
     ["clientGone", "Client hung up", "The client left before an answer."]
   ];
-  var FO_REASONS = ["429", "529", "500", "502", "503", "504", "connection", "token-refresh"];
+  var FO_REASONS = ["401", "429", "529", "500", "502", "503", "504", "connection", "timeout", "token-refresh"];
   function validFailover(f) {
     if (!f || typeof f !== "object" || typeof f.enabled !== "boolean" || !isNum(f.requests) || !isNum(f.retries)) return false;
     if (!f.byOutcome || !f.byReason || !(f.lastAt === null || isNum(f.lastAt))) return false;
@@ -1025,10 +1030,48 @@ const SCRIPT = String.raw`
       : f.requests === 0 ? "no request needed it yet"
       : plural(f.requests, "request") + " · " + f.retries + (f.retries === 1 ? " retry" : " retries") + " · last " + ago(f.lastAt);
     var reasons = FO_REASONS.filter(function (r) { return f.byReason[r] > 0; })
-      .map(function (r) { return (r === "connection" || r === "token-refresh" ? r : "HTTP " + r) + " ×" + num(f.byReason[r]); });
+      .map(function (r) { return (/^\d+$/.test(r) ? "HTTP " + r : r) + " ×" + num(f.byReason[r]); });
     var rows = FO_OUTCOMES.map(function (o) { return [o[1], num(f.byOutcome[o[0]]), o[2]]; });
     rows.push(["Refused by", reasons.length ? reasons.join(" · ") : "—", "What made the router move a request on, per step."]);
     kv($("fokpis"), rows);
+  }
+
+  // ── continuity ─────────────────────────────────────────────────────────────
+  var CT_CAUSES = [
+    ["http-401", "401 answered"], ["http-429", "429 answered"], ["http-5xx", "5xx answered"],
+    ["stream-stalled", "stream stalled"], ["stream-broken", "stream broke"], ["stream-truncated", "stream cut short"]
+  ];
+  function validWindow(w) {
+    if (!w || typeof w !== "object" || !isNum(w.total) || !w.byCause) return false;
+    for (var i = 0; i < CT_CAUSES.length; i++) if (!isNum(w.byCause[CT_CAUSES[i][0]])) return false;
+    return true;
+  }
+  function validContinuity(c) {
+    return c && typeof c === "object" && validWindow(c.lastHour) && validWindow(c.lastDay) &&
+      c.handoffs && isNum(c.handoffs.lastDay) && isNum(c.handoffs.droppedLastDay);
+  }
+  function causes(w) {
+    var parts = CT_CAUSES.filter(function (c) { return w.byCause[c[0]] > 0; })
+      .map(function (c) { return c[1] + " ×" + num(w.byCause[c[0]]); });
+    return parts.length ? parts.join(" · ") : "none";
+  }
+  function renderContinuity(h) {
+    var card = $("ctcard"), c = h.continuity;
+    if (!validContinuity(c)) { card.hidden = true; return; }
+    card.hidden = false;
+    $("ctsum").textContent = c.lastDay.total === 0 && c.handoffs.droppedLastDay === 0
+      ? "no client saw a failure in the last day"
+      : plural(c.lastDay.total, "failure") + " seen by clients in the last day";
+    var last = c.handoffs.last;
+    var rows = [
+      ["Last hour", c.lastHour.total ? num(c.lastHour.total) + " — " + causes(c.lastHour) : "0"],
+      ["Last day", c.lastDay.total ? num(c.lastDay.total) + " — " + causes(c.lastDay) : "0"],
+      ["Handoffs, last day", num(c.handoffs.lastDay), c.handoffs.droppedLastDay > 0
+        ? num(c.handoffs.droppedLastDay) + " stream(s) ended at the drain limit" : "nothing dropped"],
+      ["Last handoff", last && isNum(last.at) ? ago(last.at) : "—", last ? (num(last.finished) + " finished · " + num(last.dropped) + " dropped · " + num(last.unsaved) + " unsaved") : "no reload yet"]
+    ];
+    if (isNum(c.workerCrashes)) rows.push(["Worker crashes", num(c.workerCrashes), "Replaced by the supervisor; new connections were refused for about a second."]);
+    kv($("ctkpis"), rows);
   }
 
   function render() {
@@ -1043,6 +1086,7 @@ const SCRIPT = String.raw`
       renderAccounts(h);
       renderSupply(h);
       renderFailover(h);
+      renderContinuity(h);
       renderPerf();
       renderLogs(h);
       S.rendered = true;
