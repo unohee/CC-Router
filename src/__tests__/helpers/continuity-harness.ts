@@ -104,7 +104,12 @@ export class FakeUpstream {
   readonly server: Server;
   readonly seen: UpstreamRequest[] = [];
   staleTokens = 0;
-  constructor(opts: { chunks?: number; gapMs?: number; oauth?: FakeOAuth } = {}) {
+  /**
+   * `gate`: when given, a stream sends its first event and then waits for it
+   * before the rest, so a test can hold a stream open across an event (a
+   * reload) instead of guessing how long that event takes on a loaded host.
+   */
+  constructor(opts: { chunks?: number; gapMs?: number; oauth?: FakeOAuth; gate?: Promise<void> } = {}) {
     const chunks = opts.chunks ?? 10;
     const gapMs = opts.gapMs ?? 150;
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -132,6 +137,7 @@ export class FakeUpstream {
         const tick = () => {
           if (res.destroyed) return;
           res.write(events[i++]);
+          if (i === 1 && opts.gate) { void opts.gate.then(() => setTimeout(tick, gapMs)); return; }
           if (i < events.length) setTimeout(tick, gapMs);
           else res.end();
         };
@@ -172,6 +178,8 @@ export interface RouterOpts {
   seats: { id: string; expiresAt: number; gen?: number }[];
   config?: Record<string, unknown>;
   env?: Record<string, string>;
+  /** Listen on this port instead of a free one (a restart on the same address). */
+  port?: number;
 }
 
 export async function startRouter(opts: RouterOpts): Promise<RouterRun> {
@@ -181,7 +189,7 @@ export async function startRouter(opts: RouterOpts): Promise<RouterRun> {
     expiresAt: s.expiresAt, scopes: [], enabled: true,
   }))));
   writeFileSync(join(dir, "config.json"), JSON.stringify(opts.config ?? {}));
-  const port = await freePort();
+  const port = opts.port ?? await freePort();
   const upstream = `http://127.0.0.1:${opts.upstreamPort}`;
   const args = opts.mode === "standalone"
     ? ["--import", "tsx", "--input-type=module", "-e",

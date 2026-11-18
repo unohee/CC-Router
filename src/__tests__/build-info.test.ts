@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { EventEmitter } from "node:events";
 import { parseBuildInfo, readBuildInfo, UNKNOWN_BUILD } from "../proxy/build-info.js";
 import { InFlightCounter, countsAsInFlight } from "../proxy/in-flight.js";
-import { waitForListening, waitFor } from "./helpers/router-process.js";
+import { ROUTER_BOOT_MS, waitForListening, waitFor } from "./helpers/router-process.js";
 
 // A deploy waits until health reports the sha it shipped, and before a cold
 // restart for no request in flight. Both have to be right on the wire.
@@ -88,7 +88,8 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-it("health reports the build and the requests still being answered", async () => {
+// Spawns a real router: the process-test budget, not the 5 s unit default.
+it("health reports the build and the requests still being answered", { timeout: 4 * ROUTER_BOOT_MS }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "cc-router-build-health-"));
   // The upstream holds each reply until released, so a request stays in flight.
   const held: (() => void)[] = [];

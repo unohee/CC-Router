@@ -66,13 +66,15 @@ describe("reload under the supervisor", { timeout: 90_000 }, () => {
     router = upstream = oauth = undefined;
   });
 
+  let releaseStream: () => void = () => {};
   async function boot() {
+    const gate = new Promise<void>(resolve => { releaseStream = resolve; });
     // Tokens live two hours and the lead window is seven, so every worker
     // refreshes each seat as it starts: the new worker can only succeed if the
     // old one saved the rotated refresh tokens before it froze.
     oauth = new FakeOAuth(2 * 3600);
     const oauthPort = await listen(oauth.server);
-    upstream = new FakeUpstream({ chunks: CHUNKS, gapMs: 120, oauth });
+    upstream = new FakeUpstream({ chunks: CHUNKS, gapMs: 120, oauth, gate });
     const upstreamPort = await listen(upstream.server);
     router = await startRouter({
       mode: "supervised", upstreamPort,
@@ -98,6 +100,9 @@ describe("reload under the supervisor", { timeout: 90_000 }, () => {
     await waitFor(async () => (await r.health()).supervisor?.generation === 2, "the new worker", 30_000);
     const after = await r.health();
     expect(after.worker.pid).not.toBe(first.worker.pid);
+    // Only now let the stream run on: it finishes while its worker drains,
+    // however long the new worker took to come up on a loaded host.
+    releaseStream();
 
     // New requests are answered (by the new worker) while the old one drains.
     for (let i = 0; i < 3; i++) expect((await sendMessage(r.base, { session: `new${i}` })).status).toBe(200);
