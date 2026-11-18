@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Writes dist/build-info.json after `tsc`: the commit the build came from, whether
 // tracked files differed from it, when, and the package version. The router
-// reports it in /cc-router/health as `build` (src/proxy/build-info.ts).
+// reports it in /cc-router/health as `build` (src/proxy/build-info.ts). Also
+// copies the data files the router reads at runtime into dist/.
 //
 // CC_ROUTER_BUILD_SHA overrides the sha, for builds made outside a git checkout.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,3 +35,10 @@ const out = join(root, "dist", "build-info.json");
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(info, null, 2) + "\n");
 console.log(`build-info: ${info.sha ?? "unknown"}${info.dirty ? " (dirty)" : ""}`);
+
+// Data the running router reads beside its code: the Claude Code versions the
+// real-client conformance suite passed for (src/proxy/continuity-ledger.ts).
+const verifiedSrc = join(root, "src", "continuity", "verified-clients.json");
+const verifiedOut = join(root, "dist", "continuity", "verified-clients.json");
+mkdirSync(dirname(verifiedOut), { recursive: true });
+copyFileSync(verifiedSrc, verifiedOut);

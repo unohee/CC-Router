@@ -831,6 +831,21 @@ Nothing after the first byte is ever replayed, since that would duplicate output
 retries instead. A crashed worker refuses new connections for about a second. The supervisor process itself
 only picks up new code on a cold restart (`systemctl --user restart`), never on a reload.
 
+**Verify a new Claude Code version.** The guarantee also depends on the client: every ending above has to be one
+Claude Code retries. `src/__tests__/client-conformance.real.test.ts` checks exactly that with the real CLI, headless
+and isolated (a throwaway config dir, a local fake upstream, no account touched). After Claude Code updates, run it
+on a machine where the new version is installed:
+
+```bash
+CC_ROUTER_REAL_CLIENT=1 npx vitest run src/__tests__/client-conformance.real.test.ts   # CLAUDE_BIN=... to pick a binary
+```
+
+When every case passes it adds the version to `src/continuity/verified-clients.json` and rewrites
+[docs/continuity/client-conformance.md](docs/continuity/client-conformance.md); commit both and deploy. Health
+reports the versions that sent traffic in the last day as `continuity.clients` (`versions`, `unverified`), the
+dashboard's Continuity card lists them, and `scripts/smoke-remote.sh` warns (without failing) about any version that
+was never verified.
+
 **The continuity ledger** is the evidence. Health reports `continuity`: every failure a client actually saw,
 by cause (`http-401`, `http-429`, `http-5xx`, `stream-stalled`, `stream-broken`, `stream-truncated`) for the
 last hour and the last day, and every handoff with what it finished and dropped. Refusals absorbed by

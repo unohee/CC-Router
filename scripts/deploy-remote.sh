@@ -91,7 +91,7 @@ if tar --version 2>/dev/null | grep -q bsdtar; then tar_flags=(--no-xattrs --no-
 COPYFILE_DISABLE=1 tar "${tar_flags[@]+"${tar_flags[@]}"}" -czf "$work/release.tgz" -C "$stage" .
 
 listing=$(tar tzf "$work/release.tgz")
-for f in ./dist/cli/index.js ./dist/build-info.json ./dist/proxy/server.js ./package.json ./package-lock.json; do
+for f in ./dist/cli/index.js ./dist/build-info.json ./dist/continuity/verified-clients.json ./dist/proxy/server.js ./package.json ./package-lock.json; do
   printf '%s\n' "$listing" | grep -qx "$f" || fail "bundle lacks $f"
 done
 if printf '%s\n' "$listing" | grep -q '/\._'; then fail "bundle carries macOS metadata files"; fi

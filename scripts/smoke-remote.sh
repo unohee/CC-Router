@@ -71,6 +71,15 @@ for _ in $(seq 1 90); do
   case "$continuity_line" in draining*|unreachable) sleep 1 ;; *) break ;; esac
 done
 read -r handoff day_failures hour_failures day_handoffs <<<"$continuity_line"
+
+# Claude Code versions that sent traffic but were never through the real-client
+# conformance suite. A warning, not a failure: the person upgrades Claude Code
+# on their own schedule, and that must not block a deploy.
+unverified=$(curl -sf --max-time 10 "$base/cc-router/health" | node -e '
+  let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+    try { const u = JSON.parse(s).continuity.clients.unverified; console.log(Array.isArray(u) ? u.join(" ") : ""); }
+    catch { console.log(""); }
+  });' || true)
 test "$handoff" != missing || fail "health has no continuity ledger"
 test "$handoff" != unreachable || fail "health stopped answering"
 dropped=${handoff##*dropped=}
@@ -80,3 +89,7 @@ printf '[smoke] OK: build %s, %s accounts (%s healthy, status %s), dashboard 200
   "${sha:0:12}" "$accounts" "$healthy" "$status"
 printf '[smoke] continuity: last handoff %s; client-visible failures %s in the last hour, %s in the last day; %s handoff(s) today\n' \
   "$handoff" "$hour_failures" "$day_failures" "$day_handoffs"
+if test -n "$unverified"; then
+  printf '[smoke] warning: unverified Claude Code version(s) sent traffic in the last day: %s\n' "$unverified"
+  printf '[smoke]          run CC_ROUTER_REAL_CLIENT=1 npx vitest run src/__tests__/client-conformance.real.test.ts with that version installed\n'
+fi

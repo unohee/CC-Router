@@ -30,7 +30,7 @@ import { freezePersistence, thawPersistence, persistenceFrozen } from "../config
 import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH, CONTINUITY_PATH } from "../config/paths.js";
-import { ContinuityLedger, causeOfStatus } from "./continuity-ledger.js";
+import { ContinuityLedger, causeOfStatus, claudeCliVersion, loadVerifiedClients } from "./continuity-ledger.js";
 import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
 import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
@@ -602,7 +602,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Continuity ledger: every failure a client saw, by cause and hour, and every
   // worker handoff. Kept beside the usage history so a reload does not reset it.
-  const continuity = new ContinuityLedger();
+  // Claude Code versions the real-client conformance suite passed for
+  // (src/continuity/verified-clients.json, copied into dist/ by the build).
+  const verifiedClients = loadVerifiedClients();
+  const continuity = new ContinuityLedger(Date.now, verifiedClients);
   const continuityRead = readUsageFile(CONTINUITY_PATH);
   if (continuityRead.status === "ok" && !continuity.restore(continuityRead.data)) {
     const moved = quarantineUsageFile(CONTINUITY_PATH);
@@ -818,6 +821,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   app.use((req, res, next) => {
     if (countsAsInFlight(req)) {
       inFlight.track(res);
+      continuity.recordClient(claudeCliVersion(req.headers["user-agent"]));
       // A failure status that reached the client is a continuity failure.
       res.once("finish", () => {
         const cause = causeOfStatus(res.statusCode);
