@@ -21,6 +21,8 @@ import type { ThrottleGate } from "./throttle.js";
 import { logOllamaFallback, logOllamaTransition } from "./logger.js";
 import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSessionRepin, logSessionOutgrewCodex, logSessionMove, logSessionCompaction, logSessionReassign, log429Diagnostic, logBlockedClient, logThrottleWait } from "./logger.js";
 import { stats } from "./stats.js";
+import { readBuildInfo } from "./build-info.js";
+import { InFlightCounter, countsAsInFlight } from "./in-flight.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH } from "../config/paths.js";
 import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
@@ -783,6 +785,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   tierDiscovery?.refresh().catch(() => {});
 
   const app = express();
+  // Which build this process is, and how many client requests it is still
+  // answering. Both go to health: a deploy waits for its own sha and, before a
+  // cold restart, for a quiet moment.
+  const buildInfo = readBuildInfo();
+  const inFlight = new InFlightCounter();
+  app.use((req, res, next) => {
+    if (countsAsInFlight(req)) inFlight.track(res);
+    next();
+  });
   const proxyRequestTimeoutMs = getProxyRequestTimeoutMs();
 
   // The usage page is mounted ahead of the secret check on purpose; see
@@ -870,6 +881,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     const accountViews = createHealthAccountViews(pool.getAll(), openAIAccounts);
     res.json({
       status: accountViews.some(a => a.healthy) ? "ok" : "degraded",
+      build: buildInfo,
+      inFlight: inFlight.snapshot(),
       mode,
       target,
       operational: createOperationalStatus({

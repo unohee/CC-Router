@@ -1,0 +1,27 @@
+# systemd user unit for a CC-Router host, rendered by deploy/deploy-host.sh.
+# The renderer fills in the node binary, the release root (which holds
+# releases/ and the `current` symlink), the listen address, the port and an
+# optional EnvironmentFile line.
+#
+# Stop and restart with `systemctl --user`, never `cc-router stop`: stop tries to
+# uninstall the service, and start would collide with this unit on the port.
+[Unit]
+Description=CC-Router (multi-account Claude/Codex proxy)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@/current
+Environment=HOST=@BIND_HOST@
+Environment=CC_ROUTER_DAEMON=1
+@ENV_FILE_LINE@
+ExecStart=@NODE@ @ROOT@/current/dist/cli/index.js start --foreground --port @PORT@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+StandardOutput=append:%h/.cc-router/cc-router.log
+StandardError=append:%h/.cc-router/cc-router.log
+
+[Install]
+WantedBy=default.target
