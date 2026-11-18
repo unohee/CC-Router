@@ -772,8 +772,8 @@ describe("mountMessagesCrossProviderRoute", () => {
 
     /** An upstream that sends an opening and some text, then never finishes. */
     const endlessUpstream = () => {
-      const state = { cancelled: 0 };
-      const response = () => new Response(
+      const state = { cancelled: 0, opened: 0 };
+      const response = () => { state.opened++; return new Response(
         new ReadableStream({
           start(controller) {
             const encoder = new TextEncoder();
@@ -783,7 +783,7 @@ describe("mountMessagesCrossProviderRoute", () => {
           cancel() { state.cancelled++; },
         }) as BodyInit,
         { status: 200, headers: { "content-type": "text/event-stream" } },
-      );
+      ); };
       return { state, response };
     };
 
@@ -845,7 +845,7 @@ describe("mountMessagesCrossProviderRoute", () => {
         expect(new TextDecoder().decode(value)).toContain("message_start");
         abort.abort();
 
-        await until(() => onExplicitRoute.mock.calls.length > 0);
+        await until(() => onExplicitRoute.mock.calls.length > 0 && upstream.state.cancelled > 0);
         expect(upstream.state.cancelled).toBe(1);
         expect(onExplicitRoute).toHaveBeenCalledTimes(1);
         const info = onExplicitRoute.mock.calls[0]![0];
@@ -864,11 +864,13 @@ describe("mountMessagesCrossProviderRoute", () => {
       await withServer(app, async port => {
         const abort = new AbortController();
         const pending = post(port, false, abort.signal).catch(() => null);
-        await new Promise(r => setTimeout(r, 50));
+        // Hang up only once the upstream answer is open: a fixed sleep let a
+        // loaded host abort before there was anything to cancel.
+        await until(() => upstream.state.opened > 0);
         abort.abort();
         await pending;
 
-        await until(() => onExplicitRoute.mock.calls.length > 0);
+        await until(() => onExplicitRoute.mock.calls.length > 0 && upstream.state.cancelled > 0);
         expect(upstream.state.cancelled).toBe(1);
         expect(onExplicitRoute).toHaveBeenCalledWith(expect.objectContaining({ clientClosed: true }));
         expect(onExplicitRoute.mock.calls[0]![0].failedAfterStart).toBeUndefined();
