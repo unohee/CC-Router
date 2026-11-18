@@ -1,7 +1,7 @@
 # systemd user unit for a CC-Router host, rendered by deploy/deploy-host.sh.
-# Placeholders: @NODE@ node binary, @ROOT@ release root (holds releases/ and the
-# `current` symlink), @BIND_HOST@ address to listen on, @PORT@ port,
-# @ENV_FILE_LINE@ an optional EnvironmentFile= line.
+# The renderer fills in the node binary, the release root (which holds
+# releases/ and the `current` symlink), the listen address, the port and an
+# optional EnvironmentFile line.
 #
 # Stop and restart with `systemctl --user`, never `cc-router stop`: stop tries to
 # uninstall the service, and start would collide with this unit on the port.

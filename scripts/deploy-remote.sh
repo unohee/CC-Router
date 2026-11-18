@@ -83,7 +83,10 @@ cp package.json package-lock.json "$stage/"
 test -f litellm-config.yaml && cp litellm-config.yaml "$stage/"
 test -f src/interceptor/addon.py && cp src/interceptor/addon.py "$stage/src/interceptor/"
 chmod 755 "$stage/dist/cli/index.js"
-COPYFILE_DISABLE=1 tar czf "$work/release.tgz" -C "$stage" .
+# bsdtar (macOS) would carry extended attributes that GNU tar warns about on the host.
+tar_flags=()
+if tar --version 2>/dev/null | grep -q bsdtar; then tar_flags=(--no-xattrs --no-mac-metadata); fi
+COPYFILE_DISABLE=1 tar "${tar_flags[@]+"${tar_flags[@]}"}" -czf "$work/release.tgz" -C "$stage" .
 
 listing=$(tar tzf "$work/release.tgz")
 for f in ./dist/cli/index.js ./dist/build-info.json ./dist/proxy/server.js ./package.json ./package-lock.json; do
