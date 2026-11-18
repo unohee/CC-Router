@@ -16,6 +16,9 @@
  * the failover counters have them. A 4xx other than 401/429 is the request's
  * own fault and is not a continuity failure.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { HandoffReport } from "../daemon/handoff-protocol.js";
 
 export const CONTINUITY_CAUSES = [
@@ -29,6 +32,50 @@ const DAY_MS = 24 * HOUR_MS;
 export const CONTINUITY_RETENTION_MS = 7 * DAY_MS;
 /** Handoffs kept. */
 export const MAX_HANDOFFS = 50;
+
+// ─── Client versions ────────────────────────────────────────────────────────
+// The guarantee depends on how Claude Code reacts to the router's endings, and
+// that is verified per client version by the real-client conformance suite.
+// The ledger counts which versions actually send traffic, so a version that was
+// never verified shows up before it can surprise anyone.
+
+const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
+
+/** The Claude Code version in a user agent ("claude-cli/2.1.327 (external, cli)"), or null. */
+export function claudeCliVersion(userAgent: string | string[] | undefined): string | null {
+  const ua = Array.isArray(userAgent) ? userAgent[0] : userAgent;
+  const m = /^claude-cli\/(\d{1,4}\.\d{1,4}\.\d{1,6})(?:[\s(]|$)/.exec(String(ua ?? "").trim());
+  return m ? m[1]! : null;
+}
+
+/** Where the verified list is at runtime: dist/continuity/ beside dist/proxy/ (CC_ROUTER_VERIFIED_CLIENTS overrides). */
+export function verifiedClientsPath(): string {
+  return process.env["CC_ROUTER_VERIFIED_CLIENTS"]
+    || join(dirname(fileURLToPath(import.meta.url)), "..", "continuity", "verified-clients.json");
+}
+
+/** The versions the conformance suite passed for; empty (everything unverified) when the file is missing or malformed. */
+export function loadVerifiedClients(path: string = verifiedClientsPath()): Set<string> {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { verified?: unknown };
+    const list = Array.isArray(raw.verified) ? raw.verified : [];
+    return new Set(list
+      .map(v => (typeof v === "string" ? v : (v as { version?: unknown } | null)?.version))
+      .filter((v): v is string => typeof v === "string" && VERSION_RE.test(v)));
+  } catch {
+    return new Set();
+  }
+}
+
+export interface ClientVersionView {
+  version: string;
+  requestsLastDay: number;
+  lastSeen: number;
+  verified: boolean;
+}
+
+/** Compares dotted versions numerically, newest first. */
+const newestFirst = (a: string, b: string): number => b.localeCompare(a, undefined, { numeric: true });
 
 /** The cause for a response status a client received, or null when it is not a continuity failure. */
 export function causeOfStatus(status: number): ContinuityCause | null {
@@ -60,6 +107,8 @@ export interface ContinuitySnapshot {
   };
   /** Workers that died and were replaced (from the supervisor), or null when not supervised. */
   workerCrashes: number | null;
+  /** Claude Code versions that sent requests in the last day, and which of them were never verified. */
+  clients: { versions: ClientVersionView[]; unverified: string[]; verified: string[] };
 }
 
 /** On disk. */
@@ -67,6 +116,8 @@ export interface ContinuityFile {
   version: 1;
   hours: Array<[hourSec: number, counts: Partial<Counts>]>;
   handoffs: HandoffReport[];
+  /** Requests per Claude Code version per hour. Optional: files from before it load without. */
+  clients?: Array<[hourSec: number, byVersion: Record<string, number>]>;
 }
 
 export class ContinuityLedger {
@@ -74,8 +125,42 @@ export class ContinuityLedger {
   private handoffs: HandoffReport[] = [];
   private isDirty = false;
   private crashes: number | null = null;
+  private readonly clientsByHour = new Map<number, Map<string, number>>();
+  private readonly clientLastSeen = new Map<string, number>();
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly verified: ReadonlySet<string> = new Set(),
+  ) {}
+
+  /** Counts one request from a Claude Code version. Anything that is not a plain version is ignored. */
+  recordClient(version: string | null, n = 1, ts = this.now()): void {
+    if (!version || !VERSION_RE.test(version) || n <= 0) return;
+    const hour = Math.floor(ts / HOUR_MS) * HOUR_MS;
+    let byVersion = this.clientsByHour.get(hour);
+    if (!byVersion) { byVersion = new Map(); this.clientsByHour.set(hour, byVersion); }
+    byVersion.set(version, (byVersion.get(version) ?? 0) + n);
+    this.clientLastSeen.set(version, Math.max(this.clientLastSeen.get(version) ?? 0, ts));
+    this.isDirty = true;
+  }
+
+  private clients(dayAgo: number): ContinuitySnapshot["clients"] {
+    const counts = new Map<string, number>();
+    for (const [hour, byVersion] of this.clientsByHour) {
+      if (hour + HOUR_MS <= dayAgo) continue;
+      for (const [v, n] of byVersion) counts.set(v, (counts.get(v) ?? 0) + n);
+    }
+    const versions = [...counts.entries()]
+      .sort((a, b) => newestFirst(a[0], b[0]))
+      .map(([version, requestsLastDay]) => ({
+        version, requestsLastDay, lastSeen: this.clientLastSeen.get(version) ?? 0, verified: this.verified.has(version),
+      }));
+    return {
+      versions,
+      unverified: versions.filter(v => !v.verified).map(v => v.version),
+      verified: [...this.verified].sort(newestFirst),
+    };
+  }
 
   get dirty(): boolean { return this.isDirty; }
   markClean(): void { this.isDirty = false; }
@@ -131,6 +216,7 @@ export class ContinuityLedger {
         recent: this.handoffs.slice(-10),
       },
       workerCrashes: this.crashes,
+      clients: this.clients(dayAgo),
     };
   }
 
@@ -142,7 +228,10 @@ export class ContinuityLedger {
       for (const c of CONTINUITY_CAUSES) if (counts[c] > 0) kept[c] = counts[c];
       return [hour / 1000, kept] as [number, Partial<Counts>];
     });
-    return { version: 1, hours, handoffs: this.handoffs };
+    for (const hour of [...this.clientsByHour.keys()]) if (hour + HOUR_MS <= cutoff) this.clientsByHour.delete(hour);
+    const clients = [...this.clientsByHour.entries()].sort((a, b) => a[0] - b[0])
+      .map(([hour, byVersion]) => [hour / 1000, Object.fromEntries(byVersion)] as [number, Record<string, number>]);
+    return { version: 1, hours, handoffs: this.handoffs, clients };
   }
 
   /** Merges a file; false when it is not a continuity file. Malformed rows are skipped. */
@@ -167,6 +256,12 @@ export class ContinuityLedger {
           finished: nonNegInt(h.finished), dropped: nonNegInt(h.dropped), unsaved: nonNegInt(h.unsaved), drainMs: nonNegInt(h.drainMs),
         });
       }
+    }
+    for (const row of Array.isArray(file.clients) ? file.clients : []) {
+      if (!Array.isArray(row) || typeof row[0] !== "number" || typeof row[1] !== "object" || row[1] === null) continue;
+      const hour = Math.floor((row[0] * 1000) / HOUR_MS) * HOUR_MS;
+      if (hour + HOUR_MS <= cutoff) continue;
+      for (const [version, n] of Object.entries(row[1])) this.recordClient(version, nonNegInt(n), hour);
     }
     // What was merged is already on disk; anything recorded before it is not.
     this.isDirty = wasDirty;

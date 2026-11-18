@@ -1071,6 +1071,18 @@ const SCRIPT = String.raw`
       ["Last handoff", last && isNum(last.at) ? ago(last.at) : "—", last ? (num(last.finished) + " finished · " + num(last.dropped) + " dropped · " + num(last.unsaved) + " unsaved") : "no reload yet"]
     ];
     if (isNum(c.workerCrashes)) rows.push(["Worker crashes", num(c.workerCrashes), "Replaced by the supervisor; new connections were refused for about a second."]);
+    var cl = c.clients;
+    if (cl && Array.isArray(cl.versions) && Array.isArray(cl.unverified)) {
+      var seen = cl.versions.filter(function (v) { return v && typeof v.version === "string" && isNum(v.requestsLastDay); })
+        .map(function (v) { return v.version + (v.verified ? "" : " (unverified)") + " ×" + num(v.requestsLastDay); });
+      rows.push([
+        cl.unverified.length ? "Claude Code: unverified" : "Claude Code versions",
+        seen.length ? seen.join(" · ") : "none in the last day",
+        cl.unverified.length
+          ? "These versions sent traffic but have not been through the real-client conformance suite; see README, Verify a new Claude Code version."
+          : "Every version that sent traffic in the last day passed the real-client conformance suite."
+      ]);
+    }
     kv($("ctkpis"), rows);
   }
 
