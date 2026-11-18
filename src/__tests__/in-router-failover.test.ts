@@ -160,9 +160,9 @@ async function withRouter(
 const accountsSeen = (seen: Seen[]) => seen.map(s => s.account);
 
 describe("which statuses fail over", () => {
-  it("is 429, 529 and 500/502/503/504, and no other", () => {
-    expect([...FAILOVER_STATUSES].sort()).toEqual([429, 500, 502, 503, 504, 529]);
-    for (const s of [200, 400, 401, 403, 404, 413, 422, 501]) expect(isFailoverStatus(s)).toBe(false);
+  it("is 401, 429, 529 and 500/502/503/504, and no other", () => {
+    expect([...FAILOVER_STATUSES].sort()).toEqual([401, 429, 500, 502, 503, 504, 529]);
+    for (const s of [200, 400, 403, 404, 413, 422, 501]) expect(isFailoverStatus(s)).toBe(false);
   });
 });
 
@@ -225,7 +225,7 @@ describe("in-router failover through a real router", () => {
     }, { ollama: true });
   }, 30_000);
 
-  for (const status of [400, 401, 403, 404, 413]) {
+  for (const status of [400, 403, 404, 413]) {
     it.concurrent(`does not retry a ${status}`, async () => {
       await withRouter(["alpha", "beta"], () => refuse(status), async ({ send, seen }) => {
         const res = await send();

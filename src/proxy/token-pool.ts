@@ -135,6 +135,16 @@ function overUserCap(a: Account): boolean {
   );
 }
 
+/**
+ * The server refused this seat's refresh token. Its current access token may
+ * still work for hours, but the seat cannot outlive it: it takes no new work
+ * while another seat can serve, and a session pinned to it moves now, while the
+ * move is a cache rewrite rather than a 401 when the token runs out.
+ */
+function needsRelogin(a: Account): boolean {
+  return a.authState === "needs-relogin";
+}
+
 /** Filter out accounts the user has taken out of the rotation. */
 function isUsable(a: Account): boolean {
   return a.enabled && !overUserCap(a);
@@ -202,7 +212,7 @@ export class TokenPool {
       // must never be bypassed: doing so was the key-rotation deadlock seen in
       // production, where the same account received every retry after both
       // accounts had returned 429.
-      const notBlocked = healthy.filter(a => isNotBlocked(a, model));
+      const notBlocked = healthy.filter(a => !needsRelogin(a) && isNotBlocked(a, model));
       const healthyUsable = notBlocked.filter(isUsable);
       if (healthyUsable.length > 0) {
         return this.markSelected(healthyUsable.reduce((best, a) =>
@@ -218,6 +228,15 @@ export class TokenPool {
         ));
         if (this.onCapBypass) this.onCapBypass(fallback);
         return fallback;
+      }
+
+      // Last resort before refusing the client: a seat whose refresh token was
+      // refused but whose access token still works. Its tokens are good until
+      // expiresAt; answering 429 while one exists would cut a session the pool
+      // can still serve. The one with the most time left goes first.
+      const dying = healthy.filter(a => this.canServeLastResort(a.id, model));
+      if (dying.length > 0) {
+        return this.markSelected(dying.reduce((best, a) => (a.tokens.expiresAt > best.tokens.expiresAt ? a : best)));
       }
 
       const retryAfter = blockedPoolRetryAfter(healthy, model);
@@ -258,6 +277,19 @@ export class TokenPool {
   }
 
   /**
+   * Whether this account can take a request only as a last resort: its refresh
+   * token was refused, but its access token still works and nothing upstream
+   * has told it to stop. getNext() and failover use such a seat only when no
+   * other seat can serve, rather than refuse the client.
+   */
+  canServeLastResort(id: string, model?: string): boolean {
+    const a = this.getById(id);
+    if (!a) return false;
+    clearExpiredCooldown(a, this.onCooldownExpired);
+    return a.healthy && needsRelogin(a) && a.tokens.expiresAt > Date.now() && isNotBlocked(a, model);
+  }
+
+  /**
    * Whether a session already pinned to this account should stay on it.
    *
    * Differs from `canServe` only in not reading `busy`, which nothing sets:
@@ -274,7 +306,7 @@ export class TokenPool {
     // A 429/529 cooldown is upstream telling us to stop, which a pin must
     // respect.
     const cooling = isCooling(a, model);
-    return a.healthy && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
+    return a.healthy && !needsRelogin(a) && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
 
   /**
@@ -309,7 +341,7 @@ export class TokenPool {
   }
 
   private isAvailable(a: Account, model?: string): boolean {
-    return a.healthy && !a.busy && !isCooling(a, model) && a.rateLimits.status !== "rate_limited" && isUsable(a);
+    return a.healthy && !needsRelogin(a) && !a.busy && !isCooling(a, model) && a.rateLimits.status !== "rate_limited" && isUsable(a);
   }
 
   /** Optional listener fired when a request is routed to a capped account

@@ -61,7 +61,9 @@ the `status` TUI and the severity headline show `heewon needs re-login (3h0m lef
 - `refresh-failing`: the refresh call failed for a passing reason (network, 5xx). The router retries with
   a backoff and the seat keeps serving. No action.
 - `needs-relogin`: the server refused the refresh token (`invalid_grant`). The router asks **once** and then
-  stops. The seat keeps serving until its access token runs out; the countdown is in the headline. The
+  stops. The seat takes no new work while another seat can serve, and sessions pinned to it move to another
+  seat at once. Only when no other seat can answer is it used, as a last resort, until its access token
+  runs out; the countdown is in the headline. The
   background loop refreshes at half-life (`tokenRefresh.leadMinutes`, default 240), so this shows up hours
   before the outage rather than ten minutes before.
 
@@ -250,8 +252,9 @@ never enough to call it a compaction.
 
 ## Was my request retried on another account? (failover)
 
-A `POST /v1/messages` that gets a 429, a 529, a 500/502/503/504 or a dropped
-connection before any byte is retried inside the router. The retry goes to the
+A `POST /v1/messages` that gets a 401 (the seat's token was revoked), a 429, a 529,
+a 500/502/503/504, a token that could not be refreshed, or a dropped connection
+before any byte is retried inside the router. The retry goes to the
 next usable account with the same body, then to the Ollama fallback, and only
 then is the refusal passed on. Look for:
 

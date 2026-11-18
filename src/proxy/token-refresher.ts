@@ -16,6 +16,15 @@ const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
  */
 const TOKEN_ENDPOINT = "https://claude.ai/v1/oauth/token";
 
+/**
+ * The endpoint refreshes go to. CC_ROUTER_OAUTH_TOKEN_URL replaces it so tests
+ * can run a real router against a fake OAuth server instead of claude.ai. It
+ * is read from the router's own environment, which only its operator sets.
+ */
+function tokenEndpoint(): string {
+  return process.env["CC_ROUTER_OAUTH_TOKEN_URL"] || TOKEN_ENDPOINT;
+}
+
 /** Refresh 10 minutes before expiry */
 const REFRESH_BUFFER_MS = 10 * 60 * 1000;
 
@@ -139,7 +148,7 @@ async function _doRefresh(account: Account): Promise<boolean> {
       client_id: CLAUDE_CODE_CLIENT_ID,
     });
 
-    const res = await fetch(TOKEN_ENDPOINT, {
+    const res = await fetch(tokenEndpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),

@@ -813,17 +813,17 @@ Every seat in the pool now has a 5-hour **and** a 7-day window. The pieces below
 
 A `POST /v1/messages` that meets a refusal is retried **inside the router**, before the client sees anything:
 
-1. **The next account.** A 429, a 529, a 500/502/503/504, or a connection that fails before any response byte sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most.
+1. **The next account.** A 401, a 429, a 529, a 500/502/503/504, a connection that fails before any response byte, or a token that could not be refreshed sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most. A seat marked `needs-relogin` is tried only after every other seat, and only while its access token still works.
 2. **Ollama.** When every eligible account has refused, the request goes to the Ollama fallback, if `ollamaFallback` is configured and its policy accepts it (minimum wait, size, budget).
 3. **The last refusal.** Otherwise the last upstream refusal is passed to the client as received.
 
 What it never does:
 
 - It never retries once a byte has reached the client. The decision is taken at the response headers, so SSE streams pass through unchanged.
-- It never retries other 4xx (400, 401, 403, 404, 413, …): those are the request's own fault.
+- It never retries other 4xx (400, 403, 404, 413, …): those are the request's own fault. A 401 is the exception: behind the router it is about the seat's own OAuth token (revoked or expired early), never the client's, so another seat can answer it.
 - It never retries a bare 429 for a client without Claude Code identity: upstream is refusing that client, and every account would refuse it too.
 
-Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (attempt 2)`. Health reports `failover`: requests that entered the chain, retries, `byOutcome` (`recovered`, `refused`, `ollama`, `exhausted`, `clientGone`) and `byReason` (`429`, `529`, `500`, `502`, `503`, `504`, `connection`, `token-refresh`). The dashboard has a Failover card. A refusal the router failed over from is left out of the 429 burst count, because the client never saw it.
+Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (attempt 2)`. Health reports `failover`: requests that entered the chain, retries, `byOutcome` (`recovered`, `refused`, `ollama`, `exhausted`, `clientGone`) and `byReason` (`401`, `429`, `529`, `500`, `502`, `503`, `504`, `connection`, `token-refresh`). The dashboard has a Failover card. A refusal the router failed over from is left out of the 429 burst count, because the client never saw it.
 
 ```json
 { "routing": { "failover": { "enabled": false } } }
@@ -907,7 +907,10 @@ It never refuses a request, and it never delays anything opus-tier. With no budg
 Every account reports `auth.state` in health: `ok`, `refresh-failing` (a passing error, retried) or
 `needs-relogin` (the refresh token was refused, so only a new login helps). The background loop refreshes
 a token when less than `tokenRefresh.leadMinutes` remain (default 240), so a dead refresh token is found hours
-before the outage. Recover a seat with `cc-router accounts relogin <id>`; see
+before the outage. A `needs-relogin` seat takes no new work while another seat can serve, and the
+sessions pinned to it move at once (a cache rewrite now rather than a 401 later). It is used only as a
+last resort, while its access token still works, instead of answering 429. No client is shown its 401.
+Recover a seat with `cc-router accounts relogin <id>`; see
 [docs/oauth-tokens.md](docs/oauth-tokens.md) for why a leftover CLI login breaks refresh.
 
 ```json

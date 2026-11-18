@@ -7,16 +7,22 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import type { NextFunction } from "express";
 
-/** Retried on the next account: plan or rate refusals and server-side failures. */
-export const FAILOVER_STATUSES: ReadonlySet<number> = new Set([429, 529, 500, 502, 503, 504]);
+/**
+ * Retried on the next account: plan or rate refusals, server-side failures, and
+ * 401. Behind the router a 401 is about the seat's own OAuth token (revoked, or
+ * expired early), never about the client, which authenticated to the router.
+ * Another seat sends its own token, so the retry neither fails the same way nor
+ * duplicates output: nothing was streamed.
+ */
+export const FAILOVER_STATUSES: ReadonlySet<number> = new Set([401, 429, 529, 500, 502, 503, 504]);
 
 export function isFailoverStatus(status: number): boolean {
   return FAILOVER_STATUSES.has(status);
 }
 
 /** Why an attempt was failed over from: the upstream status, or what went wrong before one. */
-export type FailoverReason = "429" | "529" | "500" | "502" | "503" | "504" | "connection" | "token-refresh";
-export const FAILOVER_REASONS: ReadonlyArray<FailoverReason> = ["429", "529", "500", "502", "503", "504", "connection", "token-refresh"];
+export type FailoverReason = "401" | "429" | "529" | "500" | "502" | "503" | "504" | "connection" | "token-refresh";
+export const FAILOVER_REASONS: ReadonlyArray<FailoverReason> = ["401", "429", "529", "500", "502", "503", "504", "connection", "token-refresh"];
 
 /**
  * How a request that entered failover ended:

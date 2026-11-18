@@ -1870,7 +1870,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   /** The next account to try: usable for this model, not tried yet, coolest first. */
   const nextFailoverAccount = (tried: ReadonlySet<string>, model: string | undefined): Account | null => {
-    const candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+    let candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+    // Before relaying a refusal: a seat whose refresh token died but whose
+    // access token still works (TokenPool.canServeLastResort).
+    if (candidates.length === 0) candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServeLastResort(a.id, model));
     if (candidates.length === 0) return null;
     const pick = candidates.reduce((best, a) => (accountUtil(a) < accountUtil(best) ? a : best));
     pick.requestCount++;
