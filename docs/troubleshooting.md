@@ -109,13 +109,35 @@ cc-router setup --add
 
 ## Streaming (SSE) is broken or incomplete
 
-This usually means a body-parsing middleware is interfering with the proxy.
+**A stream that ended with `overloaded_error`.** The router's stream guard ended it: the upstream went silent
+for `streamGuard.idleSeconds` (default 180), broke mid-response, or ended without `message_stop`. Nothing
+after the first byte can be retried without duplicating output, so the router closes the stream in the form
+Claude Code retries instead of letting it hang or keeping a cut answer. The log says which:
+
+```
+[ERROR] lyra: upstream stream went silent for 180s; ended with overloaded_error so the client retries
+[ERROR] lyra: upstream stream broke mid-response; ended with overloaded_error so the client retries
+```
+
+Health counts them under `streamGuard` (`stalled`, `broken`, `truncated`), next to `firstByteTimeouts`:
+streaming requests whose upstream sent no headers within `streamGuard.firstByteSeconds` (default 120) and
+were failed over to the next seat (failover reason `timeout`) before the client saw anything.
+
+```json
+{ "streamGuard": { "firstByteSeconds": 120, "idleSeconds": 180 } }
+```
+
+`0` turns a guard off. Raise `idleSeconds` if a model legitimately pauses longer than that between events
+(Anthropic sends `ping` events during long thinking, so this should be rare).
+
+**A body-parsing middleware.** If streams arrive incomplete without any of the above in the log, a
+middleware may be interfering with the proxy.
 
 If you're running cc-router behind another proxy (e.g. nginx), make sure:
 - `proxy_buffering off` is set in nginx
 - `X-Accel-Buffering: no` header is forwarded
 
-cc-router itself does not buffer SSE — `selfHandleResponse` is always `false`.
+cc-router itself does not buffer SSE: every chunk is written to the client the moment it arrives.
 
 ---
 

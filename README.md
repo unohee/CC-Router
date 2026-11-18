@@ -813,7 +813,7 @@ Every seat in the pool now has a 5-hour **and** a 7-day window. The pieces below
 
 A `POST /v1/messages` that meets a refusal is retried **inside the router**, before the client sees anything:
 
-1. **The next account.** A 401, a 429, a 529, a 500/502/503/504, a connection that fails before any response byte, or a token that could not be refreshed sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most. A seat marked `needs-relogin` is tried only after every other seat, and only while its access token still works.
+1. **The next account.** A 401, a 429, a 529, a 500/502/503/504, a connection that fails before any response byte, a stream whose upstream sends no headers within `streamGuard.firstByteSeconds` (default 120), or a token that could not be refreshed sends the request, with the identical body, to the coolest usable account not yet tried. Each account is tried once at most. A seat marked `needs-relogin` is tried only after every other seat, and only while its access token still works.
 2. **Ollama.** When every eligible account has refused, the request goes to the Ollama fallback, if `ollamaFallback` is configured and its policy accepts it (minimum wait, size, budget).
 3. **The last refusal.** Otherwise the last upstream refusal is passed to the client as received.
 
@@ -822,8 +822,9 @@ What it never does:
 - It never retries once a byte has reached the client. The decision is taken at the response headers, so SSE streams pass through unchanged.
 - It never retries other 4xx (400, 403, 404, 413, …): those are the request's own fault. A 401 is the exception: behind the router it is about the seat's own OAuth token (revoked or expired early), never the client's, so another seat can answer it.
 - It never retries a bare 429 for a client without Claude Code identity: upstream is refusing that client, and every account would refuse it too.
+- It never leaves a client hanging after the first byte. A stream that goes silent for `streamGuard.idleSeconds` (default 180), breaks, or ends without `message_stop` is closed with an Anthropic `overloaded_error` event, which Claude Code retries; a JSON body that breaks has its connection cut. Health counts these under `streamGuard`.
 
-Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (attempt 2)`. Health reports `failover`: requests that entered the chain, retries, `byOutcome` (`recovered`, `refused`, `ollama`, `exhausted`, `clientGone`) and `byReason` (`401`, `429`, `529`, `500`, `502`, `503`, `504`, `connection`, `token-refresh`). The dashboard has a Failover card. A refusal the router failed over from is left out of the 429 burst count, because the client never saw it.
+Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (attempt 2)`. Health reports `failover`: requests that entered the chain, retries, `byOutcome` (`recovered`, `refused`, `ollama`, `exhausted`, `clientGone`) and `byReason` (`401`, `429`, `529`, `500`, `502`, `503`, `504`, `connection`, `timeout`, `token-refresh`). The dashboard has a Failover card. A refusal the router failed over from is left out of the 429 burst count, because the client never saw it.
 
 ```json
 { "routing": { "failover": { "enabled": false } } }

@@ -21,8 +21,8 @@ export function isFailoverStatus(status: number): boolean {
 }
 
 /** Why an attempt was failed over from: the upstream status, or what went wrong before one. */
-export type FailoverReason = "401" | "429" | "529" | "500" | "502" | "503" | "504" | "connection" | "token-refresh";
-export const FAILOVER_REASONS: ReadonlyArray<FailoverReason> = ["401", "429", "529", "500", "502", "503", "504", "connection", "token-refresh"];
+export type FailoverReason = "401" | "429" | "529" | "500" | "502" | "503" | "504" | "connection" | "timeout" | "token-refresh";
+export const FAILOVER_REASONS: ReadonlyArray<FailoverReason> = ["401", "429", "529", "500", "502", "503", "504", "connection", "timeout", "token-refresh"];
 
 /**
  * How a request that entered failover ended:
