@@ -1,5 +1,6 @@
 import type { AccountRateLimits } from "../../proxy/types.js";
 import type { ProviderAccount } from "../types.js";
+import { persistenceFrozen } from "../../config/persistence-gate.js";
 
 const TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -34,6 +35,8 @@ export function needsOpenAIRefresh(account: Pick<OpenAISubscriptionAccount, "exp
 }
 
 export async function refreshOpenAISubscriptionToken(account: OpenAISubscriptionAccount): Promise<boolean> {
+  // See persistence-gate.ts: a worker handing over never rotates a token.
+  if (persistenceFrozen()) return false;
   const existing = refreshLocks.get(account.id);
   if (existing) return existing;
 

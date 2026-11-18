@@ -24,6 +24,9 @@ import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSession
 import { stats } from "./stats.js";
 import { readBuildInfo } from "./build-info.js";
 import { InFlightCounter, countsAsInFlight } from "./in-flight.js";
+import { drainServer, resolveDrainLimitMs } from "./drain.js";
+import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
+import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH } from "../config/paths.js";
 import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
@@ -891,6 +894,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       status: accountViews.some(a => a.healthy) ? "ok" : "degraded",
       build: buildInfo,
       inFlight: inFlight.snapshot(),
+      // Present only under `cc-router supervise`: which worker generation this
+      // is and how the last handoff went (finished, dropped, unsaved).
+      supervisor: supervisorView,
+      worker: { pid: process.pid, draining, frozen: persistenceFrozen() },
       mode,
       target,
       operational: createOperationalStatus({
@@ -1206,6 +1213,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     res.json({ ok: true, id });
   });
 
+  // A worker handing over has frozen its writes: a change made now would live
+  // only in its memory and vanish when it exits. Ask the client to retry; the
+  // successor takes it within seconds.
+  app.use("/cc-router/accounts", (req, res, next) => {
+    if (req.method === "GET" || !persistenceFrozen()) return next();
+    res.set("retry-after", "5").status(503).json({ error: "router is handing over to a new worker; retry in a few seconds" });
+  });
   app.use("/cc-router/accounts", accountsRouter);
 
   mountModelsRoute(app, {
@@ -2100,23 +2114,24 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     changeOrigin: true,
   }));
 
-  // ─── Graceful shutdown ────────────────────────────────────────────────────
-  const shutdown = () => {
-    ollamaQuota?.stop();
-    console.log(chalk.yellow("\nShutting down — saving tokens..."));
+  // ─── Graceful shutdown and handoff ────────────────────────────────────────
+  /** Saves everything this process holds. A frozen worker writes nothing. */
+  const persistAll = () => {
     // This save replaces every Anthropic record on disk with the pool. Anything
     // added to accounts.json while the server ran — by an older CLI, or by hand —
     // is about to be destroyed, so copy it aside first and say where it went.
     // The tokens themselves are unrecoverable once overwritten.
-    try {
-      const setAside = setAsideUnloadedAnthropicAccounts(pool.getAll().map(a => a.id));
-      if (setAside) {
-        console.log(chalk.yellow(
-          `  ${setAside.ids.join(", ")} were on disk but not in the pool — copied to ${setAside.file}`,
-        ));
+    if (!persistenceFrozen()) {
+      try {
+        const setAside = setAsideUnloadedAnthropicAccounts(pool.getAll().map(a => a.id));
+        if (setAside) {
+          console.log(chalk.yellow(
+            `  ${setAside.ids.join(", ")} were on disk but not in the pool — copied to ${setAside.file}`,
+          ));
+        }
+      } catch (err) {
+        console.log(chalk.red(`  Could not check for unloaded accounts: ${(err as Error).message}`));
       }
-    } catch (err) {
-      console.log(chalk.red(`  Could not check for unloaded accounts: ${(err as Error).message}`));
     }
     saveAccounts(pool.getAll());
     // Flush now: the debounce timer will not fire after exit, and losing the
@@ -2126,23 +2141,91 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     flushAccountState();
     quotaHistory.touch();
     flushQuota();
-    if (process.env["CC_ROUTER_DAEMON"] === "1") {
-      removePid();
-    }
-    removeEndpoint();
-    process.exit(0);
   };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+
+  const drainLimitMs = resolveDrainLimitMs(readConfig().drain?.limitSeconds);
+  const supervised = typeof process.send === "function" && process.env["CC_ROUTER_SUPERVISED"] === "1";
+  let supervisorView: SupervisorView | null = null;
+  let draining = false;
+  let servedAtFreeze = 0;
+  const send = (m: FromWorker) => { try { process.send?.(m); } catch { /* supervisor gone */ } };
+
+  /**
+   * Stop taking connections, let in-flight requests finish (up to the drain
+   * limit), and exit. `persist` saves state at the end (a stop); a handoff
+   * does not, because the worker that took over owns the files now.
+   */
+  const drainAndExit = async (why: string, persist: boolean) => {
+    if (draining) return;
+    draining = true;
+    ollamaQuota?.stop();
+    console.log(chalk.yellow(`\n${why} — draining ${inFlight.current} request(s) in flight (limit ${Math.round(drainLimitMs / 1000)}s)`));
+    const result = await drainServer({ server: httpServer, inFlight, limitMs: drainLimitMs });
+    console.log(chalk.yellow(`  drained: ${result.finished} finished, ${result.dropped} ended at the limit, ${Math.round(result.durationMs / 1000)}s`));
+    if (persist) {
+      console.log(chalk.yellow("  saving tokens and state..."));
+      persistAll();
+      if (process.env["CC_ROUTER_DAEMON"] === "1" && !supervised) removePid();
+      removeEndpoint();
+    } else {
+      send({ cc: "drained", finished: result.finished, dropped: result.dropped, unsaved: inFlight.served - servedAtFreeze, drainMs: result.durationMs });
+    }
+    // A moment for the ended responses to reach their sockets.
+    setTimeout(() => process.exit(0), 200).unref();
+  };
+
+  // A second signal while draining means "now".
+  const onStopSignal = (sig: string) => () => {
+    if (draining) {
+      console.log(chalk.red(`  ${sig} again — exiting without waiting`));
+      persistAll();
+      process.exit(0);
+    }
+    void drainAndExit(`${sig} received`, true);
+  };
+  process.on("SIGTERM", onStopSignal("SIGTERM"));
+  process.on("SIGINT", onStopSignal("SIGINT"));
+
+  if (supervised) {
+    process.on("message", (m: unknown) => {
+      if (!isToWorker(m)) return;
+      switch (m.cc) {
+        case "freeze":
+          // Save first, then freeze: the successor loads exactly this.
+          persistAll();
+          freezePersistence();
+          servedAtFreeze = inFlight.served;
+          console.log(chalk.yellow("  handoff: state saved and frozen; a new worker is starting"));
+          send({ cc: "frozen", servedAtFreeze });
+          break;
+        case "thaw":
+          thawPersistence();
+          console.log(chalk.yellow("  handoff abandoned: this worker keeps serving and saving"));
+          break;
+        case "drain":
+          void drainAndExit("handoff", false);
+          break;
+        case "shutdown":
+          void drainAndExit("stop requested by the supervisor", true);
+          break;
+        case "supervisor":
+          supervisorView = m.view;
+          break;
+      }
+    });
+    // The supervisor is gone (killed): finish what is in flight and save.
+    process.on("disconnect", () => { void drainAndExit("supervisor disconnected", !persistenceFrozen()); });
+  }
 
   // ─── Start ────────────────────────────────────────────────────────────────
   // HOST env var lets teams bind to 0.0.0.0 for LAN/VPS shared access.
   // Defaults to 127.0.0.1 (localhost-only) for single-user safety.
   const host = process.env["HOST"] ?? "127.0.0.1";
-  app.listen(port, host, () => {
+  const httpServer = app.listen(port, host, () => {
     writeEndpoint({ host, port, pid: process.pid });
-    // Write PID for daemon/service process management
-    if (process.env["CC_ROUTER_DAEMON"] === "1") {
+    // Write PID for daemon/service process management. Under a supervisor the
+    // pid file names the supervisor, which outlives every worker.
+    if (process.env["CC_ROUTER_DAEMON"] === "1" && !supervised) {
       writePid(process.pid);
     }
 

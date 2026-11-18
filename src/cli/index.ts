@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { registerSetup } from "./cmd-setup.js";
 import { registerStart } from "./cmd-start.js";
+import { registerSupervise } from "./cmd-supervise.js";
 import { registerStop, registerRevert } from "./cmd-stop.js";
 import { registerStatus } from "./cmd-status.js";
 import { registerAccounts } from "./cmd-accounts.js";
@@ -39,6 +40,7 @@ Examples:
 
 registerSetup(program);
 registerStart(program);
+registerSupervise(program);
 registerStop(program);
 registerRevert(program);
 registerStatus(program);

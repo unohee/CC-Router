@@ -1,6 +1,7 @@
 import type { Account, RefreshResponse } from "./types.js";
 import { writeAnthropicAccountsPreservingOtherProviders, serialize, getRefreshLeadMs } from "../config/manager.js";
 import { logRefresh } from "./logger.js";
+import { persistenceFrozen } from "../config/persistence-gate.js";
 import { stats } from "./stats.js";
 
 /**
@@ -127,6 +128,10 @@ function recordRefreshFailure(account: Account, failure: RefreshFailure, now: nu
 export async function refreshAccountToken(account: Account): Promise<boolean> {
   // A refused refresh token stays refused; do not ask the server again.
   if (account.authState === "needs-relogin") return false;
+  // A worker handing over never rotates a token: its successor owns refresh
+  // now, and two holders refreshing one token is what kills it. The access
+  // token in hand keeps working until expiresAt. Not recorded as a failure.
+  if (persistenceFrozen()) return false;
   // Deduplicate concurrent refresh calls for the same account
   const existing = refreshLocks.get(account.id);
   if (existing) return existing;

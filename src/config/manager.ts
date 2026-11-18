@@ -3,6 +3,7 @@ import { DEFAULT_WEEKLY_PACE, type WeeklyPaceConfig } from "../proxy/weekly-pace
 import { resolveGovernorConfig, type GovernorConfig } from "../proxy/demand-governor.js";
 import { randomBytes } from "crypto";
 import { CONFIG_DIR, ACCOUNTS_PATH, CONFIG_PATH, SESSIONS_PATH } from "./paths.js";
+import { persistenceFrozen } from "./persistence-gate.js";
 import type { Account, AccountRecord } from "../proxy/types.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "../proxy/types.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
@@ -61,6 +62,8 @@ export function readSessionAssignments(): unknown[] {
 }
 
 export function writeSessionAssignments(sessions: unknown[]): void {
+  // A worker handing over leaves sessions.json to its successor (persistence-gate.ts).
+  if (persistenceFrozen()) return;
   try {
     ensureConfigDir();
     const tmp = SESSIONS_PATH + ".tmp";
@@ -77,6 +80,8 @@ export function writeAccountsAtomic(data: unknown[]): void {
 }
 
 function writeAccountsAtomicToPath(path: string, data: unknown[]): void {
+  // A worker handing over must not overwrite the tokens its successor rotates.
+  if (persistenceFrozen()) return;
   const tmp = path + ".tmp";
   writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
   renameSync(tmp, path);
@@ -344,6 +349,9 @@ export interface ProxyConfig {
    *  expires the background loop refreshes it (default 240). A dead refresh
    *  token is found that long before the outage instead of ten minutes before. */
   tokenRefresh?: { leadMinutes?: number };
+  /** How long a stopping or handing-over router waits for in-flight requests
+   *  before ending them with a retryable overloaded_error (default 600 s). */
+  drain?: { limitSeconds?: number };
   routing?: {
     /** Utilization (0–1) at which an account stops taking new sessions and
      *  hands its pinned ones to an account with room — only while one exists.
@@ -482,6 +490,7 @@ function normalizeProxyConfig(cfg: ProxyConfig): ProxyConfig {
 }
 
 export function writeConfig(cfg: ProxyConfig): void {
+  if (persistenceFrozen()) return;
   ensureConfigDir();
   const tmp = CONFIG_PATH + ".tmp";
   writeFileSync(tmp, JSON.stringify(normalizeProxyConfig(cfg), null, 2), "utf-8");
