@@ -44,6 +44,8 @@ export class FakeOAuth {
   readonly latest = new Map<string, number>();
   calls = 0;
   reuses = 0;
+  /** Seats whose refresh token the server refuses outright (invalid_grant). */
+  readonly dead = new Set<string>();
   constructor(private readonly expiresInSec: number) {
     this.server = createServer((req, res) => {
       let raw = "";
@@ -54,8 +56,8 @@ export class FakeOAuth {
         const token = params.get("refresh_token") ?? JSON.parse(raw || "{}").refresh_token ?? "";
         const id = seatOf(token);
         const gen = genOf(token);
-        if (gen !== (this.latest.get(id) ?? 0)) {
-          this.reuses++;
+        if (this.dead.has(id) || gen !== (this.latest.get(id) ?? 0)) {
+          if (!this.dead.has(id)) this.reuses++;
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_grant", error_description: "Refresh token expired" }));
           return;

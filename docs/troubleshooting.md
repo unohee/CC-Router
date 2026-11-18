@@ -120,8 +120,10 @@ Claude Code retries instead of letting it hang or keeping a cut answer. The log 
 ```
 
 Health counts them under `streamGuard` (`stalled`, `broken`, `truncated`), next to `firstByteTimeouts`:
-streaming requests whose upstream sent no headers within `streamGuard.firstByteSeconds` (default 120) and
-were failed over to the next seat (failover reason `timeout`) before the client saw anything.
+requests whose upstream sent no headers within `streamGuard.firstByteSeconds` (default 120; a non-stream
+request also gets 20 ms per `max_tokens`, since its headers come with the whole answer) and were failed over
+to the next seat (failover reason `timeout`) before the client saw anything. A seat that stalls, breaks or
+times out sits out 30 s, so the client's retry goes elsewhere instead of meeting the same fault.
 
 ```json
 { "streamGuard": { "firstByteSeconds": 120, "idleSeconds": 180 } }

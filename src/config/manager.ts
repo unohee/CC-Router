@@ -352,9 +352,10 @@ export interface ProxyConfig {
   /** How long a stopping or handing-over router waits for in-flight requests
    *  before ending them with a retryable overloaded_error (default 600 s). */
   drain?: { limitSeconds?: number };
-  /** Streaming requests whose upstream sends no headers within firstByteSeconds
-   *  (default 120) fail over; a stream silent for idleSeconds (default 180),
-   *  broken or cut short ends with a retryable overloaded_error. 0 disables. */
+  /** A request whose upstream sends no headers within firstByteSeconds (default
+   *  120; plus 20 ms per max_tokens for non-stream requests) fails over; a
+   *  stream silent for idleSeconds (default 180), broken or cut short ends with
+   *  a retryable overloaded_error. 0 disables. */
   streamGuard?: { firstByteSeconds?: number; idleSeconds?: number };
   routing?: {
     /** Utilization (0–1) at which an account stops taking new sessions and

@@ -1,9 +1,10 @@
 /**
  * Guards for an upstream that goes quiet.
  *
- * Before the first byte: a streaming request whose upstream sends no response
- * headers within `firstByteMs` is abandoned, so failover can try the next seat.
- * Nothing has reached the client, so the retry is invisible to it.
+ * Before the first byte: a request whose upstream sends no response headers in
+ * time (`headersDeadlineMs`: `firstByteMs` for a stream, plus time to generate
+ * max_tokens for a non-stream request) is abandoned, so failover can try the
+ * next seat. Nothing has reached the client, so the retry is invisible to it.
  *
  * After the first byte nothing can be retried (output would be duplicated), but
  * the client must not hang or keep a silently cut answer. An SSE stream that
@@ -15,6 +16,12 @@ import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 
 export const DEFAULT_FIRST_BYTE_MS = 120_000;
 export const DEFAULT_STREAM_IDLE_MS = 180_000;
+/**
+ * How long a seat whose upstream stalled, broke or sent no headers sits out.
+ * Long enough that the client's retry, pinned to the same session, goes to
+ * another seat (or waits a moment) instead of meeting the same stall again.
+ */
+export const STALL_COOLDOWN_SECONDS = 30;
 
 export interface StreamGuardConfig {
   /** Streaming requests only: 0 turns the guard off. */
@@ -49,6 +56,27 @@ export function resolveStreamGuard(
     firstByteMs: msFrom(env["CC_ROUTER_FIRST_BYTE_MS"], cfg?.firstByteSeconds, DEFAULT_FIRST_BYTE_MS),
     idleMs: msFrom(env["CC_ROUTER_STREAM_IDLE_MS"], cfg?.idleSeconds, DEFAULT_STREAM_IDLE_MS),
   };
+}
+
+/**
+ * Time a non-stream request may take before its headers, per output token it
+ * may generate: 20 ms is 50 tokens/s, slower than any Claude model generates.
+ */
+export const NON_STREAM_MS_PER_TOKEN = 20;
+
+/**
+ * How long to wait for response headers. A stream's come at once, so the
+ * plain first-byte limit applies. A non-stream request's headers come with its
+ * whole answer, so it also gets time to generate `max_tokens` at a slow pace;
+ * without a max_tokens there is no bound to derive and no limit (the proxy's
+ * own request timeout still applies).
+ */
+export function headersDeadlineMs(cfg: StreamGuardConfig, body: { stream?: unknown; max_tokens?: unknown } | undefined): number {
+  if (cfg.firstByteMs <= 0) return 0;
+  if (body?.stream === true) return cfg.firstByteMs;
+  const maxTokens = Number(body?.max_tokens);
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return 0;
+  return cfg.firstByteMs + Math.round(maxTokens) * NON_STREAM_MS_PER_TOKEN;
 }
 
 /** Raised on the upstream request when its headers did not come in time. */

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
-  DEFAULT_FIRST_BYTE_MS, DEFAULT_STREAM_IDLE_MS, OVERLOADED_EVENT, isFirstByteTimeout, FirstByteTimeoutError, resolveStreamGuard,
+  DEFAULT_FIRST_BYTE_MS, DEFAULT_STREAM_IDLE_MS, NON_STREAM_MS_PER_TOKEN, OVERLOADED_EVENT, headersDeadlineMs, isFirstByteTimeout,
+  FirstByteTimeoutError, resolveStreamGuard,
 } from "../proxy/stream-guard.js";
 import { isCompleteStream, listen, readStream, sendMessage, sseEvents, startRouter, type RouterRun } from "./helpers/continuity-harness.js";
 import { waitFor } from "./helpers/router-process.js";
@@ -23,6 +24,14 @@ describe("stream guard config", () => {
       .toEqual({ firstByteMs: 250, idleMs: 400 });
     expect(resolveStreamGuard({ firstByteSeconds: "soon", idleSeconds: -1 }, {}))
       .toEqual({ firstByteMs: DEFAULT_FIRST_BYTE_MS, idleMs: DEFAULT_STREAM_IDLE_MS });
+  });
+
+  it("waits for a non-stream request in proportion to its max_tokens", () => {
+    const cfg = { firstByteMs: 120_000, idleMs: 180_000 };
+    expect(headersDeadlineMs(cfg, { stream: true, max_tokens: 32_000 })).toBe(120_000);
+    expect(headersDeadlineMs(cfg, { max_tokens: 64 })).toBe(120_000 + 64 * NON_STREAM_MS_PER_TOKEN);
+    expect(headersDeadlineMs(cfg, {})).toBe(0);
+    expect(headersDeadlineMs({ firstByteMs: 0, idleMs: 0 }, { stream: true })).toBe(0);
   });
 
   it("names its own timeout error", () => {
@@ -128,7 +137,7 @@ describe("a real router with a misbehaving upstream", { timeout: 60_000 }, () =>
     await waitFor(() => up!.seen.filter(s => s.seat === "stuck").every(s => s.closedEarly), "the stuck request to be closed");
   });
 
-  it("does not time out a non-stream request, whose headers come with its whole answer", async () => {
+  it("gives a non-stream request time to generate its max_tokens before timing it out", async () => {
     const r = await boot(["lyra"], () => "json-late");
     const res = await sendMessage(r.base, { stream: false, session: "json" });
     expect(res.status).toBe(200);
