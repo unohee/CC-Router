@@ -809,6 +809,35 @@ cc-router configure --show
 
 Every seat in the pool now has a 5-hour **and** a 7-day window. The pieces below keep the pool from running dry before the windows refill. Each one is described with its `config.json` keys. Only failover is on by default; everything else is opt-in.
 
+### Continuity: a session is never cut while the pool has quota
+
+The router's promise: as long as some seat can still serve, a Claude Code session behind it is not cut off,
+by a deploy, a restart, a dead token, a refusing or failing upstream, or one that goes quiet. Each piece
+below keeps part of it; together they are tested end to end by `src/__tests__/never-cut.e2e.test.ts`.
+
+| What goes wrong | What the router does | Config |
+|---|---|---|
+| A seat refuses (401, 429, 5xx) or the connection fails before any byte | The request goes to the next seat with the same body; the client sees nothing | `routing.failover.enabled` (default on) |
+| An upstream sends no headers in time | Abandoned and failed over (reason `timeout`) | `streamGuard.firstByteSeconds` (120; non-stream requests also get 20 ms per `max_tokens`) |
+| A stream goes silent, breaks or is cut after its first byte | Ended with `overloaded_error`, which Claude Code retries; the seat sits out 30 s so the retry goes elsewhere | `streamGuard.idleSeconds` (180) |
+| A refresh token dies (`invalid_grant`) | Found hours early; the seat takes no new work and its sessions move; no client sees its 401 | `tokenRefresh.leadMinutes` (240) |
+| A deploy | `systemctl --user reload`: a new worker takes the socket, the old one finishes its streams | `drain.limitSeconds` (600) |
+| A stop or restart | No new connections; requests in flight finish, then state is saved | `drain.limitSeconds` |
+| A worker crashes | The supervisor replaces it in about a second | — |
+
+**Limits.** When every seat is out of quota, the client gets a 429 with `Retry-After` (the honest answer;
+the retry watchdog waits it out). A stream still running at the drain limit is ended with `overloaded_error`.
+Nothing after the first byte is ever replayed, since that would duplicate output and tool calls; the client
+retries instead. A crashed worker refuses new connections for about a second. The supervisor process itself
+only picks up new code on a cold restart (`systemctl --user restart`), never on a reload.
+
+**The continuity ledger** is the evidence. Health reports `continuity`: every failure a client actually saw,
+by cause (`http-401`, `http-429`, `http-5xx`, `stream-stalled`, `stream-broken`, `stream-truncated`) for the
+last hour and the last day, and every handoff with what it finished and dropped. Refusals absorbed by
+failover never reach a client and are not counted there. It is kept in `continuity.json` beside
+`accounts.json` (`CONTINUITY_PATH` moves it), so restarts and reloads do not reset it; the dashboard has a
+Continuity card. `scripts/smoke-remote.sh` fails a deploy whose last finished handoff dropped a request.
+
 ### In-router failover (on by default)
 
 A `POST /v1/messages` that meets a refusal is retried **inside the router**, before the client sees anything:

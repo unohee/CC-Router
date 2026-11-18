@@ -102,6 +102,7 @@ class Supervisor implements SupervisorHandle {
   private generation = 0;
   private lastHandoff: HandoffReport | null = null;
   private failedReloads = 0;
+  private crashes = 0;
   private reloading = false;
   private stopping = false;
   /** Workers told to drain (handoff) or shut down: their exit is expected. */
@@ -117,7 +118,7 @@ class Supervisor implements SupervisorHandle {
   view(): SupervisorView {
     return {
       supervised: true, supervisorPid: process.pid, generation: this.generation,
-      startedAt: this.startedAt, lastHandoff: this.lastHandoff, failedReloads: this.failedReloads,
+      startedAt: this.startedAt, lastHandoff: this.lastHandoff, failedReloads: this.failedReloads, crashes: this.crashes,
     };
   }
 
@@ -146,6 +147,7 @@ class Supervisor implements SupervisorHandle {
     if (w !== this.current) return;
     this.current = undefined;
     if (this.stopping || expected) return;
+    this.crashes++;
     this.log(`worker ${w.process.pid} exited unexpectedly (code ${code}, signal ${signal}); replacing it in ${this.respawnDelayMs} ms`);
     this.respawnLater(this.respawnDelayMs);
   }

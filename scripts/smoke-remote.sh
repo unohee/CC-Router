@@ -6,7 +6,8 @@
 # Reads the base URL and minimum account count from $CC_ROUTER_DEPLOY_ENV
 # (default ~/.cc-router/deploy.env; see scripts/deploy-remote.sh), and the proxy
 # secret from ~/.cc-router/config.json (client.remoteSecret, else proxySecret).
-# Every probe is quota-free: health, the dashboard page, and count_tokens.
+# Every probe is quota-free: health, the dashboard page, count_tokens, and the
+# continuity ledger (the last handoff must have dropped nothing).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -43,5 +44,39 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$base/v1/me
   --data '{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"ping"}]}')
 test "$code" = 200 || fail "count_tokens through the router answered $code"
 
+# Continuity: the ledger is reported, and the last handoff that finished
+# dropped no request. Right after a reload the old worker may still be
+# draining long streams (up to the drain limit): that is waited for 90 s, and
+# if it is still draining, nothing has been dropped yet, so the previous
+# finished handoff in the ledger is what gets checked.
+continuity_line=""
+for _ in $(seq 1 90); do
+  continuity_line=$(curl -sf --max-time 10 "$base/cc-router/health" | node -e '
+    let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+      const h = JSON.parse(s);
+      const c = h.continuity;
+      if (!c || !c.lastDay || !c.handoffs) { console.log("missing"); return; }
+      const sup = h.supervisor, pid = h.worker && h.worker.pid;
+      const cur = sup && sup.lastHandoff;
+      const prev = c.handoffs.last;
+      let handoff = "none";
+      if (sup && sup.generation > 1) {
+        if (cur && cur.toPid === pid) handoff = `dropped=${cur.dropped}`;
+        else handoff = prev ? `draining:dropped=${prev.dropped}` : "draining";
+      } else if (prev) {
+        handoff = `dropped=${prev.dropped}`;
+      }
+      console.log([handoff, c.lastDay.total, c.lastHour.total, c.handoffs.lastDay].join(" "));
+    });') || continuity_line="unreachable"
+  case "$continuity_line" in draining*|unreachable) sleep 1 ;; *) break ;; esac
+done
+read -r handoff day_failures hour_failures day_handoffs <<<"$continuity_line"
+test "$handoff" != missing || fail "health has no continuity ledger"
+test "$handoff" != unreachable || fail "health stopped answering"
+dropped=${handoff##*dropped=}
+case "$handoff" in *dropped=*) test "$dropped" = 0 || fail "the last finished handoff dropped $dropped in-flight request(s)" ;; esac
+
 printf '[smoke] OK: build %s, %s accounts (%s healthy, status %s), dashboard 200, count_tokens 200\n' \
   "${sha:0:12}" "$accounts" "$healthy" "$status"
+printf '[smoke] continuity: last handoff %s; client-visible failures %s in the last hour, %s in the last day; %s handoff(s) today\n' \
+  "$handoff" "$hour_failures" "$day_failures" "$day_handoffs"

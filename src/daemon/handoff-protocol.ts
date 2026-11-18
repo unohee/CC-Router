@@ -38,6 +38,8 @@ export interface SupervisorView {
   lastHandoff: HandoffReport | null;
   /** Reloads that were abandoned because the new worker did not come up. */
   failedReloads: number;
+  /** Workers that died unexpectedly and were replaced. */
+  crashes: number;
 }
 
 export type ToWorker =

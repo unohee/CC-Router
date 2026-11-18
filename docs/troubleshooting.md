@@ -274,6 +274,31 @@ what the session was carrying, confirmed by the following request. Claude Code
 issues small side-calls under the same session id, so a single small request is
 never enough to call it a compaction.
 
+## Did a client see a failure? (continuity ledger)
+
+Health keeps the failures clients actually saw, so "was anything cut?" has an answer:
+
+```bash
+curl -s http://<router>:3456/cc-router/health | jq '.continuity'
+# lastHour / lastDay   {total, byCause: {http-401, http-429, http-5xx, stream-stalled, stream-broken, stream-truncated}}
+# handoffs             {lastDay, droppedLastDay, last, recent}   one entry per reload
+# workerCrashes        workers the supervisor had to replace (null when not supervised)
+```
+
+How to read the causes:
+
+- `http-429`: every seat was out of quota (or cooling), so the client got a 429 with `Retry-After`. This is
+  the pool's limit, not a cut; check `supply` and the account windows.
+- `http-401` / `http-5xx`: every eligible seat refused and the last refusal was passed on. One seat refusing
+  is absorbed by failover and never shows here; look at `failover.byReason` for those.
+- `stream-stalled` / `stream-broken` / `stream-truncated`: the stream guard ended a stream with
+  `overloaded_error` and Claude Code retried it (see "Streaming (SSE) is broken or incomplete").
+- `handoffs.droppedLastDay > 0`: a stream outlived `drain.limitSeconds` during a reload or stop.
+
+The ledger lives in `continuity.json` beside `accounts.json` and survives restarts. A worker that is
+handing over does not write it; the few requests it serves after freezing are counted as `unsaved` in the
+handoff report instead.
+
 ## Was my request retried on another account? (failover)
 
 A `POST /v1/messages` that gets a 401 (the seat's token was revoked), a 429, a 529,

@@ -44,6 +44,10 @@ export const QUOTA_HISTORY_PATH =
  * send traffic straight back to an account that was exhausted. Beside
  * accounts.json, like USAGE_PATH.
  */
+export const CONTINUITY_PATH =
+  process.env["CONTINUITY_PATH"] ||
+  path.join(path.dirname(ACCOUNTS_PATH), "continuity.json");
+
 export const ACCOUNT_STATE_PATH =
   process.env["ACCOUNT_STATE_PATH"] ||
   path.join(path.dirname(ACCOUNTS_PATH), "account-state.json");
