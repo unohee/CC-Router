@@ -172,6 +172,8 @@ export interface RouterOpts {
   seats: { id: string; expiresAt: number; gen?: number }[];
   config?: Record<string, unknown>;
   env?: Record<string, string>;
+  /** Listen on this port instead of a free one (a restart on the same address). */
+  port?: number;
 }
 
 export async function startRouter(opts: RouterOpts): Promise<RouterRun> {
@@ -181,7 +183,7 @@ export async function startRouter(opts: RouterOpts): Promise<RouterRun> {
     expiresAt: s.expiresAt, scopes: [], enabled: true,
   }))));
   writeFileSync(join(dir, "config.json"), JSON.stringify(opts.config ?? {}));
-  const port = await freePort();
+  const port = opts.port ?? await freePort();
   const upstream = `http://127.0.0.1:${opts.upstreamPort}`;
   const args = opts.mode === "standalone"
     ? ["--import", "tsx", "--input-type=module", "-e",
