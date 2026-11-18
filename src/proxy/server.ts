@@ -13,7 +13,8 @@ import {
 } from "./model-cooldown.js";
 import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
-import { needsRefresh, refreshAccountToken, saveAccounts, startRefreshLoop } from "./token-refresher.js";
+import { writeEndpoint, removeEndpoint } from "../config/endpoint.js";
+import { needsRefresh, refreshAccountToken, refreshAfterRejection, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
@@ -44,7 +45,7 @@ import { DEFAULT_WEEKLY_PACE, FIVE_HOUR_SEC, weeklyPace, type WeeklyPace } from 
 import { computeSeverity, weeklyWindowOf, BURST_WINDOW_MS } from "./severity.js";
 import type { WeeklyWindow } from "./severity.js";
 import { writePid, removePid } from "../daemon/pid.js";
-import type { Account, AccountRateLimits, AccountRecord } from "./types.js";
+import type { Account, AccountRateLimits, AccountRecord, AuthState } from "./types.js";
 import { canServeOpenAI, createOpenAIAccountPicker } from "../providers/openai/account-pool.js";
 import { resolveCodexFiveHourBudget } from "../providers/openai/five-hour-budget.js";
 import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../providers/openai/context-limits.js";
@@ -103,6 +104,8 @@ export interface HealthAccountView {
   expiresInMs: number;
   lastUsedMs: number;
   lastRefreshMs: number;
+  /** Token refresh health (Anthropic accounts). "needs-relogin": the refresh token was refused. */
+  auth?: { state: AuthState; lastAttemptMs?: number; lastError?: string };
   rateLimits?: AccountRateLimits;
   sessionLimitPercent?: number;
   weeklyLimitPercent?: number;
@@ -219,6 +222,11 @@ function publicAnthropicAccountView(a: Account): HealthAccountView {
     expiresInMs: a.tokens.expiresAt - Date.now(),
     lastUsedMs: a.lastUsed,
     lastRefreshMs: a.lastRefresh,
+    auth: {
+      state: a.authState ?? "ok",
+      ...(a.lastRefreshAttempt ? { lastAttemptMs: a.lastRefreshAttempt } : {}),
+      ...(a.lastRefreshError ? { lastError: a.lastRefreshError } : {}),
+    },
     rateLimits: a.rateLimits,
     weeklyWindow: weeklyWindowOf(a),
     weeklyPace: weeklyPace(a.rateLimits.sevenDayUtil, a.rateLimits.sevenDayReset, Date.now(),
@@ -1131,6 +1139,41 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     res.status(201).json({ account: publicAnthropicAccountView(added) });
   });
 
+  // Replace an account's credentials in place (a re-login). Unlike DELETE+POST this
+  // keeps session pins, user caps and counters, and never leaves the seat missing.
+  accountsRouter.put("/:id", (req, res) => {
+    const { id } = req.params;
+    const body = (req.body ?? {}) as Partial<AccountRecord>;
+    if (typeof body.accessToken !== "string" || body.accessToken === "" ||
+        typeof body.refreshToken !== "string" || body.refreshToken === "" ||
+        typeof body.expiresAt !== "number" || !Number.isFinite(body.expiresAt)) {
+      res.status(400).json({ error: "accessToken, refreshToken and expiresAt are required" });
+      return;
+    }
+    if (body.id !== undefined && body.id !== id) {
+      res.status(400).json({ error: `Body id "${String(body.id)}" does not match "${id}"` });
+      return;
+    }
+    const previous = pool.replaceTokens(id, {
+      accessToken: body.accessToken,
+      refreshToken: body.refreshToken,
+      expiresAt: body.expiresAt,
+      scopes: Array.isArray(body.scopes) ? body.scopes : ["user:inference", "user:profile"],
+    });
+    if (!previous) {
+      res.status(404).json({ error: `Account "${id}" not found` });
+      return;
+    }
+    const result = tryPersist(() => {
+      pool.replaceTokens(id, previous);
+    });
+    if (!result.ok) {
+      res.status(500).json({ error: `Failed to persist accounts.json: ${result.message}` });
+      return;
+    }
+    res.json({ account: publicAnthropicAccountView(pool.findById(id)!) });
+  });
+
   accountsRouter.delete("/:id", (req, res) => {
     const { id } = req.params;
     // Refuse to remove the last account — downstream /v1/* would have no
@@ -1503,7 +1546,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           pendingLog.details = "token invalid";
           logError(account.id, 401, "Token invalid — scheduling background refresh");
 
-          refreshAccountToken(account).then(ok => {
+          // Upstream rejected the access token, so it is dead whatever expiresAt says:
+          // a failed refresh must take the seat out of rotation, not leave it to 401 again.
+          const sentAuth = (proxyRes as unknown as { req?: { getHeader?: (n: string) => unknown } }).req?.getHeader?.("authorization");
+          const rejected = typeof sentAuth === "string" && sentAuth.startsWith("Bearer ") ? sentAuth.slice(7) : undefined;
+          refreshAfterRejection(account, rejected).then(ok => {
             if (ok) saveAccounts(pool.getAll());
           }).catch(console.error);
         } else if (status === 429) {
@@ -1823,7 +1870,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   /** The next account to try: usable for this model, not tried yet, coolest first. */
   const nextFailoverAccount = (tried: ReadonlySet<string>, model: string | undefined): Account | null => {
-    const candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+    let candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+    // Before relaying a refusal: a seat whose refresh token died but whose
+    // access token still works (TokenPool.canServeLastResort).
+    if (candidates.length === 0) candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServeLastResort(a.id, model));
     if (candidates.length === 0) return null;
     const pick = candidates.reduce((best, a) => (accountUtil(a) < accountUtil(best) ? a : best));
     pick.requestCount++;
@@ -1965,7 +2015,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     if (needsRefresh(account)) {
       const ok = await refreshAccountToken(account);
       if (ok) saveAccounts(pool.getAll());
-      if (!ok) {
+      // A refresh that fails inside the last ten minutes does not make the access token
+      // unusable: it still works until expiresAt, so send with it. Refusing here would
+      // 401 every request to a seat the pool still believes is healthy.
+      if (!ok && account.tokens.expiresAt <= Date.now()) {
         stats.totalErrors++;
         logError(account.id, 401, "Token refresh failed");
         if (!req._ccFailover) {
@@ -2076,6 +2129,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       removePid();
     }
+    removeEndpoint();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
@@ -2086,6 +2140,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // Defaults to 127.0.0.1 (localhost-only) for single-user safety.
   const host = process.env["HOST"] ?? "127.0.0.1";
   app.listen(port, host, () => {
+    writeEndpoint({ host, port, pid: process.pid });
     // Write PID for daemon/service process management
     if (process.env["CC_ROUTER_DAEMON"] === "1") {
       writePid(process.pid);

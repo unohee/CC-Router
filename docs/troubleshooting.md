@@ -48,11 +48,36 @@ cc-router status --json | python3 -m json.tool
 cc-router stop && cc-router start
 ```
 
-**If the refresh token itself expired**, you need to re-add the account:
+**If the refresh token itself was refused** (`invalid_grant — Refresh token expired` in the log), restarting
+cannot help; the seat needs a new login. See the next section.
+
+---
+
+## A seat says "needs re-login"
+
+Health reports `accounts[].auth.state` as `ok`, `refresh-failing` or `needs-relogin`, and the dashboard,
+the `status` TUI and the severity headline show `heewon needs re-login (3h0m left)`.
+
+- `refresh-failing`: the refresh call failed for a passing reason (network, 5xx). The router retries with
+  a backoff and the seat keeps serving. No action.
+- `needs-relogin`: the server refused the refresh token (`invalid_grant`). The router asks **once** and then
+  stops. The seat takes no new work while another seat can serve, and sessions pinned to it move to another
+  seat at once. Only when no other seat can answer is it used, as a last resort, until its access token
+  runs out; the countdown is in the headline. The
+  background loop refreshes at half-life (`tokenRefresh.leadMinutes`, default 240), so this shows up hours
+  before the outage rather than ten minutes before.
+
 ```bash
-cc-router setup --add
-# Log out and back in with that account in Claude Code first
+cc-router accounts relogin heewon --expect heewon@     # runs `claude auth login`; open the URL anywhere
+cc-router accounts relogin heewon --from-keychain      # macOS: use the Keychain login, then remove it
 ```
+
+It checks who logged in (`/api/oauth/profile`) before touching anything, then replaces the seat in the
+running router, keeping its caps and session pins. Without a terminal it needs `--yes` or `--expect`.
+
+**Why it happens.** A refresh token rotates on use, so only one holder of it can stay valid. A leftover
+`claude` login holding the same token (Keychain, `~/.claude/.credentials.json`, another machine) refreshes
+it behind the router's back. After a re-login, do not leave that copy behind; `--from-keychain` removes it.
 
 ---
 
@@ -227,8 +252,9 @@ never enough to call it a compaction.
 
 ## Was my request retried on another account? (failover)
 
-A `POST /v1/messages` that gets a 429, a 529, a 500/502/503/504 or a dropped
-connection before any byte is retried inside the router. The retry goes to the
+A `POST /v1/messages` that gets a 401 (the seat's token was revoked), a 429, a 529,
+a 500/502/503/504, a token that could not be refreshed, or a dropped connection
+before any byte is retried inside the router. The retry goes to the
 next usable account with the same body, then to the Ollama fallback, and only
 then is the refusal passed on. Look for:
 

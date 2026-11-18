@@ -435,7 +435,7 @@ const SCRIPT = String.raw`
   var RUNGS = { ok: 1, watch: 1, problem: 1, off: 1 };
   var TONE = { ok: "good", watch: "warn", problem: "crit", off: "muted" };
   var MARK = { ok: "✓", watch: "▲", problem: "■", off: "–" };
-  var STATE_TEXT = { off: "disabled", expired: "token expired", limited: "rate limited", unhealthy: "unhealthy", hot: "hot", ok: "ok" };
+  var STATE_TEXT = { off: "disabled", expired: "token expired", relogin: "needs re-login", limited: "rate limited", unhealthy: "unhealthy", hot: "hot", ok: "ok" };
 
   function isNum(n) { return typeof n === "number" && isFinite(n); }
   function validSeverity(v) {

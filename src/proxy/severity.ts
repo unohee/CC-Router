@@ -19,6 +19,7 @@ export type AccountRung = Rung | "off";
 export type AccountState =
   | "off"
   | "expired"
+  | "relogin"
   | "cooling"
   | "limited"
   | "unhealthy"
@@ -55,6 +56,8 @@ export interface SeverityAccountInput {
   modelCooldowns?: Record<string, number>;
   expiresInMs?: number;
   rateLimits?: SeverityRateLimits;
+  /** Token refresh health; "needs-relogin" means the refresh token was refused. */
+  auth?: { state?: string };
 }
 
 export interface SeverityLogInput {
@@ -78,6 +81,8 @@ export interface AccountSeverity {
   util?: number;
   /** How old the reading behind a "near" or "hot" is, in ms, when it is older than `STALE_READING_MS`. */
   age?: number;
+  /** Time left on the access token, in ms. Set only when `state` is "relogin". */
+  left?: number;
 }
 
 export interface PoolSeverity {
@@ -167,6 +172,12 @@ function assessAccount(a: SeverityAccountInput, now: number): AccountSeverity {
     return { id, rung: "problem", state: "expired" };
   }
 
+  // The refresh token is dead: the seat still serves until the access token runs
+  // out, but nothing will renew it, so this is an outage with a countdown.
+  if (a.auth?.state === "needs-relogin") {
+    return { id, rung: "problem", state: "relogin", ...(typeof a.expiresInMs === "number" ? { left: a.expiresInMs } : {}) };
+  }
+
   if (typeof a.coolingUntil === "number" && a.coolingUntil > now) {
     return { id, rung: "problem", state: "cooling", until: a.coolingUntil, scope: "" };
   }
@@ -209,6 +220,7 @@ function assessAccount(a: SeverityAccountInput, now: number): AccountSeverity {
 function reasonOf(s: AccountSeverity, now: number): string {
   switch (s.state) {
     case "expired": return `${s.id} token expired`;
+    case "relogin": return `${s.id} needs re-login${typeof s.left === "number" ? ` (${formatRemaining(s.left)} left)` : ""}`;
     case "cooling": {
       const scope = s.scope ? `${s.scope} ` : "";
       return `${s.id} ${scope}cooling ${formatRemaining((s.until ?? now) - now)}`;
