@@ -18,9 +18,11 @@
 #   DEPLOY_QUIET_WAIT_SEC   how long to wait for no request in flight before a restart (default 600)
 #   DEPLOY_EXTRA_ENV_FILE   optional EnvironmentFile for the unit (default none)
 #
-# The host part (deploy/deploy-host.sh) runs under setsid and rolls back the
-# release symlink and the unit on any failure; this script follows its log and
-# exits 0 only on its "DEPLOY OK" line.
+# The host part (deploy/deploy-host.sh) runs under setsid. Once the supervisor
+# runs (`cc-router supervise`) and the unit is unchanged, it switches with
+# `systemctl --user reload`, which drops no request; otherwise it waits for a
+# quiet moment and restarts. It rolls back the release symlink and the unit on
+# any failure; this script follows its log and exits 0 only on "DEPLOY OK".
 set -euo pipefail
 
 mode=deploy
@@ -115,9 +117,13 @@ if test "$mode" = self-test; then
   (. "$work/params.env"; test "$SHA" = "$sha") || fail "params.env does not round-trip"
   sed -e "s|@NODE@|/usr/bin/node|g" -e "s|@ROOT@|/srv/cc-router|g" -e "s|@BIND_HOST@|127.0.0.1|g" \
       -e "s|@PORT@|3456|g" -e "s|@ENV_FILE_LINE@||g" deploy/cc-router.service.in > "$work/unit"
-  grep -q '^ExecStart=/usr/bin/node /srv/cc-router/current/dist/cli/index.js start --foreground --port 3456$' "$work/unit" \
-    || fail "unit ExecStart does not point at the current release"
-  grep -q '^WorkingDirectory=/srv/cc-router/current$' "$work/unit" || fail "unit WorkingDirectory"
+  grep -q '^ExecStart=/usr/bin/node /srv/cc-router/current/dist/cli/index.js supervise --port 3456$' "$work/unit" \
+    || fail "unit ExecStart does not run the supervisor from the current release"
+  grep -q '^WorkingDirectory=/srv/cc-router$' "$work/unit" || fail "unit WorkingDirectory must be the stable release root"
+  grep -q '^ExecReload=/bin/kill -HUP \$MAINPID$' "$work/unit" || fail "unit has no ExecReload"
+  grep -q '^KillMode=mixed$' "$work/unit" || fail "unit KillMode must be mixed (SIGTERM to the supervisor only)"
+  stop_sec=$(sed -n 's/^TimeoutStopSec=\([0-9]*\)$/\1/p' "$work/unit")
+  test "${stop_sec:-0}" -gt 600 || fail "unit TimeoutStopSec ($stop_sec) must exceed the 600 s drain limit"
   if grep -q '@[A-Z_]*@' "$work/unit"; then fail "unit has an unrendered placeholder"; fi
   mkdir -p "$work/unpack" && tar xzf "$work/release.tgz" -C "$work/unpack"
   test -x "$work/unpack/dist/cli/index.js" || fail "cli entry is not executable in the bundle"

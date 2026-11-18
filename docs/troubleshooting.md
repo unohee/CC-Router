@@ -286,6 +286,42 @@ what refused them (`byReason`). The dashboard's Failover card shows the same.
 
 ---
 
+## Did a deploy or restart drop my request? (handoff and drain)
+
+Under `cc-router supervise` (the unit `scripts/deploy-remote.sh` installs), a deploy is a reload: a new worker
+takes the socket and the old one finishes its streams. Health shows how the last one went:
+
+```bash
+curl -s http://<router>:3456/cc-router/health | jq '.supervisor, .worker'
+# supervisor.generation        how many workers have run; +1 per reload or crash
+# supervisor.lastHandoff       {finished, dropped, unsaved, drainMs, fromPid, toPid}
+# supervisor.failedReloads     reloads abandoned because the new worker did not come up
+# worker.frozen / draining     true only on a worker that is handing over or stopping
+```
+
+- `dropped > 0`: a stream outlived `drain.limitSeconds` (default 600) and was ended with `overloaded_error`;
+  Claude Code retried it. Raise the limit if long turns are common.
+- `unsaved > 0`: requests the old worker answered after it froze. They were served; only their usage
+  counts are missing from the history.
+- `failedReloads` went up: the new release did not start. The old worker is still serving the old build;
+  look for `did not start listening` in the log. The deploy script rolls the `current` symlink back.
+- Account changes (`cc-router accounts add|relogin`) answer 503 for the few seconds a worker is frozen;
+  retry.
+
+The log tells the story of a handoff:
+
+```
+[supervisor] SIGHUP: freezing worker 4121
+  handoff: state saved and frozen; a new worker is starting
+[supervisor] worker 4180 listening (generation 2); worker 4121 drains
+handoff — draining 3 request(s) in flight (limit 600s)
+  drained: 3 finished, 0 ended at the limit, 41s
+```
+
+A stop (SIGTERM) drains too: the port closes (new connections are refused, and clients retry), the
+requests in flight finish, then state is saved. `systemctl --user restart` therefore takes as long as the
+longest stream in flight; prefer `reload`.
+
 ## What is the demand governor doing?
 
 `routing.governor` is off by default. With `enabled: true` and

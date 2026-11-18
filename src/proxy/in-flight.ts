@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 export class InFlightCounter {
   private open = 0;
   private servedTotal = 0;
+  private readonly responses = new Set<ServerResponse>();
 
   /** Requests whose response has not closed yet. */
   get current(): number {
@@ -25,13 +26,20 @@ export class InFlightCounter {
   /** Counts `res` until it closes. Safe to call once per request. */
   track(res: ServerResponse): void {
     this.open++;
+    this.responses.add(res);
     let done = false;
     res.once("close", () => {
       if (done) return;
       done = true;
       this.open--;
       this.servedTotal++;
+      this.responses.delete(res);
     });
+  }
+
+  /** The responses still open, for a drain that has run out of time. */
+  openResponses(): ServerResponse[] {
+    return [...this.responses];
   }
 
   snapshot(): { requests: number; served: number } {

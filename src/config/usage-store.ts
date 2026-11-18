@@ -9,6 +9,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { persistenceFrozen } from "./persistence-gate.js";
 
 export type UsageRead =
   | { status: "missing" }
@@ -55,6 +56,10 @@ export function readUsageFile(path: string): UsageRead {
  * decides what a failure means (it keeps the data dirty and tries again).
  */
 export function writeUsageFile(path: string, file: object): { ok: true } | { ok: false; error: string } {
+  // A worker handing over leaves the history files to its successor. Reported
+  // as written: the data is not lost to a retry loop, it is counted as unsaved
+  // in the handoff report instead.
+  if (persistenceFrozen()) return { ok: true };
   const data = JSON.stringify(file);
   const tmp = `${path}.tmp`;
   try {
