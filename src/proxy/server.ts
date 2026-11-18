@@ -25,6 +25,7 @@ import { stats } from "./stats.js";
 import { readBuildInfo } from "./build-info.js";
 import { InFlightCounter, countsAsInFlight } from "./in-flight.js";
 import { drainServer, forceConnectionClose, resolveDrainLimitMs, trackConnections } from "./drain.js";
+import { armFirstByteTimer, guardedRelay, isFirstByteTimeout, resolveStreamGuard, StreamGuardCounters } from "./stream-guard.js";
 import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
 import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
@@ -929,6 +930,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // POST /v1/messages requests retried inside the router, by how they ended
       // and by what refused them. Totals since the router started.
       failover: failoverCounters.snapshot(),
+      // Upstreams that went quiet: streams failed over before their first byte,
+      // and streams ended retryably after a stall, a break or a cut.
+      streamGuard: streamGuardCounters.snapshot(streamGuard),
       // The one verdict both status surfaces draw. The 429 count reads the whole
       // buffer for the window, not the 50 rows above, which a busy pool fills in
       // under a minute.
@@ -1828,11 +1832,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     st.ended = true;
     failoverCounters.ended(outcome);
   };
+  // Stall and break guards for POST /v1/messages (stream-guard.ts).
+  const streamGuard = resolveStreamGuard(readConfig().streamGuard);
+  const streamGuardCounters = new StreamGuardCounters();
   const failoverProxy = createProxyMiddleware<Request, ServerResponse>({
     ...proxyOptions,
     selfHandleResponse: true,
     on: {
-      proxyReq: proxyOn.proxyReq,
+      proxyReq: (proxyReq, req, res, options) => {
+        proxyOn.proxyReq!(proxyReq, req, res, options);
+        // Headers of a stream come at once; one that sends none is stuck, and
+        // nothing has reached the client yet, so the next seat can answer it.
+        // A non-stream request's headers come only with its whole answer.
+        if ((req as Request).body?.stream === true) armFirstByteTimer(proxyReq, streamGuard.firstByteMs);
+      },
       proxyRes: (proxyRes, req, res) => {
         proxyOn.proxyRes!(proxyRes, req, res);
         void onFailoverResponse(proxyRes, req, res).catch(err => {
@@ -1851,9 +1864,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         if (!canRetry) return;
         r._ccFailover!.suppressErrorReply = false;
         const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "proxy_error", message: err.message } }));
+        const timedOut = isFirstByteTimeout(err);
+        if (timedOut) streamGuardCounters.firstByteTimeouts++;
         void failoverNext(r, res as ServerResponse, {
-          status: 502, headers: { "content-type": "application/json", "content-length": String(body.length) }, body,
-          reason: `connection error (${err.message.slice(0, 80)})`, kind: "connection",
+          status: timedOut ? 504 : 502, headers: { "content-type": "application/json", "content-length": String(body.length) }, body,
+          reason: timedOut ? err.message : `connection error (${err.message.slice(0, 80)})`, kind: timedOut ? "timeout" : "connection",
         });
       },
     },
@@ -1876,7 +1891,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     if (res.headersSent || res.destroyed || !req._ccFailover || !shouldFailover(proxyRes, req)) {
       if (res.destroyed) endFailover(req, "clientGone");
       else endFailover(req, (proxyRes.statusCode ?? 0) < 400 ? "recovered" : "refused");
-      relayResponse(proxyRes, res);
+      if (res.headersSent || res.destroyed) { relayResponse(proxyRes, res); return; }
+      const seat = req._ccAccount?.id ?? "?";
+      guardedRelay(proxyRes, res, {
+        idleMs: streamGuard.idleMs,
+        onEnd: outcome => {
+          if (outcome === "complete" || outcome === "clientGone") return;
+          streamGuardCounters.record(outcome);
+          stats.totalErrors++;
+          usageHistory.recordIncident({ ts: Date.now(), errors: 1 });
+          const what = outcome === "stalled" ? `went silent for ${Math.round(streamGuard.idleMs / 1000)}s`
+            : outcome === "broken" ? "broke mid-response" : "ended without message_stop";
+          logError(seat, 0, `upstream stream ${what}; ended with overloaded_error so the client retries`);
+        },
+      });
       return;
     }
     const status = proxyRes.statusCode ?? 0;

@@ -260,7 +260,12 @@ describe("in-router failover through a real router", () => {
       const res = await send({ body: { stream: true } });
       expect(res.status).toBe(200);
       const text = await res.text().catch(() => "");
-      expect(SSE.startsWith(text)).toBe(true);
+      // What reached the client is the upstream's prefix, then (since the
+      // stream guard) an overloaded_error the client retries, never a second
+      // copy of the answer from another account.
+      const [prefix] = text.split("\n\nevent: error");
+      expect(SSE.startsWith(prefix!)).toBe(true);
+      expect(text).toContain('"overloaded_error"');
       expect(seen).toHaveLength(1);
     });
   }, 30_000);
