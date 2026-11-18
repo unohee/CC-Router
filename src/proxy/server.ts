@@ -24,7 +24,7 @@ import { logRoute, logError, logStartup, logFallback, logOpenAIRoute, logSession
 import { stats } from "./stats.js";
 import { readBuildInfo } from "./build-info.js";
 import { InFlightCounter, countsAsInFlight } from "./in-flight.js";
-import { drainServer, resolveDrainLimitMs } from "./drain.js";
+import { drainServer, forceConnectionClose, resolveDrainLimitMs, trackConnections } from "./drain.js";
 import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
 import { isToWorker, type FromWorker, type SupervisorView } from "../daemon/handoff-protocol.js";
 import type { LogEntry } from "./stats.js";
@@ -803,6 +803,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const inFlight = new InFlightCounter();
   app.use((req, res, next) => {
     if (countsAsInFlight(req)) inFlight.track(res);
+    // Draining: serve this one, then let the client reconnect elsewhere.
+    if (draining) forceConnectionClose(res);
     next();
   });
   const proxyRequestTimeoutMs = getProxyRequestTimeoutMs();
@@ -2160,7 +2162,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     draining = true;
     ollamaQuota?.stop();
     console.log(chalk.yellow(`\n${why} — draining ${inFlight.current} request(s) in flight (limit ${Math.round(drainLimitMs / 1000)}s)`));
-    const result = await drainServer({ server: httpServer, inFlight, limitMs: drainLimitMs });
+    // A handoff also waits for kept-alive connections to close, so clients
+    // reconnect to the new worker rather than meet a reset socket. A stop has
+    // no successor to send them to: once nothing is in flight, it is done.
+    const result = await drainServer({
+      server: httpServer, inFlight, limitMs: drainLimitMs,
+      ...(persist ? {} : { connections: openConnections }),
+    });
     console.log(chalk.yellow(`  drained: ${result.finished} finished, ${result.dropped} ended at the limit, ${Math.round(result.durationMs / 1000)}s`));
     if (persist) {
       console.log(chalk.yellow("  saving tokens and state..."));
@@ -2234,4 +2242,5 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       openai: openAIAccounts.length,
     });
   });
+  const openConnections = trackConnections(httpServer);
 }

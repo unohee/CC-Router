@@ -8,6 +8,7 @@
  * Anthropic-format `overloaded_error`, which Claude Code retries, instead of a
  * dropped connection mid-answer.
  */
+import { Server as NetServer, type Socket } from "node:net";
 import type { Server, ServerResponse } from "node:http";
 import type { InFlightCounter } from "./in-flight.js";
 
@@ -61,6 +62,44 @@ export function endUnfinishedResponse(res: ServerResponse): "529" | "sse-error" 
   return "cut";
 }
 
+/**
+ * Open client connections, counted from the server's `connection` events.
+ * Install at startup; a drain waits for this to reach zero.
+ */
+export function trackConnections(server: Pick<Server, "on">): () => number {
+  const open = new Set<Socket>();
+  server.on("connection", (socket: Socket) => {
+    open.add(socket);
+    socket.once("close", () => open.delete(socket));
+  });
+  return () => open.size;
+}
+
+/**
+ * Makes this response close its connection when it is done, even if the proxy
+ * copies `connection: keep-alive` from upstream. While draining, a client that
+ * reuses a kept-alive socket is served on it once and then reconnects, to the
+ * worker that now holds the port, instead of finding the socket reset under it.
+ */
+export function forceConnectionClose(res: ServerResponse): void {
+  const set = res.setHeader.bind(res);
+  res.setHeader = ((name: string, value: number | string | readonly string[]) =>
+    set(name, name.toLowerCase() === "connection" ? "close" : value)) as typeof res.setHeader;
+  if (!res.headersSent) set("connection", "close");
+}
+
+/**
+ * Stops accepting new connections without touching the open ones. Node's
+ * http.Server#close also closes idle keep-alive sockets at once, and a client
+ * that picks one of those for its next request just as it closes gets
+ * ECONNRESET. net.Server#close only stops the listener; idle sockets close at
+ * keepAliveTimeout, the race the client's keep-alive handling already covers.
+ */
+export function stopAccepting(server: Pick<Server, "close">): void {
+  if (server instanceof NetServer) NetServer.prototype.close.call(server);
+  else server.close();
+}
+
 export interface DrainResult {
   /** Requests still open when the limit ran out, ended by endUnfinishedResponse. */
   dropped: number;
@@ -70,29 +109,32 @@ export interface DrainResult {
 }
 
 /**
- * Stops accepting, waits for in-flight requests up to `limitMs`, then ends
- * whatever is left. Idle keep-alive connections are closed as they appear, so
- * clients reconnect to whichever process now holds the socket.
+ * Stops accepting, then waits until no request is in flight and every client
+ * connection has closed (requests that arrive on a kept-alive connection
+ * meanwhile are served with `connection: close`), up to `limitMs`. Whatever is
+ * left is ended in a form the client retries.
  */
 export async function drainServer(opts: {
-  server: Pick<Server, "close" | "closeIdleConnections">;
+  server: Pick<Server, "close" | "closeAllConnections">;
   inFlight: InFlightCounter;
+  /** Open connections (trackConnections); without it only requests are waited for. */
+  connections?: () => number;
   limitMs: number;
   pollMs?: number;
 }): Promise<DrainResult> {
   const startedAt = Date.now();
   const servedBefore = opts.inFlight.served;
-  opts.server.close();
+  stopAccepting(opts.server);
   const poll = opts.pollMs ?? 100;
   const deadline = startedAt + opts.limitMs;
-  while (opts.inFlight.current > 0 && Date.now() < deadline) {
-    opts.server.closeIdleConnections?.();
+  const connections = opts.connections ?? (() => 0);
+  while ((opts.inFlight.current > 0 || connections() > 0) && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, poll));
   }
   let dropped = 0;
   for (const res of opts.inFlight.openResponses()) {
     if (endUnfinishedResponse(res) !== "already-ended") dropped++;
   }
-  opts.server.closeIdleConnections?.();
+  opts.server.closeAllConnections?.();
   return { dropped, finished: opts.inFlight.served - servedBefore, durationMs: Date.now() - startedAt };
 }
