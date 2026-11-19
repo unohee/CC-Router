@@ -15,7 +15,7 @@ import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { writeEndpoint, removeEndpoint } from "../config/endpoint.js";
 import { needsRefresh, refreshAccountToken, refreshAfterRejection, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getBalanceRules, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -500,6 +500,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const paceInForce = () => governedWeeklyPace(weeklyPaceCfg ?? null, governor.applied);
   const sessionRouter = new SessionRouter({
     softCapUtil,
+    balance: getBalanceRules(),
     weeklyPace: paceInForce,
     onReassign: ({ sessionId, from, to, reason }) => {
       usageHistory.recordPlacement(reason);

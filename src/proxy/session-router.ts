@@ -59,6 +59,15 @@ export interface SessionRouterOptions {
    * pacing on and off without a restart.
    */
   weeklyPace?: WeeklyPaceConfig | (() => WeeklyPaceConfig | null | undefined);
+  /**
+   * How seats are judged once `softCapUtil` or `weeklyPace` is set. True (the
+   * default) uses the balance rules: the cap filters before pace, pace is a
+   * ratio that holds up to the reset, the two windows are paced separately,
+   * and new sessions rank on the weekly window's headroom per hour to its
+   * reset. False keeps the rules as they were before them
+   * (`routing.balance.legacy`). With neither key set this has no effect.
+   */
+  balance?: boolean;
   /** Fired when an existing session is moved to a different target. */
   onReassign?: (info: { sessionId: string; from: SessionTarget; to: SessionTarget; reason: ReassignReason }) => void;
   /** Fired whenever the assignment set changes, so it can be persisted. */
@@ -84,6 +93,14 @@ const PACE_TIE = 0.02;
 /** Floor on time-to-reset, so a window seconds from rolling over does not
  *  score as unbounded capacity. */
 const MIN_TTR_MIN = 5;
+/** Balance rules: floor on the weekly window's time-to-reset in the score.
+ *  The last hour of a week still ranks high (its quota is about to be lost),
+ *  but no longer as a spike that takes every new session. */
+const BALANCE_MIN_TTR_MIN = 60;
+/** Balance rules: when every seat is ahead of its weekly pace, seats within
+ *  this much of the best pace ratio count as tied. */
+const PACE_RATIO_TIE = 0.05;
+const WEEK_SEC = 7 * 24 * 60 * 60;
 /** Safety valve: a router that never forgets would grow without bound. */
 const MAX_TRACKED_SESSIONS = 10_000;
 
@@ -116,6 +133,7 @@ export class SessionRouter {
   private readonly now: () => number;
   private readonly softCapUtil: number | null;
   private readonly paceSource: () => WeeklyPaceConfig | null;
+  private readonly balance: boolean;
   private readonly onReassign?: SessionRouterOptions["onReassign"];
   private readonly onAssignmentsChanged?: SessionRouterOptions["onAssignmentsChanged"];
 
@@ -128,6 +146,7 @@ export class SessionRouter {
     this.paceSource = typeof pace === "function" ? () => pace() ?? null : () => pace ?? null;
     this.onReassign = opts.onReassign;
     this.onAssignmentsChanged = opts.onAssignmentsChanged;
+    this.balance = opts.balance !== false;
   }
 
   /**
@@ -359,8 +378,53 @@ export class SessionRouter {
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): boolean {
+    const onPace = this.balanced
+      ? this.paceRatios(c, utilOf).onPace
+      : (this.paceOf(c, utilOf)?.ahead ?? 1) <= 0;
     return c.provider === from.provider && !sameTarget(c, from) && isUsable(c)
-      && !this.overSoftCap(c, utilOf) && (this.paceOf(c, utilOf)?.ahead ?? 1) <= 0;
+      && !this.overSoftCap(c, utilOf) && onPace;
+  }
+
+  /** Whether the balance rules are in force: on, and some rule configured. */
+  private get balanced(): boolean {
+    return this.balance && (this.softCapUtil !== null || this.weeklyPace !== null);
+  }
+
+  /**
+   * Balance rules: a window's pace as a ratio,
+   *
+   *     r = share of the quota left / share of the window left
+   *
+   * 1 is an even spend; below 1 the seat is spending faster than the window
+   * allows, above 1 it has quota to spare. Unlike the difference against a
+   * line clamped at 1, the ratio does not go blind near the reset: a seat at
+   * 98% with a sixth of its week left reads r = 0.12, where the old line read
+   * it as on pace. Null when the window's reset is unknown or past (no pace).
+   */
+  private windowRatio(w: { util: number; resetAtSec?: number } | undefined, windowSec: number): number | null {
+    const nowSec = this.now() / 1000;
+    if (!w || !w.resetAtSec || w.resetAtSec <= nowSec || !Number.isFinite(w.util)) return null;
+    const timeLeft = Math.min(1, (w.resetAtSec - nowSec) / windowSec);
+    return Math.max(0, 1 - w.util) / Math.max(timeLeft, 1e-6);
+  }
+
+  /**
+   * Balance rules: each window paced on its own. A seat is ahead on a window
+   * when `r < 1 - slack` (the slack of that window); the weekly and five-hour
+   * figures are never compared with each other, because they are shares of
+   * different quotas over different spans.
+   */
+  private paceRatios(
+    t: SessionTarget,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): { week: number | null; five: number | null; weekAhead: boolean; fiveAhead: boolean; onPace: boolean } {
+    const cfg = this.weeklyPace;
+    const m = this.metricsOf(t, utilOf);
+    const week = this.windowRatio(m.weekly, WEEK_SEC);
+    const five = this.windowRatio(m.fiveHour, FIVE_HOUR_SEC);
+    const weekAhead = !!cfg && week !== null && week < 1 - cfg.slack;
+    const fiveAhead = !!cfg && cfg.fiveHour && five !== null && five < 1 - cfg.fiveHourSlack;
+    return { week, five, weekAhead, fiveAhead, onPace: !weekAhead && !fiveAhead };
   }
 
   /**
@@ -375,10 +439,21 @@ export class SessionRouter {
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): boolean {
-    const pace = this.paceOf(target, utilOf);
-    if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;
     const m = this.metricsOf(target, utilOf);
     const nowSec = this.now() / 1000;
+    if (this.balanced) {
+      // Only the weekly window moves a pin: a five-hour burst passes within the
+      // hour, and moving on it would pay a cache rewrite to chase a window that
+      // is about to refill (and could bounce the session back and forth).
+      const cfg = this.weeklyPace;
+      const week = this.windowRatio(m.weekly, WEEK_SEC);
+      if (!cfg || week === null || week >= 1 - cfg.slack - cfg.migrateAhead) return false;
+      const resetAt = m.weekly?.resetAtSec;
+      if (resetAt && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
+      return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf));
+    }
+    const pace = this.paceOf(target, utilOf);
+    if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;
     // Moving costs a cache rewrite; skip it when either window is about to refill.
     for (const resetAt of [m.weekly?.resetAtSec, this.weeklyPace!.fiveHour ? m.fiveHour?.resetAtSec : undefined]) {
       if (resetAt && resetAt > nowSec && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
@@ -445,6 +520,7 @@ export class SessionRouter {
     usable: SessionTarget[],
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): SessionTarget {
+    if (this.balanced) return this.placeBalanced(usable, utilOf);
     usable = this.paceFilter(usable, utilOf);
     const cap = this.softCapUtil;
     const utilOnly = (t: SessionTarget) => this.metricsOf(t, utilOf).util;
@@ -467,6 +543,72 @@ export class SessionRouter {
     // Relative tolerance: identical inputs must tie, and float noise must not
     // break the rotation between them.
     const tied = preferred.filter((_, i) => best - scores[i] <= Math.abs(best) * 1e-9);
+    const chosen = tied[this.cursor % tied.length];
+    this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
+    return chosen;
+  }
+
+  /**
+   * Placement under the balance rules.
+   *
+   * 1. The soft cap filters first: a seat past it takes a new session only
+   *    when every usable seat is (then `leastLoaded`, as before). Pace used to
+   *    run first and could narrow the choice to one seat that was over the cap.
+   * 2. With pacing on, seats on pace on both windows go first; then seats
+   *    ahead only on the five-hour window (it refills within hours); then the
+   *    seats closest to their weekly pace.
+   * 3. Among those, the most weekly headroom per hour to the weekly reset:
+   *
+   *        (cap - weeklyUtil) / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil) / (1 + liveSessions)
+   *
+   *    The soft cap and the score now read the same window: a seat at 97% of
+   *    its week used to score on an idle five-hour window as if it had 98% to
+   *    give. Quota a seat cannot spend before its weekly reset is lost, so the
+   *    seat that must spend fastest to use it goes first. The five-hour
+   *    headroom scales that down: a seat near its five-hour limit is stopped
+   *    by it first, whatever its week holds (an unopened five-hour window
+   *    counts as full). Tried in the balance simulator against a cut-off at
+   *    30% and 50% of the window: proportional served the five-hour-bound
+   *    pool best. A seat with no known weekly window is taken to have a full
+   *    week ahead.
+   */
+  private placeBalanced(
+    usable: SessionTarget[],
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): SessionTarget {
+    const cap = this.softCapUtil ?? 1;
+    const utilOnly = (t: SessionTarget) => this.metricsOf(t, utilOf).util;
+    let pool = usable.filter(t => !this.overSoftCap(t, utilOf));
+    if (pool.length === 0) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);
+
+    if (this.weeklyPace && pool.length > 1) {
+      const paces = pool.map(t => this.paceRatios(t, utilOf));
+      const onPace = pool.filter((_, i) => paces[i].onPace);
+      const weekOk = pool.filter((_, i) => !paces[i].weekAhead);
+      if (onPace.length > 0) pool = onPace;
+      else if (weekOk.length > 0) pool = weekOk;
+      else {
+        const best = Math.max(...paces.map(p => p.week ?? 1));
+        pool = pool.filter((_, i) => (paces[i].week ?? 1) >= best - PACE_RATIO_TIE);
+      }
+    }
+
+    const load = this.loadOf(pool);
+    const nowSec = this.now() / 1000;
+    const score = (t: SessionTarget): number => {
+      const m = this.metricsOf(t, utilOf);
+      const week = m.weekly && m.weekly.resetAtSec && m.weekly.resetAtSec > nowSec ? m.weekly : null;
+      const util = week ? week.util : m.weekly?.util ?? 0;
+      const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
+      const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
+      const fiveRoom = five ? Math.min(1, Math.max(0, cap - five.util)) : 1;
+      return Math.max(0, cap - util) / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
+        / (1 + (load.get(targetKey(t)) ?? 0));
+    };
+
+    const scores = pool.map(score);
+    const best = Math.max(...scores);
+    const tied = pool.filter((_, i) => best - scores[i] <= Math.abs(best) * 1e-9);
     const chosen = tied[this.cursor % tied.length];
     this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
     return chosen;

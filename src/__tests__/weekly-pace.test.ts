@@ -131,9 +131,11 @@ describe("five-hour pacing", () => {
     expect(picked.size).toBe(2);
   });
 
-  it("moves a pin whose 5-hour window is far ahead, unless that window resets within 15 minutes", () => {
+  it("legacy rules: move a pin whose 5-hour window is far ahead, unless that window resets within 15 minutes", () => {
+    // Under the balance rules only the weekly window moves a pin (see
+    // balance-placement.test.ts): a five-hour burst refills within hours.
     const moves: string[] = [];
-    const r = new SessionRouter({ now: () => NOW, weeklyPace: cfg, onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`) });
+    const r = new SessionRouter({ now: () => NOW, weeklyPace: cfg, balance: false, onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`) });
     const t = [T("a"), T("b")];
     r.resolve("s", t, x => x.accountId === "a", metrics({ a: five(0.1, 4), b: five(0.1, 4) }));
     // a nearly full with a fresh window; b has room: leave.
