@@ -30,6 +30,12 @@ export interface SeatSize {
   tokensPerWeek: number | null;
   /** Reading pairs the measurement used (0 when not measured). */
   samples: number;
+  /** Hours between the oldest and newest reading the pairs span (0 when not measured). */
+  spanHours: number;
+  /** Relative error bound of tokensPerWeek: headers round utilization to 0.01
+   *  and the moves telescope, so the estimate is off by at most 0.01 / moved.
+   *  Null when not measured. */
+  errorBand: number | null;
 }
 
 export interface SeatSizeOptions {
@@ -58,6 +64,8 @@ export const DEFAULT_SEAT_SIZE_OPTIONS: SeatSizeOptions = {
 /** Relative weights outside this range are ignored as typos. */
 const MIN_WEIGHT = 0.05;
 const MAX_WEIGHT = 50;
+/** Upstream reports utilization to two places. */
+const UTIL_ROUNDING = 0.01;
 
 /**
  * Cost-weighted tokens per full 7-day window for one seat, from its readings,
@@ -67,9 +75,10 @@ export function measureWeeklySize(
   readings: ReadonlyArray<QuotaReading>,
   now: number,
   opts: SeatSizeOptions = DEFAULT_SEAT_SIZE_OPTIONS,
-): { tokensPerWeek: number | null; samples: number } {
+): { tokensPerWeek: number | null; samples: number; spanHours: number; errorBand: number | null } {
   const sorted = readings.filter(r => r.sampledAt >= now - opts.maxAgeMs).sort((a, b) => a.sampledAt - b.sampledAt);
   let samples = 0, tokens = 0, moved = 0;
+  let first: number | null = null, last: number | null = null;
   for (let i = 1; i < sorted.length; i++) {
     const a = sorted[i - 1], b = sorted[i];
     if (a.spentAt === null || b.spentAt === null || b.spentAt < a.spentAt) continue;
@@ -82,9 +91,12 @@ export function measureWeeklySize(
     samples++;
     tokens += spent;
     moved += du;
+    if (first === null) first = a.sampledAt;
+    last = b.sampledAt;
   }
-  if (samples < opts.minSamples || moved < opts.minMoved || tokens <= 0) return { tokensPerWeek: null, samples };
-  return { tokensPerWeek: tokens / moved, samples };
+  const spanHours = first !== null && last !== null ? (last - first) / 3_600_000 : 0;
+  if (samples < opts.minSamples || moved < opts.minMoved || tokens <= 0) return { tokensPerWeek: null, samples, spanHours, errorBand: null };
+  return { tokensPerWeek: tokens / moved, samples, spanHours, errorBand: UTIL_ROUNDING / moved };
 }
 
 function median(xs: number[]): number {
@@ -120,7 +132,7 @@ export function seatSizes(
     const list = byId.get(r.accountId);
     if (list) list.push(r); else byId.set(r.accountId, [r]);
   }
-  const measured = new Map<string, { tokensPerWeek: number | null; samples: number }>();
+  const measured = new Map<string, ReturnType<typeof measureWeeklySize>>();
   for (const id of ids) measured.set(id, measureWeeklySize(byId.get(id) ?? [], now, opts));
   const known = [...measured.values()].map(m => m.tokensPerWeek).filter((x): x is number => x !== null);
   const reference = known.length > 0 ? median(known) : null;
@@ -133,13 +145,13 @@ export function seatSizes(
       // Within the measurement's error a seat is the typical size: a ratio
       // that is mostly rounding noise must not reorder equal seats.
       const relative = Math.max(ratio, 1 / ratio) < opts.sameSize ? 1 : ratio;
-      out.set(id, { relative, source: "measured", tokensPerWeek: m.tokensPerWeek, samples: m.samples });
+      out.set(id, { relative, source: "measured", tokensPerWeek: m.tokensPerWeek, samples: m.samples, spanHours: m.spanHours, errorBand: m.errorBand });
       continue;
     }
     const w = weightOf(weights, id);
     out.set(id, w !== null
-      ? { relative: w, source: "weight", tokensPerWeek: null, samples: m.samples }
-      : { relative: 1, source: "equal", tokensPerWeek: null, samples: m.samples });
+      ? { relative: w, source: "weight", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null }
+      : { relative: 1, source: "equal", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null });
   }
   return out;
 }

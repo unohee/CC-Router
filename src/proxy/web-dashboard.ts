@@ -538,6 +538,10 @@ const SCRIPT = String.raw`
       return { ok: false, note: "not measured yet", why: "This account has not served a request since the router started, and usage is read from response headers." };
     }
     var util = rl[key + "Util"] || 0, reset = rl[key + "Reset"] || 0;
+    // The last response said nothing about its 5-hour window (health.accounts[].rateLimits.fiveHourReported): not a reading of 0.
+    if (key === "fiveHour" && rl.fiveHourReported === false) {
+      return { ok: false, note: "not reported", why: "The last response from upstream carried no 5-hour header for this account: its plan may have no 5-hour window. This says what was reported, not what the plan is." };
+    }
     // Upstream names a window only for accounts that have one; an account whose responses never
     // mention a 7-day window (a Teams seat has the 5-hour limit alone) has nothing to read there.
     if (key === "sevenDay" && reset <= 0 && util <= 0 && a.weeklyWindow === "not-reported") {
@@ -649,7 +653,7 @@ const SCRIPT = String.raw`
   function validBalanceSeat(x) {
     return !!x && typeof x.id === "string" && isNum(x.rank) && isNum(x.load)
       && (x.weekRatio === null || isNum(x.weekRatio)) && (x.fiveHourRatio === null || isNum(x.fiveHourRatio))
-      && (x.surplusPerHour === null || isNum(x.surplusPerHour)) && (x.remainingTokens === null || isNum(x.remainingTokens))
+      && (x.paceDeficitPerHour === null || isNum(x.paceDeficitPerHour)) && (x.remainingTokens === null || isNum(x.remainingTokens))
       && !!x.size && isNum(x.size.relative) && typeof x.size.source === "string";
   }
   function balanceSeat(id) {
@@ -666,19 +670,26 @@ const SCRIPT = String.raw`
       td.textContent = b && b.rules === "legacy" ? "legacy rules" : "—";
       return td;
     }
-    var head = el("span", "lh", (bs.placeable ? "#" + bs.rank : bs.overCap ? "over cap" : bs.usable ? "waits (#" + bs.rank + ")" : "unavailable"));
-    head.title = bs.placeable ? "Where a new session would be placed now; 1 is first."
+    var TIERS = { "on-pace": "on pace on both windows", "week-ok": "ahead on the 5-hour window only", "behind": "behind pace on the week (spending it faster than it elapses)", "over-cap": "at or past the soft cap" };
+    var tier = typeof bs.tier === "string" && TIERS[bs.tier] ? " · " + bs.tier : "";
+    var head = el("span", "lh", (bs.placeable ? "#" + bs.rank : bs.overCap ? "over cap" : bs.usable ? "waits (#" + bs.rank + ")" : "unavailable") + tier);
+    head.title = (bs.placeable ? "Where a new session would be placed now; 1 is first."
       : bs.overCap ? "At or past the soft cap: takes a new session only when every seat is."
       : bs.usable ? "Usable, but ahead of pace while other seats are on pace: new sessions go there first."
-      : "Cannot take a request now.";
+      : "Cannot take a request now.")
+      + (tier ? " Tier: " + TIERS[bs.tier] + "." : "")
+      + (isNum(bs.score) ? " Score " + bs.score.toExponential(2) + ": what the rank orders by." : "");
     td.appendChild(head);
-    var size = bs.size.source === "measured" ? "size " + bs.size.relative.toFixed(2) + "x"
+    var size = bs.size.source === "measured" ? "size " + bs.size.relative.toFixed(2) + "x" + (isNum(bs.size.errorBand) ? " ±" + Math.round(bs.size.errorBand * 100) + "%" : "")
       : bs.size.source === "weight" ? "weight " + bs.size.relative.toFixed(2) + "x" : "size unknown";
-    var sub = el("span", "lh", size + (bs.surplusPerHour === null ? "" : " · " + (bs.surplusPerHour >= 0 ? "+" : "−") + big(Math.abs(bs.surplusPerHour)) + "/h"));
-    sub.title = (bs.size.source === "measured" ? "Weekly quota against the median seat, measured from " + bs.size.samples + " hourly readings."
+    // The deficit is shown from the seat's side: "short" when it is behind pace, "spare" when quota would be left at the reset.
+    var deficit = bs.paceDeficitPerHour === null ? "" : " · " + (bs.paceDeficitPerHour > 0 ? "short " : "spare ") + big(Math.abs(bs.paceDeficitPerHour)) + "/h";
+    var sub = el("span", "lh", size + deficit);
+    var span = isNum(bs.size.spanHours) && bs.size.spanHours > 0 ? " over " + (bs.size.spanHours >= 48 ? Math.round(bs.size.spanHours / 24) + " days" : Math.round(bs.size.spanHours) + " hours") : "";
+    sub.title = (bs.size.source === "measured" ? "Weekly quota against the median seat, measured from " + bs.size.samples + " pairs of hourly readings" + span + (isNum(bs.size.errorBand) ? ", within ±" + Math.round(bs.size.errorBand * 100) + "% (the headers round utilization to 0.01)." : ".")
       : bs.size.source === "weight" ? "routing.balance.capacityWeight; the quota history cannot measure this seat yet."
       : "Taken as a typical seat until the quota history can measure it.")
-      + (bs.surplusPerHour === null ? "" : " Surplus: cost-weighted tokens per hour it could add and still reach its reset at an even spend; negative means it is spending faster than that.");
+      + (bs.paceDeficitPerHour === null ? "" : " Pace deficit: cost-weighted tokens per hour an even spend to the reset falls short of the pace line. Short: it must spend that much less than the line to last; spare: that much is lost at the reset unless something spends it.");
     td.appendChild(sub);
     return td;
   }

@@ -439,6 +439,31 @@ on pace, and a seat over the soft cap waits for every seat to be.
   decision is reproducible offline: `npx vitest run src/__tests__/balance-sim.test.ts` scores both
   against the frozen baseline in `docs/balance/baseline.json`.
 
+### Every seat is behind pace
+
+`balance.seats[].tier` says which tier placement put each seat in: `on-pace` (both windows),
+`week-ok` (ahead on the 5-hour window only), `behind` (ahead on the week: it has spent a larger
+share of its quota than of its week has passed, so at this rate it runs dry before the reset) and
+`over-cap` (at or past the soft cap, not placed at all). When every seat under the cap is
+`behind`, there is no on-pace seat to prefer, so all of them compete on the balance `score` with
+the weekly pace ratio as a factor (the score is multiplied by `weekRatio`): the seat least behind, with the
+most quota left per hour to its reset, goes first, and nothing waits. This is the normal state of a
+pool whose users send more than the seats have, and the 5-hour window keeps shaping the choice
+inside it (`fiveHourRatio`, when the seat reports one: `fiveHourReported` is false for a plan that
+has no 5-hour window, and its ratio is then null, not 0).
+
+What to read: `paceDeficitPerHour` is how far behind, in cost-weighted tokens per hour: positive is
+the amount a seat must spend under an even spend over the whole week to last to its reset; negative
+means it has that much to spare, quota that is lost at the reset unless something spends it. The
+`outcomes` block says what came of it over the last week: `unusedAtReset` is the share of the quota
+a seat still had when its week reset (money left on the table), `strandedMinutes` the time a seat
+sat at the cap while another seat under the cap had week left (sessions moved or waited although
+the pool had room). A pool where every seat is behind and `unusedAtReset` is near 0 for all of them
+is simply full: add a seat, or spend less. A pool where one seat is behind and another leaves
+quota unused is the imbalance the balance rules exist to remove; check that seat's `size.source`
+(an `equal` seat the history cannot measure yet is taken as typical, which understates a Max 20x)
+and its `size.errorBand`.
+
 ---
 
 ## How do I go back to using Claude Code normally?

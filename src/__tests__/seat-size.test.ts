@@ -39,10 +39,10 @@ describe("measureWeeklySize", () => {
   });
 
   it("is null until enough pairs have moved enough", () => {
-    expect(measureWeeklySize(climbing("a", 0.1, 2, 4_500_000), NOW)).toEqual({ tokensPerWeek: null, samples: 2 });
+    expect(measureWeeklySize(climbing("a", 0.1, 2, 4_500_000), NOW)).toMatchObject({ tokensPerWeek: null, samples: 2, errorBand: null });
     // Ten pairs but only 0.05 moved: the 0.01 header rounding could be a fifth of it.
     const slow = rows("a", Array.from({ length: 11 }, (_, i) => [Math.round((0.1 + 0.005 * i) * 1000) / 1000, i * 1_000_000]));
-    expect(measureWeeklySize(slow, NOW)).toEqual({ tokensPerWeek: null, samples: 10 });
+    expect(measureWeeklySize(slow, NOW)).toMatchObject({ tokensPerWeek: null, samples: 10, errorBand: null });
     expect(DEFAULT_SEAT_SIZE_OPTIONS.minMoved).toBeGreaterThanOrEqual(0.08);
   });
 
@@ -95,8 +95,8 @@ describe("seatSizes", () => {
 
   it("with nothing measured, weights stand alone against 1", () => {
     const s = seatSizes(["a", "b"], [], NOW, { a: 2 });
-    expect(s.get("a")).toEqual({ relative: 2, source: "weight", tokensPerWeek: null, samples: 0 });
-    expect(s.get("b")).toEqual({ relative: 1, source: "equal", tokensPerWeek: null, samples: 0 });
+    expect(s.get("a")).toEqual({ relative: 2, source: "weight", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null });
+    expect(s.get("b")).toEqual({ relative: 1, source: "equal", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null });
   });
 
   it("ignores weights that are out of range or inherited", () => {
@@ -117,5 +117,20 @@ describe("routing.balance.capacityWeight", () => {
     const src = readFileSync(fileURLToPath(new URL("../proxy/server.ts", import.meta.url)), "utf8");
     expect(src).toMatch(/seatSizes\(pool\.getAll\(\)\.map\(a => a\.id\), quotaHistory\.readings\(\), now, getCapacityWeights\(\)\)/);
     expect(src).toMatch(/sizeOf: id => currentSeatSizes\(\)\.get\(id\)\?\.relative \?\? 1/);
+  });
+});
+
+describe("the measurement's history span and error band", () => {
+  it("report how much history the pairs cover and how far off the estimate can be", () => {
+    // Readings an hour apart, utilization climbing a point a reading: 12 pairs over 12 hours, moved 0.12.
+    const readings = climbing("a", 0.03, 12, 1_000_000);
+    const m = measureWeeklySize(readings, NOW);
+    expect(m.samples).toBe(12);
+    expect(m.spanHours).toBeCloseTo(12, 6);
+    // 0.01 of rounding over 0.12 moved: within about 8%.
+    expect(m.errorBand).toBeCloseTo(0.01 / 0.12, 6);
+    expect(m.tokensPerWeek).not.toBeNull();
+    const s = seatSizes(["a"], readings, NOW);
+    expect(s.get("a")).toMatchObject({ source: "measured", spanHours: m.spanHours, errorBand: m.errorBand });
   });
 });

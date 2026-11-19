@@ -13,7 +13,8 @@ import { emptyPlacementCounts } from "../proxy/seat-metrics.js";
 import type { SeatSize } from "../proxy/seat-size.js";
 import type { Account } from "../proxy/types.js";
 import { accountLine } from "../ui/status-frame.js";
-import { computeSeverity } from "../proxy/severity.js";
+import { computeSeverity, windowReading } from "../proxy/severity.js";
+import { extractRateLimits } from "../proxy/rate-limit-headers.js";
 import { waitForListening } from "./helpers/router-process.js";
 
 // The balance block of health, and the two dashboards that read it. Its
@@ -100,9 +101,9 @@ const NO_OUTCOMES = () => ({ resets: 0, unusedAtReset: null, strandedMinutes: 0 
 
 describe("balanceView", () => {
   const sizes = new Map<string, SeatSize>(IDS.map(id => [id, id === "kyte"
-    ? { relative: 2.03, source: "measured", tokensPerWeek: 920e6, samples: 8 }
-    : id === "vega" ? { relative: 1, source: "measured", tokensPerWeek: 450e6, samples: 12 }
-      : { relative: 1, source: "equal", tokensPerWeek: null, samples: 1 }]));
+    ? { relative: 2.03, source: "measured", tokensPerWeek: 920e6, samples: 8, spanHours: 52.25, errorBand: 0.0417 }
+    : id === "vega" ? { relative: 1, source: "measured", tokensPerWeek: 450e6, samples: 12, spanHours: 100, errorBand: 0.02 }
+      : { relative: 1, source: "equal", tokensPerWeek: null, samples: 1, spanHours: 3, errorBand: null }]));
   const placements = { lastHour: emptyPlacementCounts(), lastDay: { ...emptyPlacementCounts(), placed: 40, "soft-cap": 3 } };
 
   it("joins the router's explanation, the seat sizes and the placement counts", () => {
@@ -111,20 +112,73 @@ describe("balanceView", () => {
     expect(v.rules).toBe("balance");
     expect(v.placements.lastDay.placed).toBe(40);
     const kyte = v.seats.find(s => s.id === "kyte")!;
-    expect(kyte).toMatchObject({ rank: 1, placeable: true, size: { relative: 2.03, source: "measured", samples: 8 } });
+    expect(kyte).toMatchObject({ rank: 1, placeable: true, size: { relative: 2.03, source: "measured", samples: 8, spanHours: 52.3, errorBand: 0.042 } });
     expect(kyte.remainingTokens).toBe(Math.round(0.81 * 920e6));
-    // Surplus: remaining over hours left, against a week's worth per hour.
-    // kyte has 81% left with 88% of the week left: a little under an even spend.
-    expect(kyte.surplusPerHour).toBe(Math.round(0.81 * 920e6 / 147.5 - 920e6 / 168));
-    expect(kyte.surplusPerHour).toBeLessThan(0);
-    expect(kyte.surplusPerHour).toBeGreaterThan(-0.1 * 920e6 / 168);
-    // vega has 47% left with 59% of the week left: further behind.
+    // Pace deficit: a week's worth per hour, less remaining over hours left.
+    // kyte has 81% left with 88% of the week left: a little behind an even spend, so a small deficit.
+    expect(kyte.paceDeficitPerHour).toBe(Math.round(920e6 / 168 - 0.81 * 920e6 / 147.5));
+    expect(kyte.paceDeficitPerHour).toBeGreaterThan(0);
+    expect(kyte.paceDeficitPerHour).toBeLessThan(0.1 * 920e6 / 168);
+    // vega has 47% left with 59% of the week left: further behind, a larger deficit.
     const vega = v.seats.find(s => s.id === "vega")!;
-    expect(vega.surplusPerHour).toBeLessThan(kyte.surplusPerHour!);
+    expect(vega.paceDeficitPerHour).toBeGreaterThan(kyte.paceDeficitPerHour!);
     const heewon = v.seats.find(s => s.id === "heewon")!;
     expect(heewon.remainingTokens).toBeNull();
-    expect(heewon.surplusPerHour).toBeNull();
+    expect(heewon.paceDeficitPerHour).toBeNull();
     expect(heewon.size.source).toBe("equal");
+  });
+
+  it("carries the score the rank orders by, the tier, and whether the seat reports a 5-hour window", () => {
+    const r = new SessionRouter({ now: () => NOW, ...LIVE });
+    const x = r.explain(IDS.map(T), () => true, metrics)!;
+    const v = balanceView(IDS.map(acct), x, sizes, placements, NOW, NO_OUTCOMES);
+    const seat = (id: string) => v.seats.find(s => s.id === id)!;
+    // rigel is over the cap; kyte is on pace; the rest are ahead on the week.
+    expect(seat("rigel").tier).toBe("over-cap");
+    expect(seat("kyte").tier).toBe("on-pace");
+    expect(["lyra", "heewon", "vega"].map(id => seat(id).tier)).toEqual(["behind", "behind", "behind"]);
+    expect(x.get("anthropic:kyte")!.tier).toBe("on-pace");
+    // The score is the router's to four significant digits (scores run from 1e-4 down to 1e-7, so
+    // decimal places would zero them), and ranks agree with it within a set.
+    const raw = (id: string) => x.get(`anthropic:${id}`)!.score;
+    expect(seat("kyte").score).toBeCloseTo(raw("kyte"), 7);
+    expect(seat("kyte").score).toBe(Number(raw("kyte").toPrecision(4)));
+    // Over the cap the score is 0 by construction (cap - util); every other seat keeps a distinct, non-zero one.
+    expect(seat("rigel").score).toBe(0);
+    const under = IDS.filter(id => id !== "rigel");
+    for (const id of under) expect(seat(id).score).toBeGreaterThan(0);
+    expect(new Set(under.map(id => seat(id).score)).size).toBe(under.length);
+    expect(raw("heewon")).not.toBe(raw("vega"));
+    const ranked = [...v.seats].sort((a, b) => a.rank - b.rank);
+    expect(ranked[0]!.id).toBe("kyte");
+    for (let i = 1; i < ranked.length; i++) {
+      if (ranked[i]!.placeable === ranked[i - 1]!.placeable && ranked[i]!.usable === ranked[i - 1]!.usable) expect(ranked[i]!.score).toBeLessThanOrEqual(ranked[i - 1]!.score);
+    }
+    // kyte reports no 5-hour window (its reading has none): false, and the ratio is null, not 0.
+    expect(seat("kyte").fiveHourReported).toBe(false);
+    expect(seat("kyte").fiveHourRatio).toBeNull();
+    expect(seat("vega").fiveHourReported).toBe(true);
+    // The explicit flag from extractRateLimits wins over the inference from the numbers.
+    const flagged = IDS.map(id => ({ ...acct(id), rateLimits: { ...acct(id).rateLimits, fiveHourReported: id === "kyte" } }));
+    const v2 = balanceView(flagged, x, sizes, placements, NOW, NO_OUTCOMES);
+    expect(v2.seats.find(s => s.id === "kyte")!.fiveHourReported).toBe(true);
+    expect(v2.seats.find(s => s.id === "vega")!.fiveHourReported).toBe(false);
+    // A seat never read has no opinion.
+    const unread = IDS.map(id => ({ ...acct(id), rateLimits: { ...acct(id).rateLimits, lastUpdated: 0 } }));
+    expect(balanceView(unread, x, sizes, placements, NOW, NO_OUTCOMES).seats.every(s => s.fiveHourReported === null)).toBe(true);
+  });
+
+  it("week-ok is a seat ahead on the 5-hour window only, and a seat with no weekly reading is on pace", () => {
+    const r = new SessionRouter({ now: () => NOW, ...LIVE });
+    const pool: Record<string, TargetMetrics> = {
+      burst: seat({ util: 0.3, hoursLeft: 120 }, { util: 0.9, hoursLeft: 4.5 }),
+      fresh: { util: 0, resetAtSec: 0, weekly: null, fiveHour: null } as unknown as TargetMetrics,
+      even: seat({ util: 0.3, hoursLeft: 120 }, { util: 0.1, hoursLeft: 4 }),
+    };
+    const x = r.explain(Object.keys(pool).map(T), () => true, t => pool[t.accountId]!)!;
+    expect(x.get("anthropic:burst")!.tier).toBe("week-ok");
+    expect(x.get("anthropic:fresh")!.tier).toBe("on-pace");
+    expect(x.get("anthropic:even")!.tier).toBe("on-pace");
   });
 
   it("says legacy, with no ranks, when the router has no explanation", () => {
@@ -175,13 +229,16 @@ async function freePort(): Promise<number> {
 }
 
 function reply(res: ServerResponse, seat: string): void {
-  // Two seats: "full" at 97% of its week, "fresh" at 20%.
+  // Two seats: "full" at 97% of its week, "fresh" at 20%. "full" reports no
+  // 5-hour window at all (as a plan without one does).
   const util = seat === "full" ? "0.97" : "0.20";
   res.writeHead(200, {
     "content-type": "application/json",
     "anthropic-ratelimit-unified-status": "allowed",
-    "anthropic-ratelimit-unified-5h-utilization": "0.10",
-    "anthropic-ratelimit-unified-5h-reset": String(Math.floor(Date.now() / 1000) + 3 * 3600),
+    ...(seat === "full" ? {} : {
+      "anthropic-ratelimit-unified-5h-utilization": "0.10",
+      "anthropic-ratelimit-unified-5h-reset": String(Math.floor(Date.now() / 1000) + 3 * 3600),
+    }),
     "anthropic-ratelimit-unified-7d-utilization": util,
     "anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 4 * 86_400),
   });
@@ -251,7 +308,11 @@ const send = (base: string, session: string) => fetch(`${base}/v1/messages`, {
 interface HealthBalance {
   balance: {
     rules: string;
-    seats: Array<{ id: string; rank: number; placeable: boolean; weekRatio: number | null; size: { source: string; relative: number }; load: number }>;
+    seats: Array<{
+      id: string; rank: number; placeable: boolean; weekRatio: number | null; fiveHourRatio: number | null;
+      size: { source: string; relative: number; spanHours: number; errorBand: number | null }; load: number;
+      tier: string; score: number; fiveHourReported: boolean | null; paceDeficitPerHour: number | null;
+    }>;
     placements: { lastDay: Record<string, number> };
   };
 }
@@ -270,8 +331,22 @@ describe("health through a real router", () => {
       expect(h.balance.rules).toBe("balance");
       const full = h.balance.seats.find(s => s.id === "full")!;
       const fresh = h.balance.seats.find(s => s.id === "fresh")!;
-      expect(fresh.size).toMatchObject({ source: "weight", relative: 3 });
+      expect(fresh.size).toMatchObject({ source: "weight", relative: 3, spanHours: 0, errorBand: null });
       expect(full.size.source).toBe("equal");
+      // full: 97% used with 4/7 of the week left is ahead of pace; fresh is on pace.
+      expect(full.tier).toBe("behind");
+      expect(fresh.tier).toBe("on-pace");
+      expect(fresh.score).toBeGreaterThan(0);
+      expect(full.score).toBeGreaterThan(0);
+      expect(fresh.score).toBeGreaterThan(full.score);
+      // full never named a 5-hour window: not reported, and its ratio is null rather than 0.
+      expect(full.fiveHourReported).toBe(false);
+      expect(full.fiveHourRatio).toBeNull();
+      expect(fresh.fiveHourReported).toBe(true);
+      expect(fresh.fiveHourRatio).not.toBeNull();
+      // Neither seat is measured, so the deficit (which needs a size in tokens) is null.
+      expect(full.paceDeficitPerHour).toBeNull();
+      expect(fresh.paceDeficitPerHour).toBeNull();
       expect(fresh.rank).toBe(1);
       expect(fresh.placeable).toBe(true);
       // full: 3% left with 4/7 of the week left: ratio 0.05, ahead.
@@ -285,4 +360,64 @@ describe("health through a real router", () => {
       rmSync(f.dir, { recursive: true, force: true });
     }
   }, 45_000);
+});
+
+describe("extractRateLimits", () => {
+  const base = { "anthropic-ratelimit-unified-status": "allowed", "anthropic-ratelimit-unified-7d-utilization": "0.42", "anthropic-ratelimit-unified-7d-reset": "1800000000" };
+
+  it("keeps an absent 5-hour header apart from a reported zero", () => {
+    const none = extractRateLimits(base)!;
+    expect(none.fiveHourReported).toBe(false);
+    expect(none.fiveHourUtil).toBe(0);
+    expect(none.sevenDayUtil).toBe(0.42);
+    const zero = extractRateLimits({ ...base, "anthropic-ratelimit-unified-5h-utilization": "0", "anthropic-ratelimit-unified-5h-reset": "1700000000" })!;
+    expect(zero.fiveHourReported).toBe(true);
+    expect(zero.fiveHourUtil).toBe(0);
+    const some = extractRateLimits({ ...base, "anthropic-ratelimit-unified-5h-utilization": "0.37" })!;
+    expect(some).toMatchObject({ fiveHourReported: true, fiveHourUtil: 0.37 });
+    // A 429 blaming the 5-hour window carries its reset and claim but no utilization: reported all the same.
+    const refused = extractRateLimits({ "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-representative-claim": "five_hour", "anthropic-ratelimit-unified-5h-reset": "1700000000" })!;
+    expect(refused.fiveHourReported).toBe(true);
+    expect(extractRateLimits({ ...base, "anthropic-ratelimit-unified-representative-claim": "five_hour" })!.fiveHourReported).toBe(true);
+    // Garbage in the header is not a reading either.
+    expect(extractRateLimits({ ...base, "anthropic-ratelimit-unified-5h-utilization": "n/a" })!.fiveHourReported).toBe(false);
+    // No unified headers at all: no reading.
+    expect(extractRateLimits({})).toBeNull();
+  });
+
+  it("reaches the window reading the dashboards draw: 'not reported', never 0%", () => {
+    const rl = { ...extractRateLimits(base)!, lastUpdated: NOW };
+    expect(windowReading(rl, "fiveHour", NOW)).toEqual({ ok: false, note: "not reported" });
+    expect(windowReading(rl, "sevenDay", NOW)).toMatchObject({ ok: true, util: 0.42 });
+    // A reading from before the flag was kept still reads as before.
+    const { fiveHourReported: _f, ...old } = rl;
+    void _f;
+    expect(windowReading(old, "fiveHour", NOW)).toEqual({ ok: false, note: "no reading" });
+  });
+});
+
+describe("the documentation", () => {
+  const readme = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8");
+  const trouble = readFileSync(fileURLToPath(new URL("../../docs/troubleshooting.md", import.meta.url)), "utf8");
+
+  it("states what slack means under the balance rules, that migrateAhead is legacy-only, and the measured seat size with its error band", () => {
+    expect(readme).toMatch(/under the balance rules `slack` is the tolerance on the \*\*ratio\*\*/);
+    expect(readme).toMatch(/`migrateAhead` is legacy-only/);
+    expect(readme).toMatch(/\*\*Legacy-only\.\*\* Under the legacy rules a pinned session moves/);
+    expect(readme).toMatch(/measured 2\.03× a Team seat, not the 4×/);
+    expect(readme).toMatch(/within ±12\.5% at worst/);
+    expect(readme).toMatch(/`size\.errorBand`/);
+    expect(readme).toMatch(/`paceDeficitPerHour` \(cost-weighted tokens per hour by which an even spend/);
+    expect(readme).toMatch(/replaces `surplusPerHour`/);
+    expect(readme).toMatch(/`tier` \(`on-pace`, `week-ok`, `behind` or `over-cap`/);
+    expect(readme).toMatch(/`fiveHourReported` \(false for a seat whose plan reports no 5-hour window/);
+  });
+
+  it("explains the every-seat-behind-pace state in troubleshooting", () => {
+    expect(trouble).toMatch(/### Every seat is behind pace/);
+    expect(trouble).toMatch(/all of them compete on the balance `score` with\nthe weekly pace ratio as a factor \(the score is multiplied by `weekRatio`\)/);
+    expect(trouble).toMatch(/`paceDeficitPerHour` is how far behind/);
+    expect(trouble).toMatch(/`unusedAtReset`/);
+    expect(trouble).toMatch(/`strandedMinutes`/);
+  });
 });

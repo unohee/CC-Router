@@ -9,6 +9,11 @@ export interface AccountRateLimits {
   status: "allowed" | "rate_limited" | "unknown";
   fiveHourUtil: number;      // 0.0 – 1.0
   fiveHourReset: number;     // Unix timestamp in seconds
+  /** The response carried a 5-hour utilization header. False keeps "not
+   *  reported" apart from a reported 0 (fiveHourUtil is 0 in both cases); a
+   *  seat whose plan reports no 5-hour window never has it true. Absent in
+   *  readings from before it was kept. */
+  fiveHourReported?: boolean;
   sevenDayUtil: number;      // 0.0 – 1.0
   sevenDayReset: number;     // Unix timestamp in seconds
   claim: string;             // "five_hour" | "seven_day" — which window is limiting
