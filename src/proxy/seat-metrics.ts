@@ -53,6 +53,9 @@ export interface SeatSources {
   canServeOpenAI: (a: OpenAIAccount) => boolean;
   /** Each seat's size relative to a typical seat (seat-size.ts). Absent: all 1. */
   sizeOf?: (accountId: string) => number;
+  /** How full a seat's admission gate is (in flight over the slots the
+   *  throttle allows it); see TargetMetrics.saturation. Absent: unknown. */
+  saturationOf?: (accountId: string) => number;
   /** The session router's ranking for a request with no session to pin
    *  (SessionRouter.rank): the failover pick and a request without a session
    *  id. Absent, or null from it: the caller's own order. */
@@ -77,13 +80,15 @@ export interface Seats {
 }
 
 export function createSeats(src: SeatSources): Seats {
-  const { pool, openAIAccounts, canServeOpenAI, sizeOf, rank } = src;
+  const { pool, openAIAccounts, canServeOpenAI, sizeOf, saturationOf, rank } = src;
   const openAI = (id: string) => openAIAccounts.some(a => a.id === id && canServeOpenAI(a));
   const metrics = (t: SessionTarget): TargetMetrics => {
     const m = seatMetrics(t.provider === "anthropic"
       ? pool.getById(t.accountId)?.rateLimits
       : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits);
-    return sizeOf ? { ...m, size: sizeOf(t.accountId) } : m;
+    const out: TargetMetrics = sizeOf ? { ...m, size: sizeOf(t.accountId) } : { ...m };
+    if (saturationOf && t.provider === "anthropic") out.saturation = saturationOf(t.accountId);
+    return out;
   };
   /** The ranked pick among `accounts`, or null when the ranking is off. */
   const ranked = (accounts: Account[], model: string | undefined, mode: "score" | "rotate"): Account | null => {

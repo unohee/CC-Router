@@ -16,7 +16,7 @@ import { SessionContextTracker } from "./session-context-tracker.js";
 import { writeEndpoint, removeEndpoint } from "../config/endpoint.js";
 import { needsRefresh, refreshAccountToken, refreshAfterRejection, saveAccounts, startRefreshLoop } from "./token-refresher.js";
 import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getBalanceRules, getCapacityWeights, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
-import { createThrottleGate } from "./throttle.js";
+import { admissionLimit, createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
 import { logOllamaFallback, logOllamaTransition } from "./logger.js";
@@ -630,9 +630,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     sizeMemo = { at: now, sizes };
     return sizes;
   };
+  // The admission gate is created below (it needs the throttle config); the
+  // seat metrics read it late so placement can see a full queue.
+  let saturationOf: (id: string) => number = () => 0;
   const seats = createSeats({
     pool, openAIAccounts, canServeOpenAI: a => canServeOpenAI(a, codexBudget ?? undefined),
     sizeOf: id => currentSeatSizes().get(id)?.relative ?? 1,
+    saturationOf: id => saturationOf(id),
     rank: (c, usable, utilOf, mode) => sessionRouter.rank(c, usable, utilOf, mode),
   });
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
@@ -648,6 +652,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // gate are orthogonal layers; nothing here touches pin/cap predicates.
   const throttleCfg = getThrottleConfig();
   const throttleGate: ThrottleGate = createThrottleGate(throttleCfg);
+  // In flight over the slots the gate allows at the seat's utilization
+  // (throttle.ts admissionLimit); 0 with the throttle off, which is "unknown".
+  saturationOf = id => {
+    if (!throttleCfg.enabled) return 0;
+    const a = pool.getById(id);
+    if (!a) return 0;
+    const limit = admissionLimit(Math.max(a.rateLimits.fiveHourUtil, a.rateLimits.sevenDayUtil), throttleCfg);
+    return Number.isFinite(limit) && limit > 0 ? throttleGate.inFlight(id) / limit : 0;
+  };
 
   /** Worst of an account's two quota windows — the tighter window is what
    *  actually stops it, so the maximum is the honest read on headroom. */
