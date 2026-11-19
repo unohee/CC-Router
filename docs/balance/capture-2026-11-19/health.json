@@ -1,0 +1,403 @@
+{
+  "build": {
+    "sha": "604e9de03e4a55a4e00710973a988839283a54d8"
+  },
+  "generatedAt": "2026-11-19T09:47:41.485Z",
+  "note": "Trimmed to what scripts/balance-capture.mjs reads: placements, performance p50, the balance block, and recent log entries reduced to whether they carried a session id.",
+  "performance": {
+    "pool": {
+      "p50Ms": 5471,
+      "p95Ms": 22243,
+      "requests": 1380,
+      "observedMs": 2583369
+    }
+  },
+  "balance": {
+    "rules": "balance",
+    "seats": [
+      {
+        "id": "heewon",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 404200091,
+          "samples": 14,
+          "spanHours": 17.7,
+          "errorBand": 0.071
+        },
+        "remainingTokens": 121260027,
+        "weekRatio": 0.62,
+        "fiveHourRatio": 1.053,
+        "paceDeficitPerHour": 913103,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.000002402,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 8.5,
+        "rank": 2,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "vega",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 447076577,
+          "samples": 17,
+          "spanHours": 17.8,
+          "errorBand": 0.043
+        },
+        "remainingTokens": 201184460,
+        "weekRatio": 0.802,
+        "fiveHourRatio": 1.25,
+        "paceDeficitPerHour": 526070,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.00004619,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 0,
+        "rank": 1,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "rigel",
+        "size": {
+          "relative": 1,
+          "source": "equal",
+          "tokensPerWeek": null,
+          "samples": 5,
+          "spanHours": 12,
+          "errorBand": null
+        },
+        "remainingTokens": null,
+        "weekRatio": 0.275,
+        "fiveHourRatio": null,
+        "paceDeficitPerHour": null,
+        "onPace": false,
+        "overCap": true,
+        "tier": "over-cap",
+        "score": 0,
+        "fiveHourReported": false,
+        "usable": true,
+        "load": 0,
+        "rank": 4,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 61
+        }
+      },
+      {
+        "id": "lyra",
+        "size": {
+          "relative": 1,
+          "source": "equal",
+          "tokensPerWeek": null,
+          "samples": 3,
+          "spanHours": 13.7,
+          "errorBand": null
+        },
+        "remainingTokens": null,
+        "weekRatio": 0.151,
+        "fiveHourRatio": null,
+        "paceDeficitPerHour": null,
+        "onPace": false,
+        "overCap": true,
+        "tier": "over-cap",
+        "score": 0,
+        "fiveHourReported": false,
+        "usable": true,
+        "load": 0,
+        "rank": 5,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 61
+        }
+      },
+      {
+        "id": "kyte",
+        "size": {
+          "relative": 1.55,
+          "source": "measured",
+          "tokensPerWeek": 694838583,
+          "samples": 18,
+          "spanHours": 17.7,
+          "errorBand": 0.037
+        },
+        "remainingTokens": 416903150,
+        "weekRatio": 0.709,
+        "fiveHourRatio": null,
+        "paceDeficitPerHour": 1204696,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.000001174,
+        "fiveHourReported": false,
+        "usable": true,
+        "load": 11.6,
+        "rank": 3,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      }
+    ],
+    "placements": {
+      "lastHour": {
+        "placed": 8,
+        "unservable": 4,
+        "soft-cap": 0,
+        "weekly-pace": 0,
+        "repin": 0
+      },
+      "lastDay": {
+        "placed": 15,
+        "unservable": 4,
+        "soft-cap": 3,
+        "weekly-pace": 0,
+        "repin": 0
+      }
+    }
+  },
+  "placements": {
+    "lastHour": {
+      "placed": 8,
+      "unservable": 4,
+      "soft-cap": 0,
+      "weekly-pace": 0,
+      "repin": 0
+    },
+    "lastDay": {
+      "placed": 15,
+      "unservable": 4,
+      "soft-cap": 3,
+      "weekly-pace": 0,
+      "repin": 0
+    }
+  },
+  "recentLogs": [
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    }
+  ]
+}

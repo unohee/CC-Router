@@ -1,0 +1,37 @@
+{
+ "status": "ok",
+ "balance": {
+  "placements": {
+   "lastHour": {
+    "placed": 2,
+    "unservable": 0,
+    "soft-cap": 0,
+    "weekly-pace": 0,
+    "repin": 0
+   },
+   "lastDay": {
+    "placed": 30,
+    "unservable": 0,
+    "soft-cap": 0,
+    "weekly-pace": 0,
+    "repin": 0
+   }
+  }
+ },
+ "performance": {
+  "windowMs": 3600000,
+  "observedMs": 3600000,
+  "pool": {
+   "requests": 900,
+   "errors": 0,
+   "rateLimited": 0,
+   "errorRate": 0,
+   "completed": 900,
+   "p50Ms": 4800,
+   "p95Ms": 30000,
+   "outputTokensPerSecond": 40
+  },
+  "accounts": {},
+  "models": {}
+ }
+}

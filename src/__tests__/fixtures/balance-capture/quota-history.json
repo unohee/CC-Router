@@ -1,0 +1,173 @@
+{
+ "generatedAt": 1795084200000,
+ "retentionDays": 92,
+ "days": 7,
+ "accounts": [
+  {
+   "id": "alpha",
+   "readings": [
+    {
+     "hour": 1795050000000,
+     "sampledAt": 1795050120000,
+     "fiveHour": {
+      "util": 0,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.3,
+      "resetAt": 1795262400
+     },
+     "spentAt": 0
+    },
+    {
+     "hour": 1795053600000,
+     "sampledAt": 1795053720000,
+     "fiveHour": {
+      "util": 0.1,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.32,
+      "resetAt": 1795262400
+     },
+     "spentAt": 9000000
+    },
+    {
+     "hour": 1795057200000,
+     "sampledAt": 1795057320000,
+     "fiveHour": {
+      "util": 0.2,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.34,
+      "resetAt": 1795262400
+     },
+     "spentAt": 18000000
+    },
+    {
+     "hour": 1795060800000,
+     "sampledAt": 1795060920000,
+     "fiveHour": {
+      "util": 0.3,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.36,
+      "resetAt": 1795262400
+     },
+     "spentAt": 27000000
+    },
+    {
+     "hour": 1795064400000,
+     "sampledAt": 1795064520000,
+     "fiveHour": {
+      "util": 0.4,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.38,
+      "resetAt": 1795262400
+     },
+     "spentAt": 36000000
+    },
+    {
+     "hour": 1795068000000,
+     "sampledAt": 1795068120000,
+     "fiveHour": {
+      "util": 0.5,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.4,
+      "resetAt": 1795262400
+     },
+     "spentAt": 45000000
+    },
+    {
+     "hour": 1795071600000,
+     "sampledAt": 1795071720000,
+     "fiveHour": {
+      "util": 0.6,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.42,
+      "resetAt": 1795262400
+     },
+     "spentAt": 54000000
+    },
+    {
+     "hour": 1795075200000,
+     "sampledAt": 1795075320000,
+     "fiveHour": {
+      "util": 0.7,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.44,
+      "resetAt": 1795262400
+     },
+     "spentAt": 63000000
+    },
+    {
+     "hour": 1795078800000,
+     "sampledAt": 1795078920000,
+     "fiveHour": {
+      "util": 0.8,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.46,
+      "resetAt": 1795262400
+     },
+     "spentAt": 72000000
+    },
+    {
+     "hour": 1795082400000,
+     "sampledAt": 1795082520000,
+     "fiveHour": {
+      "util": 0.9,
+      "resetAt": 1795089600
+     },
+     "sevenDay": {
+      "util": 0.48,
+      "resetAt": 1795262400
+     },
+     "spentAt": 81000000
+    }
+   ]
+  },
+  {
+   "id": "beta",
+   "readings": [
+    {
+     "hour": 1795078800000,
+     "sampledAt": 1795078860000,
+     "fiveHour": {
+      "util": 0,
+      "resetAt": 0
+     },
+     "sevenDay": {
+      "util": 0.5,
+      "resetAt": 1795444200
+     },
+     "spentAt": 0
+    },
+    {
+     "hour": 1795082400000,
+     "sampledAt": 1795082460000,
+     "fiveHour": {
+      "util": 0,
+      "resetAt": 0
+     },
+     "sevenDay": {
+      "util": 0.51,
+      "resetAt": 1795444200
+     },
+     "spentAt": 1000000
+    }
+   ]
+  }
+ ]
+}

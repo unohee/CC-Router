@@ -1,0 +1,140 @@
+{
+  "name": "live-week",
+  "description": "The live pool captured at 2026-11-19T09:00:00.000Z from the router's recorded quota and usage, over 2 days.",
+  "seed": 3101,
+  "days": 2,
+  "seats": [
+    {
+      "id": "heewon",
+      "weeklyCap": 404200091,
+      "fiveHourCap": 64951409,
+      "weeklyUtil": 0.68,
+      "weeklyResetH": 82,
+      "fiveHourUtil": 0.07,
+      "fiveHourResetMin": 280
+    },
+    {
+      "id": "kyte",
+      "weeklyCap": 694838583,
+      "fiveHourCap": 0,
+      "weeklyUtil": 0.36,
+      "weeklyResetH": 143
+    },
+    {
+      "id": "lyra",
+      "weeklyCap": 447076577,
+      "fiveHourCap": 67061487,
+      "weeklyUtil": 0.97,
+      "weeklyResetH": 23
+    },
+    {
+      "id": "rigel",
+      "weeklyCap": 447076577,
+      "fiveHourCap": 100487297,
+      "weeklyUtil": 0.98,
+      "weeklyResetH": 13
+    },
+    {
+      "id": "vega",
+      "weeklyCap": 447076577,
+      "fiveHourCap": 72634023,
+      "weeklyUtil": 0.54,
+      "weeklyResetH": 95,
+      "fiveHourUtil": 0.04,
+      "fiveHourResetMin": 260
+    }
+  ],
+  "demand": {
+    "sessionsPerDay": 269,
+    "profile": [
+      0.85,
+      0.57,
+      0.45,
+      0.73,
+      1,
+      0.96,
+      0.87,
+      0.58,
+      0.37,
+      0.16,
+      0.14,
+      0.1,
+      0.21,
+      0.26,
+      0.47,
+      0.43,
+      0.22,
+      0.67,
+      0.8,
+      0.5,
+      0.71,
+      0.85,
+      0.68,
+      0.81
+    ],
+    "sessionMinutes": [
+      30,
+      240
+    ],
+    "requestChance": 0.598,
+    "prefix": {
+      "start": 173708,
+      "perRequest": 5311,
+      "max": 350000
+    },
+    "freshInput": 674,
+    "output": 742,
+    "noSessionShare": 0,
+    "noSessionCost": 4553
+  },
+  "routing": {
+    "softCapUtil": 0.98,
+    "weeklyPace": {
+      "enabled": true,
+      "fiveHour": true
+    }
+  },
+  "historyAvailable": true,
+  "throttle": {
+    "perAccountMaxInFlight": 4,
+    "startUtil": 0.75,
+    "hardUtil": 0.95,
+    "serviceSeconds": 5.5,
+    "maxWaitSeconds": 20
+  },
+  "notes": [
+    "Start 2026-11-19T09:00:00.000Z: given, floored to the hour.",
+    "routing: config.routing verbatim.",
+    "Profile rotated by 9 h: simulated hour h carries the demand of UTC hour (h + 9) % 24, so the seats' start state meets the demand that followed it live.",
+    "heewon: weekly cap 404200091 measured from 14 pairs over 17.7 h, moved 0.14, error band +/-7.1%.",
+    "heewon: 5-hour cap 64951409 measured from 11 pairs, moved 0.66, error band +/-1.5%.",
+    "kyte: weekly cap 694838583 measured from 18 pairs over 17.7 h, moved 0.27, error band +/-3.7%.",
+    "kyte: never reported a 5-hour window; fiveHourCap 0.",
+    "lyra: weekly cap unmeasured (3 pairs, moved 0.04); median measured cap 447076577.",
+    "lyra: 5-hour cap ASSUMED 15% of the week (not measurable from 2 pairs).",
+    "lyra: newest reading is 4 h before the start; its utilization may be stale.",
+    "rigel: weekly cap unmeasured (5 pairs, moved 0.04); median measured cap 447076577.",
+    "rigel: 5-hour cap 100487297 measured from 3 pairs, moved 0.14, error band +/-7.1%.",
+    "rigel: newest reading is 6 h before the start; its utilization may be stale.",
+    "vega: weekly cap 447076577 measured from 17 pairs over 17.8 h, moved 0.23, error band +/-4.3%.",
+    "vega: 5-hour cap 72634023 measured from 13 pairs, moved 1.04, error band +/-1.0%.",
+    "Profile: requests summed over every model and folded by UTC hour over 7 days of the series; profile[h] is UTC hour h. The simulator starts at 00:00 UTC, so a start at another hour shifts demand against the seats by that many hours.",
+    "Demand includes non-anthropic models (gpt-6.1-sol, gpt-6-astra, kimi-k3:cloud, deepseek-v4.1-flash:cloud, gpt-6-luna, deepseek-v4-pro:0813-cloud): 0.0% of requests, which spend no seat quota.",
+    "Requests per day 21718 from usage-history 1d (21718 requests over 1 day); the series' 7-day mean is 10986.",
+    "Token sizes per request from usage-history 1d: input 674, output 742, prefix.start = cache read 173708, prefix.perRequest = cache write 5311.",
+    "prefix.max ASSUMED max(2 x prefix.start, 350000): the prefix cap is not recorded.",
+    "noSessionShare 0: 0 of 49 recent /messages log entries had no session id (count_tokens is not logged, so requests outside sessions may be undercounted).",
+    "sessionsPerDay 269 is the floor ceil(requestsPerDay x (1 - noSessionShare) / (135 x 0.6)), which keeps requestChance <= 0.6; health balance.placements.lastDay.placed (15) was lower.",
+    "sessionMinutes ASSUMED [30, 240]: session lengths are not recorded.",
+    "requestChance = requestsPerDay x (1 - noSessionShare) / (sessionsPerDay x 135) = 0.598, clamped to [0.05, 1].",
+    "noSessionCost = 1.25 x freshInput + 5 x output (cost weights: input 1, output 5, cache write 1.25, cache read 0.1).",
+    "Demand is pool-wide: the views carry no per-seat demand.",
+    "serviceSeconds 5.5 from health performance.pool.p50Ms.",
+    "config.throttle has no maxWaitMs; the throttle.ts default 20000 is used."
+  ],
+  "capturedAt": "2026-11-19T09:00:00.000Z",
+  "source": {
+    "quotaGeneratedAt": "2026-11-19T09:26:12.303Z",
+    "usageRange": "7d"
+  }
+}

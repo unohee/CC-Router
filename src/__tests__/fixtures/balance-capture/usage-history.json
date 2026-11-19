@@ -1,0 +1,45 @@
+{
+ "generatedAt": 1795084200000,
+ "tz": "UTC",
+ "tzFallback": false,
+ "since": 1792490400000,
+ "windows": {
+  "1d": {
+   "input": 7000000,
+   "output": 3500000,
+   "cacheRead": 210000000,
+   "cacheCreation": 14000000,
+   "requests": 1000,
+   "total": 234500000,
+   "partial": false
+  },
+  "7d": {
+   "input": 7000000,
+   "output": 3500000,
+   "cacheRead": 210000000,
+   "cacheCreation": 14000000,
+   "requests": 7000,
+   "total": 234500000,
+   "partial": false
+  },
+  "14d": {
+   "input": 7000000,
+   "output": 3500000,
+   "cacheRead": 210000000,
+   "cacheCreation": 14000000,
+   "requests": 7000,
+   "total": 234500000,
+   "partial": false
+  },
+  "30d": {
+   "input": 7000000,
+   "output": 3500000,
+   "cacheRead": 210000000,
+   "cacheCreation": 14000000,
+   "requests": 7000,
+   "total": 234500000,
+   "partial": false
+  }
+ },
+ "cells": []
+}
