@@ -125,11 +125,18 @@ const SURPLUS_MARGIN = 0.35;
 const LOAD_WINDOW_MS = 10 * 60 * 1000;
 /** Balance rules: a seat takes a pin shed over the soft cap only with this
  *  much of its binding window below the cap; a seat just under it would be
- *  over it a few requests later and shed the pin again. Chosen in the balance
- *  simulator with request-rate load and ranked no-session requests:
- *  0.1 / 0.15 / 0.2 gave 685 / 696 / 674 rewrites on the five-hour-bound
- *  pool, totals 1365M / 1356M / 1354M. */
-const CAP_RELIEF_ROOM = 0.2;
+ *  over it a few requests later and shed the pin again, and every move is a
+ *  cache rewrite. Chosen in the balance simulator together with
+ *  FIVE_HOUR_ROOM_POWER on the five-hour-bound pool: 0.2 / 0.3 / 0.4 / 0.5
+ *  gave 669 / 650 / 639 / 647 rewrites (baseline 651), totals
+ *  1419M / 1455M / 1386M / 1404M. */
+const CAP_RELIEF_ROOM = 0.4;
+/** Balance rules: how strongly a seat's five-hour headroom scales its score.
+ *  Squared: a session stays for hours, so a seat whose five-hour window is
+ *  half spent should rank well below one with a fresh window, not at half.
+ *  1 / 2 / 3 gave 699 / 669 / 716 rewrites on the five-hour-bound pool at
+ *  CAP_RELIEF_ROOM 0.2. */
+const FIVE_HOUR_ROOM_POWER = 2;
 /** Safety valve: a router that never forgets would grow without bound. */
 const MAX_TRACKED_SESSIONS = 10_000;
 
@@ -686,7 +693,7 @@ export class SessionRouter {
    *    seats closest to their weekly pace.
    * 3. Among those, the most weekly headroom per hour to the weekly reset:
    *
-   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil) / (1 + liveSessions)
+   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil)^2 / (1 + load)
    *
    *    The soft cap and the score now read the same window: a seat at 97% of
    *    its week used to score on an idle five-hour window as if it had 98% to
@@ -742,7 +749,7 @@ export class SessionRouter {
       const util = week ? week.util : m.weekly?.util ?? 0;
       const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
       const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
-      const fiveRoom = five ? Math.min(1, Math.max(0, cap - five.util)) : 1;
+      const fiveRoom = five ? Math.pow(Math.min(1, Math.max(0, cap - five.util)), FIVE_HOUR_ROOM_POWER) : 1;
       const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
       return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
         / (1 + (load.get(targetKey(t)) ?? 0));

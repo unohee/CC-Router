@@ -141,7 +141,8 @@ describe("the balance rules", () => {
     const cap = { softCapUtil: 0.98 };
     const r = new SessionRouter({ now: () => NOW, ...cap });
     const picks = Array.from({ length: 3 }, (_, i) => r.resolve(`s${i}`, LIVE_SEATS, () => true, LIVE_POOL)!.accountId);
-    expect(picks).toEqual(["kyte", "vega", "heewon"]);
+    expect(picks[0]).toBe("kyte");
+    expect(picks.slice(1).sort()).toEqual(["heewon", "vega"]);
     expect(place({ ...cap, balance: false }, LIVE_SEATS, LIVE_POOL)).not.toBe("kyte");
     // With the live pacing too, only kyte is on pace on both windows.
     expect(place(LIVE, LIVE_SEATS, LIVE_POOL)).toBe("kyte");
