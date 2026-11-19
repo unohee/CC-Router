@@ -1335,3 +1335,37 @@ describe("diagnostics", () => {
     expect(store.get("cc-router.diagnostics.open")).toBe("0");
   });
 });
+
+describe("outcomes card", () => {
+  const seat = (id: string, outcomes: Record<string, unknown> | undefined, over: Record<string, unknown> = {}) => ({
+    id, size: { relative: 1, source: "equal", tokensPerWeek: null, samples: 0 }, remainingTokens: null, weekRatio: 1, fiveHourRatio: null,
+    surplusPerHour: null, onPace: true, overCap: false, usable: true, load: 0, rank: 1, placeable: true, ...(outcomes ? { outcomes } : {}), ...over,
+  });
+  const balance = (seats: unknown[]) => ({ rules: "balance", seats, placements: { lastHour: {}, lastDay: {} } });
+  const outcomes = (over: Record<string, unknown> = {}) => ({ days: 7, resets: 0, unusedAtReset: null, strandedMinutes: 0, ...over });
+
+  it("shows each seat's weekly resets, unused share and stranded time, and sums them on the card and the folded line", async () => {
+    const page = await boot(ok(health([account()], { balance: balance([
+      seat("lyra", outcomes({ resets: 2, unusedAtReset: 0.23, strandedMinutes: 47 })),
+      seat("kyte", outcomes({ resets: 1, unusedAtReset: 0.05, strandedMinutes: 150 })),
+      seat("vega", outcomes()),
+    ]) })));
+    expect(page.el("ops").hidden).toBe(false);
+    expect(page.el("outcard").hidden).toBe(false);
+    expect(page.rows("outbody")).toEqual(["lyra 2 23% 47 min", "kyte 1 5% 2.5 h", "vega 0 — none"]);
+    expect(textOf(page.el("outsum"))).toBe("unused at reset 14% on average · 3.3 h stranded in 7 days");
+    // Over an hour stranded in the week is worth a look.
+    expect(find(page.el("outbody"), el => el.className.includes("att")).map(textOf)).toEqual(["2.5 h"]);
+    expect(find(page.el("opssum"), el => el.className === "att").map(textOf)).toEqual(["3.3 h stranded at the cap this week"]);
+  });
+
+  it("stays hidden for a router whose seats carry no outcomes, or a malformed field, and says so when no reset has been seen", async () => {
+    const none = await boot(ok(health([account()], { balance: balance([seat("lyra", undefined)]) })));
+    expect(none.el("outcard").hidden).toBe(true);
+    const bad = await boot(ok(health([account()], { balance: balance([seat("lyra", { days: 7, resets: "2", strandedMinutes: 1, unusedAtReset: null })]) })));
+    expect(bad.el("outcard").hidden).toBe(true);
+    const quiet = await boot(ok(health([account()], { balance: balance([seat("lyra", outcomes()), seat("kyte", outcomes({ strandedMinutes: 20 }))]) })));
+    expect(textOf(quiet.el("outsum"))).toBe("no weekly reset seen yet · 20 min stranded in 7 days");
+    expect(find(quiet.el("opssum"), el => el.className === "att")).toEqual([]);
+  });
+});

@@ -3,6 +3,8 @@ import type { SeatExplanation } from "./session-router.js";
 import type { SeatSize } from "./seat-size.js";
 import type { PlacementCounts } from "./seat-metrics.js";
 import { WEEK_SEC } from "./weekly-pace.js";
+import { DAY_MS } from "./usage-history.js";
+import type { SeatOutcomes } from "./quota-history.js";
 
 /**
  * The `balance` block of health: what placement knows about each seat, as it
@@ -34,7 +36,14 @@ export interface BalanceSeatView {
   /** Where a new session would be placed now: 1 first. */
   rank: number;
   placeable: boolean;
+  /** What placement achieved for this seat over the last OUTCOMES_DAYS days
+   *  (quota-history.ts): unused quota at its weekly resets, minutes stranded at
+   *  the cap while another seat had week left. */
+  outcomes: SeatOutcomes & { days: number };
 }
+
+/** The window the outcomes are summed over. */
+export const OUTCOMES_DAYS = 7;
 
 export interface BalanceView {
   /** The balance rules are in force (false: `routing.balance.legacy`, or neither softCapUtil nor weeklyPace set). */
@@ -50,6 +59,7 @@ export function balanceView(
   sizes: Map<string, SeatSize>,
   placements: BalanceView["placements"],
   nowMs: number,
+  outcomesOf: (id: string, windowMs: number) => SeatOutcomes,
 ): BalanceView {
   const nowSec = nowMs / 1000;
   const seats: BalanceSeatView[] = accounts.map(a => {
@@ -78,9 +88,19 @@ export function balanceView(
       load: x?.load ?? 0,
       rank: x?.rank ?? 0,
       placeable: x?.placeable ?? false,
+      outcomes: outcomesView(outcomesOf(a.id, OUTCOMES_DAYS * DAY_MS)),
     };
   });
   return { rules: explained ? "balance" : "legacy", seats, placements };
+}
+
+function outcomesView(o: SeatOutcomes): BalanceSeatView["outcomes"] {
+  return {
+    days: OUTCOMES_DAYS,
+    resets: o.resets,
+    unusedAtReset: round(o.unusedAtReset, 3),
+    strandedMinutes: Math.round(o.strandedMinutes),
+  };
 }
 
 function round(n: number | null, digits: number): number | null {

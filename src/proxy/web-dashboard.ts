@@ -217,7 +217,7 @@ td.mono,.logs .nw,.lh{white-space:normal}
 .opssum .att{color:var(--warn-ink);font-weight:600}
 .opsgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px;align-items:start}
 .opsgrid .card{margin-top:0}
-.opsgrid #supcard{grid-column:1 / -1}
+.opsgrid #supcard,.opsgrid #outcard{grid-column:1 / -1}
 .opsgrid .foot{margin-top:12px}
 @media (prefers-reduced-motion:reduce){.ops summary::before{transition:none}}
 @media (max-width:720px){.opsgrid{grid-template-columns:minmax(0,1fr)}}
@@ -394,6 +394,19 @@ const BODY = String.raw`
               </table>
             </div>
             <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). A capacity stays unknown until 24 pairs of hourly readings inside one window have been seen for that account. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
+          </section>
+          <section class="card" aria-labelledby="out-h" id="outcard" hidden>
+            <div class="cardhead"><h2 id="out-h">Outcomes</h2><span id="outsum" class="sum"></span></div>
+            <div class="scroll subtable">
+              <table>
+                <thead><tr>
+                  <th scope="col">Account</th><th scope="col" class="num">Weekly resets</th>
+                  <th scope="col" class="num">Unused at reset</th><th scope="col" class="num">Stranded</th>
+                </tr></thead>
+                <tbody id="outbody"></tbody>
+              </table>
+            </div>
+            <p class="foot" id="outfoot">What placement achieved, per seat, over the last 7 days. "Unused at reset" is the share of the weekly quota the seat still had when its week reset (averaged over its resets): quota that could have served sessions. "Stranded" is the time the seat sat at or past the soft cap on its week while another seat under the cap still had at least a fifth of its week left: sessions on it had to move or wait although the pool had room. Both kept across restarts.</p>
           </section>
         </div>
       </details>
@@ -1082,6 +1095,45 @@ const SCRIPT = String.raw`
     body.replaceChildren.apply(body, rows);
   }
 
+  // ── outcomes ───────────────────────────────────────────────────────────────
+  // health.balance.seats[].outcomes: what placement achieved per seat over the
+  // last week. An older router sends no balance block, or seats without the
+  // field: the card is hidden then, never drawn with zeros.
+  function validOutcomes(o) {
+    return !!o && typeof o === "object" && isNum(o.days) && isNum(o.resets) && isNum(o.strandedMinutes)
+      && (o.unusedAtReset === null || isNum(o.unusedAtReset));
+  }
+  function minutesText(m) {
+    if (m < 1) return "none";
+    if (m < 60) return Math.round(m) + " min";
+    var h = m / 60;
+    return (h < 10 ? h.toFixed(1) : Math.round(h)) + " h";
+  }
+  function renderOutcomes(h) {
+    var card = $("outcard"), b = h.balance;
+    var seats = b && b.rules === "balance" && Array.isArray(b.seats) ? b.seats.filter(function (x) { return x && typeof x.id === "string" && validOutcomes(x.outcomes); }) : [];
+    if (!seats.length) { card.hidden = true; return; }
+    card.hidden = false;
+    var days = seats[0].outcomes.days;
+    var stranded = 0, withResets = 0, unusedSum = 0;
+    seats.forEach(function (x) {
+      stranded += x.outcomes.strandedMinutes;
+      if (x.outcomes.unusedAtReset !== null) { withResets++; unusedSum += x.outcomes.unusedAtReset; }
+    });
+    $("outsum").textContent = (withResets ? "unused at reset " + pct(unusedSum / withResets) + " on average" : "no weekly reset seen yet")
+      + " · " + (stranded >= 1 ? minutesText(stranded) + " stranded" : "nothing stranded") + " in " + plural(days, "day");
+    var rows = seats.map(function (x) {
+      var o = x.outcomes, tr = el("tr");
+      tr.appendChild(lab(el("td", "", x.id), "Account"));
+      tr.appendChild(lab(el("td", "num", num(o.resets)), "Weekly resets"));
+      tr.appendChild(lab(el("td", "num", o.unusedAtReset === null ? "—" : pct(o.unusedAtReset)), "Unused at reset"));
+      tr.appendChild(lab(el("td", "num" + (o.strandedMinutes >= 60 ? " att" : ""), minutesText(o.strandedMinutes)), "Stranded"));
+      return tr;
+    });
+    var body = $("outbody");
+    body.replaceChildren.apply(body, rows);
+  }
+
   // ── failover ───────────────────────────────────────────────────────────────
   var FO_OUTCOMES = [
     ["recovered", "Recovered on another account", "Another account answered."],
@@ -1170,7 +1222,7 @@ const SCRIPT = String.raw`
   // a handoff, Claude Code versions that never passed the conformance suite.
   var OPS_KEY = "cc-router.diagnostics.open";
   function renderOps(h) {
-    var shown = ["focard", "ctcard", "supcard"].filter(function (id) { return !$(id).hidden; });
+    var shown = ["focard", "ctcard", "supcard", "outcard"].filter(function (id) { return !$(id).hidden; });
     $("ops").hidden = shown.length === 0;
     if (!shown.length) return;
     var parts = [];
@@ -1192,6 +1244,11 @@ const SCRIPT = String.raw`
       var short = x.accounts.filter(function (a) { return a.sevenDay.exhaustsAt !== null && a.sevenDay.exhaustsBeforeReset; }).length;
       parts.push([x.budget.today === null ? "pool budget unknown" : "pool budget today " + big(x.budget.today), false]);
       if (short > 0) parts.push([plural(short, "account") + " out before the 7-day reset", false]);
+    }
+    if (!$("outcard").hidden) {
+      var stranded = 0;
+      h.balance.seats.forEach(function (x) { if (x && validOutcomes(x.outcomes)) stranded += x.outcomes.strandedMinutes; });
+      if (stranded >= 60) parts.push([minutesText(stranded) + " stranded at the cap this week", true]);
     }
     var kids = [];
     parts.forEach(function (p, i) {
@@ -1220,6 +1277,7 @@ const SCRIPT = String.raw`
     if (!selecting() || !S.rendered) {
       renderAccounts(h);
       renderSupply(h);
+      renderOutcomes(h);
       renderFailover(h);
       renderContinuity(h);
       renderOps(h);

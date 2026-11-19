@@ -96,6 +96,8 @@ describe("SessionRouter.explain", () => {
   });
 });
 
+const NO_OUTCOMES = () => ({ resets: 0, unusedAtReset: null, strandedMinutes: 0 });
+
 describe("balanceView", () => {
   const sizes = new Map<string, SeatSize>(IDS.map(id => [id, id === "kyte"
     ? { relative: 2.03, source: "measured", tokensPerWeek: 920e6, samples: 8 }
@@ -105,7 +107,7 @@ describe("balanceView", () => {
 
   it("joins the router's explanation, the seat sizes and the placement counts", () => {
     const r = new SessionRouter({ now: () => NOW, ...LIVE });
-    const v = balanceView(IDS.map(acct), r.explain(IDS.map(T), () => true, metrics), sizes, placements, NOW);
+    const v = balanceView(IDS.map(acct), r.explain(IDS.map(T), () => true, metrics), sizes, placements, NOW, NO_OUTCOMES);
     expect(v.rules).toBe("balance");
     expect(v.placements.lastDay.placed).toBe(40);
     const kyte = v.seats.find(s => s.id === "kyte")!;
@@ -126,7 +128,7 @@ describe("balanceView", () => {
   });
 
   it("says legacy, with no ranks, when the router has no explanation", () => {
-    const v = balanceView(IDS.map(acct), null, sizes, placements, NOW);
+    const v = balanceView(IDS.map(acct), null, sizes, placements, NOW, NO_OUTCOMES);
     expect(v.rules).toBe("legacy");
     expect(v.seats.every(s => s.rank === 0 && !s.placeable)).toBe(true);
     // Sizes are still reported: they do not depend on the rules.
@@ -137,7 +139,7 @@ describe("balanceView", () => {
 describe("the terminal dashboard", () => {
   it("shows where a new session goes and the weekly pace ratio on each account row", () => {
     const r = new SessionRouter({ now: () => NOW, ...LIVE });
-    const v = balanceView(IDS.map(acct), r.explain(IDS.map(T), () => true, metrics), new Map(), { lastHour: emptyPlacementCounts(), lastDay: emptyPlacementCounts() }, NOW);
+    const v = balanceView(IDS.map(acct), r.explain(IDS.map(T), () => true, metrics), new Map(), { lastHour: emptyPlacementCounts(), lastDay: emptyPlacementCounts() }, NOW, NO_OUTCOMES);
     const accounts = IDS.map(id => ({ ...acct(id), provider: "anthropic_subscription" as const, expiresInMs: 3_600_000, lastUsedMs: NOW - 60_000, lastRefreshMs: 0 }));
     const sev = computeSeverity(accounts as never, [], NOW);
     const text = (segs: Array<{ text: string }>) => segs.map(s => s.text).join("");

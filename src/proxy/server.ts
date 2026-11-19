@@ -32,7 +32,7 @@ import type { LogEntry } from "./stats.js";
 import { PROXY_PORT, LITELLM_URL, USAGE_PATH, OLLAMA_BUDGET_PATH, QUOTA_HISTORY_PATH, ACCOUNT_STATE_PATH, CONTINUITY_PATH } from "../config/paths.js";
 import { ContinuityLedger, causeOfStatus, claudeCliVersion, loadVerifiedClients } from "./continuity-ledger.js";
 import { restoreAccountState, snapshotAccountState } from "../config/account-state.js";
-import { quotaHistory, quotaHistoryView, parseQuotaDays } from "./quota-history.js";
+import { quotaHistory, quotaHistoryView, parseQuotaDays, strandedSeats } from "./quota-history.js";
 import { computeSupply, costWeighted, type PoolSupply } from "./supply-model.js";
 import { hasClaudeCodeIdentity } from "./client-identity.js";
 import { FailoverCounters, isFailoverStatus, readCapped, reasonOfStatus, relayResponse, type FailoverOutcome, type FailoverState, type StoredRefusal } from "./failover.js";
@@ -95,6 +95,8 @@ export interface ServerOptions {
   usagePath?: string;
   /** Where per-account quota readings are kept. Defaults to quota-history.json beside accounts.json. */
   quotaHistoryPath?: string;
+  /** How often seats are judged stranded (quota-history.ts outcomes); a minute by default. */
+  outcomesTickMs?: number;
   /** Where cooldowns and last rate-limit readings are kept. Defaults to account-state.json beside accounts.json. */
   accountStatePath?: string;
 }
@@ -607,6 +609,23 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // First judgement once both histories are back, then every minute.
   governorTick();
   setInterval(governorTick, 60_000).unref();
+  // Outcomes (quota-history.ts): every tick, a seat at or past the soft cap
+  // on its week while another seat under the cap has a fifth of its week left
+  // is stranded for the tick's length; a weekly reset that passed with no
+  // reading since is noted from what the seat last held.
+  const outcomesTickMs = opts.outcomesTickMs ?? 60_000;
+  const outcomesTick = (): void => {
+    const now = Date.now();
+    quotaHistory.noteElapsedResets(now);
+    const cap = getSoftCapUtil();
+    if (cap === undefined) return;
+    const seats = pool.getAll().map(a => ({
+      id: a.id, usable: a.enabled && a.healthy && a.authState !== "needs-relogin",
+      sevenDayUtil: a.rateLimits.sevenDayUtil, sevenDayReset: a.rateLimits.sevenDayReset,
+    }));
+    for (const id of strandedSeats(seats, cap, now / 1000)) quotaHistory.noteStranded(id, outcomesTickMs / 60_000, now);
+  };
+  setInterval(outcomesTick, outcomesTickMs).unref();
   // One ask per session per window, held for the life of the process: the
   // client answers the ask by compacting and retrying, and a retry that is
   // still large must not be asked again or the session compacts in a loop.
@@ -957,6 +976,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         currentSeatSizes(),
         { lastHour: usageHistory.placementTotals(HOUR_MS), lastDay: usageHistory.placementTotals(DAY_MS) },
         Date.now(),
+        (id, windowMs) => quotaHistory.outcomes(id, windowMs),
       ),
       // What clients actually saw go wrong, last hour and last day, and every
       // worker handoff: the evidence for "a session is never cut".
