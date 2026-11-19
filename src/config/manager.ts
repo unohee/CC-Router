@@ -50,24 +50,31 @@ export function readAccountsFromPath(path: string): Account[] {
  * prompt cache is re-written into the new account — measured at 917K tokens
  * for a single session.
  */
-export function readSessionAssignments(): unknown[] {
+export function readSessionAssignments(): { sessions: unknown[]; load: unknown[] } {
   try {
     const raw = readFileSync(SESSIONS_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { sessions?: unknown[] };
-    return Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    const parsed = JSON.parse(raw) as { sessions?: unknown[]; load?: unknown[] };
+    return {
+      sessions: Array.isArray(parsed?.sessions) ? parsed.sessions : [],
+      // Absent in files written before the load window was kept.
+      load: Array.isArray(parsed?.load) ? parsed.load : [],
+    };
   } catch {
     // Missing, unreadable or corrupt: start empty rather than fail to boot.
-    return [];
+    return { sessions: [], load: [] };
   }
 }
 
-export function writeSessionAssignments(sessions: unknown[]): void {
+/** `load` is the router's load window (SessionRouter.loadSnapshot), saved
+ *  beside the pins so a reload does not read every seat as idle. An older
+ *  build ignores the key. */
+export function writeSessionAssignments(sessions: unknown[], load: unknown[] = []): void {
   // A worker handing over leaves sessions.json to its successor (persistence-gate.ts).
   if (persistenceFrozen()) return;
   try {
     ensureConfigDir();
     const tmp = SESSIONS_PATH + ".tmp";
-    writeFileSync(tmp, JSON.stringify({ version: 1, sessions }), "utf-8");
+    writeFileSync(tmp, JSON.stringify({ version: 1, sessions, load }), "utf-8");
     renameSync(tmp, SESSIONS_PATH);
   } catch {
     // Losing the snapshot costs one round of reassignment, not correctness.

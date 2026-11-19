@@ -12,6 +12,18 @@ export interface SessionSnapshotEntry {
   provider: SessionTarget["provider"];
   accountId: string;
   lastSeen: number;
+  /** When the pin was placed or last moved. Absent in snapshots from before
+   *  it was kept; `restore` then takes `lastSeen`, so a restored pin keeps
+   *  its dwell either way. */
+  pinnedAt?: number;
+}
+
+/** One request counted as load (`noteRequest`), for a snapshot. */
+export interface LoadSnapshotEntry {
+  at: number;
+  provider: SessionTarget["provider"];
+  accountId: string;
+  weight: number;
 }
 
 /**
@@ -320,7 +332,10 @@ export class SessionRouter {
     const usable = candidates.filter(isUsable);
     if (usable.length === 0) return null;
     const chosen = this.placeBalanced(usable, utilOf, mode);
-    this.noteRequest(chosen);
+    // A request without a session counts here. The failover pick (score
+    // mode) does not: the caller pins the session to the seat that answers
+    // (`pinTo`), which counts it once as a session's worth.
+    if (mode === "rotate") this.noteRequest(chosen);
     return chosen;
   }
 
@@ -444,7 +459,34 @@ export class SessionRouter {
       provider: a.target.provider,
       accountId: a.target.accountId,
       lastSeen: a.lastSeen,
+      ...(a.pinnedAt !== undefined ? { pinnedAt: a.pinnedAt } : {}),
     }));
+  }
+
+  /**
+   * The load window (`noteRequest`), for surviving a reload with the pins.
+   * Without it every seat reads as idle for ten minutes after each deploy,
+   * and the first sessions placed then all land on the top-scored seat.
+   */
+  loadSnapshot(): LoadSnapshotEntry[] {
+    const since = this.now() - LOAD_WINDOW_MS;
+    return this.requests.filter(r => r.at >= since).map(r => {
+      const [provider, accountId] = r.key.split(":", 2) as [SessionTarget["provider"], string];
+      return { at: r.at, provider, accountId, weight: r.weight };
+    });
+  }
+
+  /** Reload the load window. Entries outside the window, or malformed, are dropped. */
+  restoreLoad(entries: readonly LoadSnapshotEntry[]): void {
+    const since = this.now() - LOAD_WINDOW_MS;
+    const kept = entries
+      .filter(e => e && typeof e.at === "number" && e.at >= since && e.at <= this.now()
+        && (e.provider === "anthropic" || e.provider === "openai") && typeof e.accountId === "string"
+        && typeof e.weight === "number" && Number.isFinite(e.weight) && e.weight > 0)
+      .map(e => ({ at: e.at, key: targetKey({ provider: e.provider, accountId: e.accountId }), weight: e.weight }));
+    this.requests.splice(0, 0, ...kept);
+    this.requests.sort((a, b) => a.at - b.at);
+    while (this.requests.length > MAX_TRACKED_SESSIONS) this.requests.shift();
   }
 
   /**
@@ -462,9 +504,13 @@ export class SessionRouter {
       if (!entry?.sessionId || typeof entry.lastSeen !== "number") continue;
       if (entry.lastSeen < cutoff) continue;
       if (entry.provider !== "anthropic" && entry.provider !== "openai") continue;
+      // A restored pin keeps its dwell: without pinnedAt the 30-minute dwell
+      // check was skipped, and every pin could move for pace on its first
+      // request after a deploy.
       this.assignments.set(entry.sessionId, {
         target: { provider: entry.provider, accountId: entry.accountId },
         lastSeen: entry.lastSeen,
+        pinnedAt: typeof entry.pinnedAt === "number" && Number.isFinite(entry.pinnedAt) ? entry.pinnedAt : entry.lastSeen,
       });
     }
   }

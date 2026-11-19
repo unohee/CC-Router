@@ -104,6 +104,14 @@ export interface FailoverState {
   /** Set while a connection error is handed to the shared handler, which then
    *  must not answer the client itself. */
   suppressErrorReply?: boolean;
+  /** The seat the request was first sent to: the session's pin, or its
+   *  placement. Whether the session is re-pinned after failover is judged on
+   *  this seat, not on whichever hop refused last. */
+  origin: string;
+  /** Why the origin seat refused (the first refusal). An auth refusal
+   *  (401, token-refresh) does not take the seat out of retention, yet a
+   *  session left on it fails over on every request until the token is back. */
+  originKind?: FailoverReason;
   /** The request has met a refusal and is counted as having entered failover. */
   entered?: boolean;
   /** Its outcome has been counted. */
