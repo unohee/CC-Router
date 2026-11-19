@@ -31,7 +31,9 @@
 import { SessionRouter, type SessionTarget, type ReassignReason } from "../../proxy/session-router.js";
 import { TokenPool, NoAvailableAccountError, EmptyPoolError } from "../../proxy/token-pool.js";
 import { createSeats, pinnedAnthropicAccount, type Seats } from "../../proxy/seat-metrics.js";
-import { parseBalanceRules, parseSoftCapUtil, parseWeeklyPace } from "../../config/manager.js";
+import { parseBalanceRules, parseCapacityWeights, parseSoftCapUtil, parseWeeklyPace } from "../../config/manager.js";
+import { QuotaHistory } from "../../proxy/quota-history.js";
+import { seatSizes, type SeatSize } from "../../proxy/seat-size.js";
 import { DEFAULT_RATE_LIMITS, type Account } from "../../proxy/types.js";
 import type { Scenario, SeatSpec } from "./scenarios.js";
 import type { RunMetrics } from "./score.js";
@@ -154,8 +156,40 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     accounts.push(a);
   }
 
+  // The router's quota history, fed as the proxy feeds it: spend on every
+  // billed response, a reading per seat per hour. A pool whose history is
+  // available starts with the last eight hours of it (each seat's weekly
+  // utilization climbing a point an hour at its true size); one without starts
+  // empty, so seat sizes must be learnt during the run.
+  const quota = new QuotaHistory({ now: () => now });
+  const toInput = (r: Account["rateLimits"]) => ({
+    fiveHourUtil: r.fiveHourUtil, fiveHourReset: r.fiveHourReset, sevenDayUtil: r.sevenDayUtil, sevenDayReset: r.sevenDayReset,
+  });
+  if (sc.historyAvailable) {
+    for (const a of accounts) {
+      const st = states.get(a.id)!;
+      let prev: number | null = null;
+      for (let k = 8; k >= 0; k--) {
+        const util = Math.max(0, Math.round((st.spec.weeklyUtil - 0.01 * k) * 100) / 100);
+        // Spend only what moved the window: a seat at 0% had no past hours to bill.
+        if (prev !== null && util > prev) quota.addSpend(a.id, (util - prev) * st.spec.weeklyCap);
+        quota.sample(a.id, { ...toInput(a.rateLimits), sevenDayUtil: util }, now - k * HOUR_MS);
+        prev = util;
+      }
+    }
+  }
+  const weights = parseCapacityWeights(sc.routing as never);
+  let sizeMemo: { hour: number; sizes: Map<string, SeatSize> } | null = null;
+  const sizeOf = (id: string): number => {
+    const hour = Math.floor(now / HOUR_MS);
+    if (!sizeMemo || sizeMemo.hour !== hour) {
+      sizeMemo = { hour, sizes: seatSizes(accounts.map(a => a.id), quota.readings(), now, weights) };
+    }
+    return sizeMemo.sizes.get(id)?.relative ?? 1;
+  };
+
   const pool = new TokenPool(accounts);
-  const seats: Seats = createSeats({ pool, openAIAccounts: [], canServeOpenAI: () => false });
+  const seats: Seats = createSeats({ pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf });
   const reassigned: Record<ReassignReason, number> = { unservable: 0, "soft-cap": 0, "weekly-pace": 0 };
   const router = new SessionRouter({
     now: () => now,
@@ -209,6 +243,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
       const until = weekSpent ? s.weekResetAt : s.fiveResetAt;
       a.rateLimits = reading(s, now, "allowed", weekSpent ? "seven_day" : "five_hour");
       a.coolingUntil = Math.max(a.coolingUntil ?? 0, until);
+      quota.sample(a.id, toInput(a.rateLimits), now);
       return false;
     }
     if (s.spec.fiveHourCap > 0 && s.fiveResetAt <= now) { s.fiveResetAt = now + FIVE_HOURS_MS; s.spentFive = 0; }
@@ -216,6 +251,8 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     if (s.spec.fiveHourCap > 0) s.spentFive += cost;
     servedBySeat[a.id] += cost;
     a.rateLimits = reading(s, now, "allowed", "five_hour");
+    quota.addSpend(a.id, cost);
+    quota.sample(a.id, toInput(a.rateLimits), now);
     return true;
   };
 

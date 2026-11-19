@@ -15,7 +15,7 @@ import { CompactAskGuard, expensiveMove } from "./session-migration.js";
 import { SessionContextTracker } from "./session-context-tracker.js";
 import { writeEndpoint, removeEndpoint } from "../config/endpoint.js";
 import { needsRefresh, refreshAccountToken, refreshAfterRejection, saveAccounts, startRefreshLoop } from "./token-refresher.js";
-import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getBalanceRules, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
+import { loadAccounts, loadOpenAIAccounts, saveOpenAIAccounts, accountsFileExists, readAccountsFromPath, readConfig, writeConfig, serialize, readSessionAssignments, writeSessionAssignments, getProxyRequestTimeoutMs, getThrottleConfig, getSoftCapUtil, getWeeklyPace, getBalanceRules, getCapacityWeights, getGovernorConfig, getFailoverEnabled, migrateLegacyAccountProviders, setProviderAccountsEnabled, setAsideUnloadedAnthropicAccounts } from "../config/manager.js";
 import { createThrottleGate } from "./throttle.js";
 import { isShortRequest } from "./short-request.js";
 import type { ThrottleGate } from "./throttle.js";
@@ -58,6 +58,7 @@ import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../provi
 import { startCodexUsageLoop } from "../providers/openai/usage-probe.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { createSeats, isFirstPlacement, pinnedAnthropicAccount } from "./seat-metrics.js";
+import { seatSizes, type SeatSize } from "./seat-size.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
 import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
@@ -618,8 +619,19 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Seat predicates and placement metrics live in seat-metrics.ts, shared with
   // the balance simulator so it ranks seats exactly as this router does.
+  // Seat sizes from the quota history (seat-size.ts), recomputed at most every
+  // five minutes: readings arrive hourly, and placement asks on every request.
+  let sizeMemo: { at: number; sizes: Map<string, SeatSize> } | null = null;
+  const currentSeatSizes = (): Map<string, SeatSize> => {
+    const now = Date.now();
+    if (sizeMemo && now - sizeMemo.at < 5 * 60_000) return sizeMemo.sizes;
+    const sizes = seatSizes(pool.getAll().map(a => a.id), quotaHistory.readings(), now, getCapacityWeights());
+    sizeMemo = { at: now, sizes };
+    return sizes;
+  };
   const seats = createSeats({
     pool, openAIAccounts, canServeOpenAI: a => canServeOpenAI(a, codexBudget ?? undefined),
+    sizeOf: id => currentSeatSizes().get(id)?.relative ?? 1,
   });
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
   const sessionTargetRetainable = seats.retainable;

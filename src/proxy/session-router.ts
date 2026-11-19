@@ -34,6 +34,10 @@ export interface TargetMetrics {
   weekly?: { util: number; resetAtSec?: number };
   /** The 5-hour window, paced when `fiveHour` pacing is on. */
   fiveHour?: { util: number; resetAtSec?: number };
+  /** The seat's weekly quota relative to a typical seat (seat-size.ts), so
+   *  shares of different seats compare as amounts. Absent means 1. Read only
+   *  by the balance rules. */
+  size?: number;
 }
 
 /** Why an existing session left its target. */
@@ -559,7 +563,7 @@ export class SessionRouter {
    *    seats closest to their weekly pace.
    * 3. Among those, the most weekly headroom per hour to the weekly reset:
    *
-   *        (cap - weeklyUtil) / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil) / (1 + liveSessions)
+   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil) / (1 + liveSessions)
    *
    *    The soft cap and the score now read the same window: a seat at 97% of
    *    its week used to score on an idle five-hour window as if it had 98% to
@@ -570,7 +574,9 @@ export class SessionRouter {
    *    counts as full). Tried in the balance simulator against a cut-off at
    *    30% and 50% of the window: proportional served the five-hour-bound
    *    pool best. A seat with no known weekly window is taken to have a full
-   *    week ahead.
+   *    week ahead. `size` (seat-size.ts) turns the weekly share into an
+   *    amount: 40% left on a seat twice the size is twice the tokens, so the
+   *    score is the cost-weighted tokens left per hour to the weekly reset.
    */
   private placeBalanced(
     usable: SessionTarget[],
@@ -602,7 +608,8 @@ export class SessionRouter {
       const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
       const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
       const fiveRoom = five ? Math.min(1, Math.max(0, cap - five.util)) : 1;
-      return Math.max(0, cap - util) / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
+      const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
+      return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
         / (1 + (load.get(targetKey(t)) ?? 0));
     };
 
