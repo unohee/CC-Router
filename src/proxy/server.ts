@@ -632,6 +632,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const seats = createSeats({
     pool, openAIAccounts, canServeOpenAI: a => canServeOpenAI(a, codexBudget ?? undefined),
     sizeOf: id => currentSeatSizes().get(id)?.relative ?? 1,
+    rank: (c, usable, utilOf) => sessionRouter.rank(c, usable, utilOf),
   });
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
   const sessionTargetRetainable = seats.retainable;
@@ -1957,6 +1958,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       stats.addLog({ ts: Date.now(), accountId: next.id, model: req._ccAnthropicModel ?? "-", type: "route", details: msg });
       req.url = st.url;
       if (!(await prepareAttempt(req, res, next, true))) continue;
+      // The session follows the seat that answers: its old pin was unusable
+      // and would be re-placed on the next request, possibly onto a third
+      // seat, paying a second cache rewrite.
+      const sid = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+      if (sid && sessionAffinityEnabled) {
+        sessionRouter.pinTo(sid, { provider: "anthropic", accountId: next.id });
+        usageHistory.recordPlacement("unservable");
+      }
       void failoverProxy(req, res, st.next);
       return;
     }

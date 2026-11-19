@@ -81,6 +81,8 @@ export interface SessionRouterOptions {
 interface Assignment {
   target: SessionTarget;
   lastSeen: number;
+  /** When the pin was placed or last moved; absent for restored pins. */
+  pinnedAt?: number;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
@@ -105,6 +107,23 @@ const BALANCE_MIN_TTR_MIN = 60;
  *  this much of the best pace ratio count as tied. */
 const PACE_RATIO_TIE = 0.05;
 const WEEK_SEC = 7 * 24 * 60 * 60;
+/** Balance rules: a pin is not moved for pace within this long of being
+ *  placed or last moved. Every move is a cache rewrite, and the window that
+ *  prompted one takes time to show the effect. */
+const MIN_DWELL_MS = 30 * 60 * 1000;
+/** Balance rules: a seat is "dry before reset" when its week is projected to
+ *  run out this far ahead of the reset or more, by the even-spend ratio
+ *  (`windowRatio`): r < 1 - DRY_MARGIN. */
+const DRY_MARGIN = 0.25;
+/** Balance rules: the seat a pin moves to must have this much more pace
+ *  ratio than the one it leaves, or the move chases noise. */
+const SURPLUS_MARGIN = 0.35;
+/** Balance rules: a seat takes a pin shed over the soft cap only with this
+ *  much of its binding window below the cap; a seat just under it would be
+ *  over it a few requests later and shed the pin again. Chosen in the balance
+ *  simulator: 0.05 / 0.1 / 0.2 gave 645 / 609 / 659 rewrites on the
+ *  five-hour-bound pool (baseline 651). */
+const CAP_RELIEF_ROOM = 0.1;
 /** Safety valve: a router that never forgets would grow without bound. */
 const MAX_TRACKED_SESSIONS = 10_000;
 
@@ -188,7 +207,7 @@ export class SessionRouter {
       if (!this.overSoftCap(existing.target, utilOf)
         || this.resetsWithin(existing.target, SOFT_CAP_GRACE_MIN, utilOf)
         || !candidates.some(c => this.softCapRelief(c, existing.target, isUsable, utilOf))) {
-        if (!this.shouldLeaveForPace(existing.target, candidates, isUsable, utilOf)) {
+        if (!this.shouldLeaveForPace(existing.target, candidates, isUsable, utilOf, existing.pinnedAt)) {
           existing.lastSeen = this.now();
           // Refreshing the timestamp is itself a change worth persisting: a busy
           // long-lived session never re-assigns, so without this its snapshot
@@ -219,9 +238,47 @@ export class SessionRouter {
       this.onReassign?.({ sessionId, from: existing.target, to: target, reason });
     }
 
-    this.assignments.set(sessionId, { target, lastSeen: this.now() });
+    this.assignments.set(sessionId, { target, lastSeen: this.now(), pinnedAt: this.now() });
     this.onAssignmentsChanged?.();
     return target;
+  }
+
+  /**
+   * The seat the balance rules would place a new session on, for a caller
+   * that has no session to pin: the failover pick. Returns null when nothing
+   * is usable, and under the legacy rules (the caller keeps its own order).
+   * Does not pin.
+   *
+   * Not used for requests without a session id. They leave no pin for the
+   * load term to see, so a run of them all lands on the top-scored seat; in
+   * the balance simulator (2026-11-19) ranking them cost the five-hour-bound
+   * pool 121M against 5M gained on the no-session-id pool, with or without
+   * counting the last minute of them as load. TokenPool.getNext's round-robin
+   * spreads them, and stays.
+   */
+  rank(
+    candidates: SessionTarget[],
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): SessionTarget | null {
+    if (!this.balanced) return null;
+    const usable = candidates.filter(isUsable);
+    if (usable.length === 0) return null;
+    return this.placeBalanced(usable, utilOf);
+  }
+
+  /**
+   * Pin `sessionId` to `target` as the seat that answered it, after failover
+   * served the request there. The pin the session had was unusable (that is
+   * why failover ran) and would have been re-placed on the next request,
+   * possibly onto a third seat: two cache rewrites where one will do. No-op
+   * when the session is already there.
+   */
+  pinTo(sessionId: string, target: SessionTarget): void {
+    const existing = this.assignments.get(sessionId);
+    if (existing && sameTarget(existing.target, target)) { existing.lastSeen = this.now(); return; }
+    this.assignments.set(sessionId, { target, lastSeen: this.now(), pinnedAt: this.now() });
+    this.onAssignmentsChanged?.();
   }
 
   /**
@@ -324,7 +381,18 @@ export class SessionRouter {
     this.onAssignmentsChanged?.();
   }
 
-  /** Live sessions pinned to each of `targets`. */
+  /**
+   * Live sessions pinned to each of `targets`, idle ones included.
+   *
+   * Leaving out pins that had been quiet for ten minutes was tried in the
+   * balance simulator (2026-11-19): a pin that goes quiet is likely to come
+   * back, and once it no longer counts, a burst of new sessions lands on the
+   * seat that holds the most of them, so the five-hour-bound pool scored worse
+   * than with every pin counted (1498M vs 1377M), and the result swung with
+   * the cut-off (20 min 1411M, 30 min 1503M, 45 min 1487M). Counting them at
+   * half weight was worse too (1477M). The TTL sweep (an hour) is what retires
+   * a pin whose session has really ended.
+   */
   private loadOf(targets: SessionTarget[]): Map<string, number> {
     const load = new Map<string, number>();
     for (const target of targets) load.set(targetKey(target), 0);
@@ -352,7 +420,14 @@ export class SessionRouter {
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): boolean {
-    return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
+    if (!(c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf))) return false;
+    // Balance rules: a move over the cap is still a cache rewrite, so the
+    // relief seat must have real room on the window that tripped the cap.
+    if (this.balanced && this.softCapUtil !== null) {
+      const room = this.softCapUtil - this.metricsOf(c, utilOf).util;
+      if (room < CAP_RELIEF_ROOM) return false;
+    }
+    return true;
   }
 
   /** The pacing config in force right now, or null when pacing is off. */
@@ -442,6 +517,7 @@ export class SessionRouter {
     candidates: SessionTarget[],
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
+    pinnedAt?: number,
   ): boolean {
     const m = this.metricsOf(target, utilOf);
     const nowSec = this.now() / 1000;
@@ -449,12 +525,19 @@ export class SessionRouter {
       // Only the weekly window moves a pin: a five-hour burst passes within the
       // hour, and moving on it would pay a cache rewrite to chase a window that
       // is about to refill (and could bounce the session back and forth).
-      const cfg = this.weeklyPace;
+      // A move needs the seat to be projected dry before its reset (its pace
+      // ratio under 1 - DRY_MARGIN), another seat with a clear surplus over
+      // it, and the pin to have dwelt here a while. The release is time-based:
+      // the ratio rises as the week elapses, so a seat that stops spending is
+      // on pace again without anything being reset by hand.
+      if (!this.weeklyPace) return false;
+      if (pinnedAt !== undefined && this.now() - pinnedAt < MIN_DWELL_MS) return false;
       const week = this.windowRatio(m.weekly, WEEK_SEC);
-      if (!cfg || week === null || week >= 1 - cfg.slack - cfg.migrateAhead) return false;
+      if (week === null || week >= 1 - DRY_MARGIN) return false;
       const resetAt = m.weekly?.resetAtSec;
       if (resetAt && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
-      return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf));
+      return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf)
+        && (this.windowRatio(this.metricsOf(c, utilOf).weekly, WEEK_SEC) ?? Infinity) >= week + SURPLUS_MARGIN);
     }
     const pace = this.paceOf(target, utilOf);
     if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;

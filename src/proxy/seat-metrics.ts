@@ -53,6 +53,9 @@ export interface SeatSources {
   canServeOpenAI: (a: OpenAIAccount) => boolean;
   /** Each seat's size relative to a typical seat (seat-size.ts). Absent: all 1. */
   sizeOf?: (accountId: string) => number;
+  /** The session router's ranking for the failover pick (SessionRouter.rank).
+   *  Absent, or null from it: coolest seat first. */
+  rank?: (candidates: SessionTarget[], isUsable: (t: SessionTarget) => boolean, utilOf: (t: SessionTarget) => TargetMetrics) => SessionTarget | null;
 }
 
 export interface Seats {
@@ -63,26 +66,35 @@ export interface Seats {
   /** May keep a session it already holds (judged more leniently than `usable`;
    *  see TokenPool.canRetain). */
   retainable: (t: SessionTarget, model?: string) => boolean;
-  /** The failover pick: usable for this model, not tried yet, coolest first;
-   *  else a seat that can serve only as a last resort. Does not count the
-   *  request; the caller does. */
+  /** The failover pick: usable for this model, not tried yet, ranked as a new
+   *  session would be (else coolest first); else a seat that can serve only
+   *  as a last resort. Does not count the request; the caller does. */
   failoverPick: (tried: ReadonlySet<string>, model: string | undefined) => Account | null;
 }
 
 export function createSeats(src: SeatSources): Seats {
-  const { pool, openAIAccounts, canServeOpenAI, sizeOf } = src;
+  const { pool, openAIAccounts, canServeOpenAI, sizeOf, rank } = src;
   const openAI = (id: string) => openAIAccounts.some(a => a.id === id && canServeOpenAI(a));
+  const metrics = (t: SessionTarget): TargetMetrics => {
+    const m = seatMetrics(t.provider === "anthropic"
+      ? pool.getById(t.accountId)?.rateLimits
+      : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits);
+    return sizeOf ? { ...m, size: sizeOf(t.accountId) } : m;
+  };
+  /** The ranked pick among `accounts`, or null when the ranking is off. */
+  const ranked = (accounts: Account[], model: string | undefined): Account | null => {
+    if (!rank || accounts.length === 0) return null;
+    const t = rank(accounts.map(a => ({ provider: "anthropic" as const, accountId: a.id })), x => pool.canServe(x.accountId, model), metrics);
+    return t ? accounts.find(a => a.id === t.accountId) ?? null : null;
+  };
   return {
-    metrics: t => {
-      const m = seatMetrics(t.provider === "anthropic"
-        ? pool.getById(t.accountId)?.rateLimits
-        : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits);
-      return sizeOf ? { ...m, size: sizeOf(t.accountId) } : m;
-    },
+    metrics,
     usable: (t, model) => t.provider === "anthropic" ? pool.canServe(t.accountId, model) : openAI(t.accountId),
     retainable: (t, model) => t.provider === "anthropic" ? pool.canRetain(t.accountId, model) : openAI(t.accountId),
     failoverPick: (tried, model) => {
       let candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
+      const pick = ranked(candidates, model);
+      if (pick) return pick;
       // Before relaying a refusal: a seat whose refresh token died but whose
       // access token still works (TokenPool.canServeLastResort).
       if (candidates.length === 0) candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServeLastResort(a.id, model));

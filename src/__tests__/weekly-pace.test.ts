@@ -79,13 +79,17 @@ describe("SessionRouter with weekly pacing", () => {
       a: { util: 0.2, daysLeft: 6 }, b: { util: 0.05, daysLeft: 6 },
     };
     const moves: string[] = [];
+    // The clock runs on 31 minutes before each judgement: under the balance
+    // rules a pin is not moved within half an hour of being placed.
+    let now = NOW;
     const r = new SessionRouter({
-      now: () => NOW, weeklyPace: { slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 },
+      now: () => now, weeklyPace: { slack: 0.1, migrateAhead: 0.15, fiveHour: false, fiveHourSlack: 0.2 },
       onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`),
     });
     const targets = [T("a"), T("b")];
     // Pin to a: make b unusable for the first placement.
     expect(r.resolve("s", targets, t => t.accountId === "a", poolMetrics(m))?.accountId).toBe("a");
+    now += 31 * 60_000;
     // a is ahead (0.2 vs 1/7+0.1≈0.243 → on pace): stays.
     expect(r.resolve("s", targets, () => true, poolMetrics(m))?.accountId).toBe("a");
     // a slightly ahead (+0.05): still stays.

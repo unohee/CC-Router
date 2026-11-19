@@ -189,7 +189,6 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
   };
 
   const pool = new TokenPool(accounts);
-  const seats: Seats = createSeats({ pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf });
   const reassigned: Record<ReassignReason, number> = { unservable: 0, "soft-cap": 0, "weekly-pace": 0 };
   const router = new SessionRouter({
     now: () => now,
@@ -197,6 +196,12 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     weeklyPace: parseWeeklyPace(sc.routing as never),
     balance: parseBalanceRules(sc.routing as never),
     onReassign: ({ reason }) => { reassigned[reason]++; },
+  });
+  // As server.ts wires them: the failover pick and the no-session pick rank
+  // through the router when the balance rules are on.
+  const seats: Seats = createSeats({
+    pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf,
+    rank: (c, usable, utilOf) => router.rank(c, usable, utilOf),
   });
   const candidates: SessionTarget[] = accounts.map(a => ({ provider: "anthropic", accountId: a.id }));
 
@@ -256,18 +261,24 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     return true;
   };
 
-  /** Send to `first`, failing over across the pool on a refusal. Returns the seat that answered. */
-  const send = (first: Account | null, costOn: (seat: string) => number): string | null => {
+  /** Send to `first`, failing over across the pool on a refusal. Returns the
+   *  seat that answered. A session follows the seat failover served it from
+   *  (server.ts does the same with SessionRouter.pinTo). */
+  const send = (first: Account | null, costOn: (seat: string) => number, sessionId?: string): string | null => {
     const tried = new Set<string>();
     let a = first;
     while (a) {
       tried.add(a.id);
-      if (upstream(a, costOn(a.id))) return a.id;
+      if (upstream(a, costOn(a.id))) {
+        if (sessionId && tried.size > 1) { router.pinTo(sessionId, { provider: "anthropic", accountId: a.id }); reassigned.unservable++; }
+        return a.id;
+      }
       a = seats.failoverPick(tried, undefined);
     }
     return null;
   };
 
+  /** The seat for a request with no pin, as the /v1 handler picks it. */
   const getNext = (): Account | null => {
     try { return pool.getNext(); } catch (e) {
       if (e instanceof NoAvailableAccountError || e instanceof EmptyPoolError) return null;
@@ -286,7 +297,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     // A seat without this session's cache re-writes the whole prefix first.
     const rewrite = s.prefix * 1.25;
     const costOn = (seat: string) => (s.cacheSeat === null || s.cacheSeat === seat ? base : base + rewrite);
-    const served = send(first, costOn);
+    const served = send(first, costOn, s.id);
     if (!served) { m.dry += base; return; }
     if (s.cacheSeat !== null && s.cacheSeat !== served) { m.moves++; m.moveCost += rewrite; }
     s.cacheSeat = served;
