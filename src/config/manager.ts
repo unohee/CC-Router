@@ -443,7 +443,12 @@ export function getThrottleConfig(): ThrottleConfig {
  * evict every account.
  */
 export function getSoftCapUtil(): number | undefined {
-  const v = readConfig().routing?.softCapUtil;
+  return parseSoftCapUtil(readConfig().routing);
+}
+
+/** `getSoftCapUtil` on a given `routing` block, for callers that hold one. */
+export function parseSoftCapUtil(routing: ProxyConfig["routing"] | undefined): number | undefined {
+  const v = routing?.softCapUtil;
   return typeof v === "number" && Number.isFinite(v) && v > 0 && v < 1 ? v : undefined;
 }
 
@@ -472,7 +477,12 @@ export function getGovernorConfig(): GovernorConfig {
 }
 
 export function getWeeklyPace(): WeeklyPaceConfig | undefined {
-  const raw = readConfig().routing?.weeklyPace;
+  return parseWeeklyPace(readConfig().routing);
+}
+
+/** `getWeeklyPace` on a given `routing` block, for callers that hold one. */
+export function parseWeeklyPace(routing: ProxyConfig["routing"] | undefined): WeeklyPaceConfig | undefined {
+  const raw = routing?.weeklyPace;
   if (!raw || raw.enabled !== true) return undefined;
   const frac = (v: unknown, d: number) =>
     typeof v === "number" && Number.isFinite(v) && v >= 0 && v < 1 ? v : d;
