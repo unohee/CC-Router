@@ -1429,3 +1429,27 @@ describe("a 5-hour window the response did not report", () => {
     expect(textOf(find(before.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "5-hour window")[0]!)).toContain("no reading");
   });
 });
+
+describe("supply capacities", () => {
+  const cap = (over: Record<string, unknown>) => ({ status: "unknown", tokensPerPercent: null, samples: 0, minSamples: 3, moved: 0, minMoved: 0.08, errorBand: null, ...over });
+
+  it("shows a known capacity with its error band, and an unknown one against the gate it did not pass, never a hardcoded 24", async () => {
+    const page = await boot(ok(health([account()], { supply: supply({ accounts: [
+      { id: "kyte", fiveHour: supWin({ capacity: cap({ status: "unknown", samples: 11, minSamples: 24, moved: 0.3, minMoved: 0.02 }), remaining: null }),
+        sevenDay: supWin({ capacity: cap({ status: "ok", samples: 18, tokensPerPercent: 6_948_000, moved: 0.27, errorBand: 0.037 }), remaining: 444_000_000 }) },
+      { id: "lyra", fiveHour: supWin({ capacity: cap({ samples: 2 }), remaining: null }),
+        sevenDay: supWin({ capacity: cap({ samples: 3, moved: 0.04 }), remaining: null }) },
+    ] }) })));
+    expect(page.rows("supbody")).toEqual([
+      "kyte unknown (11 of 24 pairs) 6.9M ±4% 444M lasts to reset",
+      "lyra unknown (2 of 3 pairs) unknown (moved 4% of 8%) — lasts to reset",
+    ]);
+  });
+
+  it("draws an older router's capacity (no gates in the estimate) as before", async () => {
+    const page = await boot(ok(health([account()], { supply: supply({ accounts: [
+      { id: "lyra", fiveHour: supWin({ capacity: { status: "unknown", samples: 5, tokensPerPercent: null } }), sevenDay: supWin() },
+    ] }) })));
+    expect(page.rows("supbody")).toEqual(["lyra unknown (5 pairs) 2.0M 40M lasts to reset"]);
+  });
+});

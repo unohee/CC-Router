@@ -393,7 +393,7 @@ const BODY = String.raw`
                 <tbody id="supbody"></tbody>
               </table>
             </div>
-            <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). A capacity stays unknown until 24 pairs of hourly readings inside one window have been seen for that account. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
+            <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). The 7-day capacity is the seat-size measurement placement uses (3 pairs of hourly readings that moved the week by 0.08 in all, from the last 14 days; ± is its error band from the headers' rounding), so "7-day left" is the figure in the Placement column; the 5-hour capacity needs 24 pairs. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
           </section>
           <section class="card" aria-labelledby="out-h" id="outcard" hidden>
             <div class="cardhead"><h2 id="out-h">Outcomes</h2><span id="outsum" class="sum"></span></div>
@@ -1073,7 +1073,12 @@ const SCRIPT = String.raw`
     return String(Math.round(n));
   }
   function capText(c) {
-    return c.status === "ok" ? big(c.tokensPerPercent) : "unknown (" + c.samples + "/24)";
+    if (c.status === "ok") return big(c.tokensPerPercent) + (isNum(c.errorBand) ? " ±" + Math.round(c.errorBand * 100) + "%" : "");
+    // The gates it did not pass, from the estimate itself (the two windows have different ones).
+    var need = isNum(c.minSamples) ? c.minSamples : null;
+    if (need !== null && c.samples < need) return "unknown (" + c.samples + " of " + need + " pairs)";
+    if (isNum(c.moved) && isNum(c.minMoved)) return "unknown (moved " + Math.round(c.moved * 100) + "% of " + Math.round(c.minMoved * 100) + "%)";
+    return "unknown (" + c.samples + " pairs)";
   }
   function runsOut(a) {
     var parts = [];

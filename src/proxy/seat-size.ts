@@ -32,6 +32,8 @@ export interface SeatSize {
   samples: number;
   /** Hours between the oldest and newest reading the pairs span (0 when not measured). */
   spanHours: number;
+  /** Weekly utilization the pairs moved in total (0..1), measured or not. */
+  moved: number;
   /** Relative error bound of tokensPerWeek: headers round utilization to 0.01
    *  and the moves telescope, so the estimate is off by at most 0.01 / moved.
    *  Null when not measured. */
@@ -75,7 +77,7 @@ export function measureWeeklySize(
   readings: ReadonlyArray<QuotaReading>,
   now: number,
   opts: SeatSizeOptions = DEFAULT_SEAT_SIZE_OPTIONS,
-): { tokensPerWeek: number | null; samples: number; spanHours: number; errorBand: number | null } {
+): { tokensPerWeek: number | null; samples: number; spanHours: number; errorBand: number | null; moved: number } {
   const sorted = readings.filter(r => r.sampledAt >= now - opts.maxAgeMs).sort((a, b) => a.sampledAt - b.sampledAt);
   let samples = 0, tokens = 0, moved = 0;
   let first: number | null = null, last: number | null = null;
@@ -95,8 +97,8 @@ export function measureWeeklySize(
     last = b.sampledAt;
   }
   const spanHours = first !== null && last !== null ? (last - first) / 3_600_000 : 0;
-  if (samples < opts.minSamples || moved < opts.minMoved || tokens <= 0) return { tokensPerWeek: null, samples, spanHours, errorBand: null };
-  return { tokensPerWeek: tokens / moved, samples, spanHours, errorBand: UTIL_ROUNDING / moved };
+  if (samples < opts.minSamples || moved < opts.minMoved || tokens <= 0) return { tokensPerWeek: null, samples, spanHours, errorBand: null, moved };
+  return { tokensPerWeek: tokens / moved, samples, spanHours, errorBand: UTIL_ROUNDING / moved, moved };
 }
 
 function median(xs: number[]): number {
@@ -145,13 +147,13 @@ export function seatSizes(
       // Within the measurement's error a seat is the typical size: a ratio
       // that is mostly rounding noise must not reorder equal seats.
       const relative = Math.max(ratio, 1 / ratio) < opts.sameSize ? 1 : ratio;
-      out.set(id, { relative, source: "measured", tokensPerWeek: m.tokensPerWeek, samples: m.samples, spanHours: m.spanHours, errorBand: m.errorBand });
+      out.set(id, { relative, source: "measured", tokensPerWeek: m.tokensPerWeek, samples: m.samples, spanHours: m.spanHours, errorBand: m.errorBand, moved: m.moved });
       continue;
     }
     const w = weightOf(weights, id);
     out.set(id, w !== null
-      ? { relative: w, source: "weight", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null }
-      : { relative: 1, source: "equal", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null });
+      ? { relative: w, source: "weight", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null, moved: m.moved }
+      : { relative: 1, source: "equal", tokensPerWeek: null, samples: m.samples, spanHours: m.spanHours, errorBand: null, moved: m.moved });
   }
   return out;
 }
