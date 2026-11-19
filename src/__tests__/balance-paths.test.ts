@@ -134,7 +134,7 @@ describe("server wiring", () => {
   it("ranks the failover pick through the session router and re-pins after failover", () => {
     const src = readFileSync(fileURLToPath(new URL("../proxy/server.ts", import.meta.url)), "utf8");
     expect(src).toMatch(/rank: \(c, usable, utilOf, mode\) => sessionRouter\.rank\(c, usable, utilOf, mode\)/);
-    expect(src).toMatch(/sessionRouter\.pinTo\(sid, \{ provider: "anthropic", accountId: next\.id \}\)/);
+    expect(src).toMatch(/sessionRouter\.pinTo\(sid, \{ provider: "anthropic", accountId: answered\.id \}\)/);
     // Requests without a session id go through the same ranking first.
     expect(src).toMatch(/seats\.pickForRequest\(req\._ccAnthropicModel\)/);
     expect(src).toMatch(/account = pinnedAccount \?\? ranked \?\? pool\.getNext\(req\._ccAnthropicModel\)/);

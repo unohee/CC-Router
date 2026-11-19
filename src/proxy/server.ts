@@ -520,7 +520,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       if (sessionFlush) return;
       sessionFlush = setTimeout(() => {
         sessionFlush = null;
-        writeSessionAssignments(sessionRouter.snapshot());
+        writeSessionAssignments(sessionRouter.snapshot(), sessionRouter.loadSnapshot());
       }, 2_000);
       sessionFlush.unref?.();
     },
@@ -540,18 +540,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       clearTimeout(sessionFlush);
       sessionFlush = null;
     }
-    writeSessionAssignments(sessionRouter.snapshot());
+    writeSessionAssignments(sessionRouter.snapshot(), sessionRouter.loadSnapshot());
   };
   // Restore before serving: a session that arrives first thing after a restart
   // must find its old account, not be handed a new one.
-  sessionRouter.restore(readSessionAssignments() as Parameters<typeof sessionRouter.restore>[0]);
+  const savedSessions = readSessionAssignments();
+  sessionRouter.restore(savedSessions.sessions as Parameters<typeof sessionRouter.restore>[0]);
+  sessionRouter.restoreLoad(savedSessions.load as Parameters<typeof sessionRouter.restoreLoad>[0]);
 
   // Snapshot on the way out, whichever way that is. The graceful path below
   // covers signals, but auto-update restarts call process.exit directly and
   // would otherwise discard the pending debounce — losing exactly the
   // assignments a restart is about to need.
   process.on("exit", () => {
-    writeSessionAssignments(sessionRouter.snapshot());
+    writeSessionAssignments(sessionRouter.snapshot(), sessionRouter.loadSnapshot());
   });
 
   // Hourly usage history. Restore before serving so a restart adds to the past
@@ -1922,10 +1924,46 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     return !(isBare429(stated, rl, req._ccAnthropicModel) && !hasClaudeCodeIdentity(req.headers));
   };
 
+  /**
+   * After failover, the session follows the seat that answered: its old pin
+   * was unusable and would be re-placed on the next request, possibly onto a
+   * third seat, paying a second cache rewrite. Only when the seat it was on
+   * (st.origin, the first seat, not the last hop: a later refusal comes from
+   * a seat the session was never pinned to) cannot keep it, that is a 429/529
+   * cooldown or the seat is otherwise unretainable. A transient 5xx or a
+   * connection error leaves that seat usable, and its cache is still there.
+   * An auth refusal from the origin (a 401, or its token could not be
+   * refreshed) is followed too: canRetain still says yes while the refresh is
+   * being retried, and a session left there would fail over again on every
+   * request until the token is back.
+   * Done once, here, when a seat has answered: not per hop, which pinned the
+   * session to seats that then refused too. Not when another request of the
+   * same session has already moved the pin off the origin meanwhile (it found
+   * the origin cooling and re-placed it): a second re-pin would be a second
+   * rewrite.
+   */
+  const followAnsweringSeat = (req: Request): void => {
+    const st = req._ccFailover;
+    const answered = req._ccAccount;
+    if (!st?.entered || !answered || answered.id === st.origin || !sessionAffinityEnabled) return;
+    const sid = String(req.headers["x-claude-code-session-id"] ?? "").trim();
+    if (!sid) return;
+    const authRefusal = st.originKind === "401" || st.originKind === "token-refresh";
+    if (!authRefusal && pool.canRetain(st.origin, req._ccAnthropicModel)) return;
+    const current = sessionRouter.peek(sid);
+    if (current && !(current.provider === "anthropic" && current.accountId === st.origin)) return;
+    sessionRouter.pinTo(sid, { provider: "anthropic", accountId: answered.id });
+    usageHistory.recordPlacement("unservable");
+  };
+
   async function onFailoverResponse(proxyRes: IncomingMessage, req: Request, res: ServerResponse): Promise<void> {
     if (res.headersSent || res.destroyed || !req._ccFailover || !shouldFailover(proxyRes, req)) {
       if (res.destroyed) endFailover(req, "clientGone");
-      else endFailover(req, (proxyRes.statusCode ?? 0) < 400 ? "recovered" : "refused");
+      else {
+        const recovered = (proxyRes.statusCode ?? 0) < 400;
+        if (recovered) followAnsweringSeat(req);
+        endFailover(req, recovered ? "recovered" : "refused");
+      }
       if (res.headersSent || res.destroyed) { relayResponse(proxyRes, res); return; }
       const seat = req._ccAccount?.id ?? "?";
       guardedRelay(proxyRes, res, {
@@ -1963,7 +2001,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   async function failoverNext(req: Request, res: ServerResponse, refusal: StoredRefusal): Promise<void> {
     const st = req._ccFailover!;
     st.last = refusal;
-    if (!st.entered) { st.entered = true; failoverCounters.entered(); }
+    if (!st.entered) { st.entered = true; st.originKind = refusal.kind; failoverCounters.entered(); }
     failoverCounters.refused(refusal.kind);
     const from = req._ccAccount?.id ?? "?";
     const refusedLog = req._pendingLog;
@@ -1983,14 +2021,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       stats.addLog({ ts: Date.now(), accountId: next.id, model: req._ccAnthropicModel ?? "-", type: "route", details: msg });
       req.url = st.url;
       if (!(await prepareAttempt(req, res, next, true))) continue;
-      // The session follows the seat that answers: its old pin was unusable
-      // and would be re-placed on the next request, possibly onto a third
-      // seat, paying a second cache rewrite.
-      const sid = String(req.headers["x-claude-code-session-id"] ?? "").trim();
-      if (sid && sessionAffinityEnabled) {
-        sessionRouter.pinTo(sid, { provider: "anthropic", accountId: next.id });
-        usageHistory.recordPlacement("unservable");
-      }
+      // If this seat answers, the session may follow it: followAnsweringSeat.
       void failoverProxy(req, res, st.next);
       return;
     }
@@ -2079,7 +2110,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     // other accounts before answering. Everything else is piped as before.
     const failover = failoverEnabled && req.method === "POST" && req.path === "/messages";
     if (failover) {
-      req._ccFailover = { tried: new Set([account.id]), url: req.url, next, retries: 0 };
+      req._ccFailover = { tried: new Set([account.id]), url: req.url, next, retries: 0, origin: account.id };
     }
     res.once("close", () => {
       const held = req._ccFailover ? req._ccFailover.throttleHeld : req._ccAccount?.id;
@@ -2215,7 +2246,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     saveAccounts(pool.getAll());
     // Flush now: the debounce timer will not fire after exit, and losing the
     // final assignments is what makes a restart rewrite every prompt cache.
-    writeSessionAssignments(sessionRouter.snapshot());
+    writeSessionAssignments(sessionRouter.snapshot(), sessionRouter.loadSnapshot());
     flushUsage();
     flushAccountState();
     quotaHistory.touch();

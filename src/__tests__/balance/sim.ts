@@ -106,6 +106,9 @@ interface Session {
 export interface SimOptions {
   /** Set the wall clock TokenPool reads (vi.setSystemTime). */
   setClock: (ms: number) => void;
+  /** pinnedAt for each restored pin, from its lastSeen; by default the
+   *  snapshot carries none (the older file format) and restore() takes lastSeen. */
+  restoredPinnedAt?: (lastSeen: number, now: number) => number;
 }
 
 export interface SimResult {
@@ -120,6 +123,10 @@ export interface SimResult {
   queueCapped: number;
   /** Pin moves the router reported, by reason. */
   reassigned: Record<ReassignReason, number>;
+  /** Cache rewrites (sessions served off their cache seat) in the first 30 minutes. */
+  earlyMoves: number;
+  /** Simulated ms from the start to the first cache rewrite; null when none. */
+  firstMoveAtMs: number | null;
   /** Sessions that got their first pin. */
   placed: number;
   /** Cost-weighted tokens each seat served. */
@@ -269,6 +276,8 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   let queued = 0, queueCapped = 0;
   const utilAtReset: Record<string, number[]> = Object.fromEntries(sc.seats.map(s => [s.id, [] as number[]]));
   let placed = 0;
+  let earlyMoves = 0;
+  let firstMoveAtMs: number | null = null;
   let nextSession = 0;
   const sessions: Session[] = [];
 
@@ -284,16 +293,26 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   };
 
   // Restored pins: sessions already pinned, with their cache on that seat.
+  // Restored pins: as the previous process saved them. They were live
+  // sessions, placed some time ago and seen in the last few minutes; the
+  // saved load window is what their requests put on their seats. The
+  // snapshot has no pinnedAt (older format), which `restore` must handle.
   const restored = sc.events?.restoredPins;
   if (restored) {
     const entries = [];
+    const load: Array<{ at: number; provider: "anthropic"; accountId: string; weight: number }> = [];
+    let i = 0;
     for (const [seat, count] of Object.entries(restored.perSeat)) {
-      for (let i = 0; i < count; i++) {
+      for (let k = 0; k < count; k++, i++) {
         const s = newSession(restored.prefix, seat);
-        entries.push({ sessionId: s.id, provider: "anthropic" as const, accountId: seat, lastSeen: now });
+        const lastSeen = now - (i % 10) * MIN_MS;
+        const pinnedAt = opts.restoredPinnedAt?.(lastSeen, now);
+        entries.push({ sessionId: s.id, provider: "anthropic" as const, accountId: seat, lastSeen, ...(pinnedAt !== undefined ? { pinnedAt } : {}) });
+        load.push({ at: lastSeen, provider: "anthropic", accountId: seat, weight: 1 });
       }
     }
     router.restore(entries);
+    router.restoreLoad(load);
   }
 
   /** Upstream: serve `cost` on a seat, or refuse when a window is spent. */
@@ -331,7 +350,11 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
     while (a) {
       tried.add(a.id);
       if (upstream(a, costOn(a.id))) {
-        if (sessionId && tried.size > 1) { router.pinTo(sessionId, { provider: "anthropic", accountId: a.id }); reassigned.unservable++; }
+        // As server.ts: the session follows the seat that answered only when
+        // the seat it was on cannot keep it (here every refusal cools it).
+        if (sessionId && tried.size > 1 && first && !pool.canRetain(first.id)) {
+          router.pinTo(sessionId, { provider: "anthropic", accountId: a.id }); reassigned.unservable++;
+        }
         return a.id;
       }
       a = seats.failoverPick(tried, undefined);
@@ -362,7 +385,11 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
     const costOn = (seat: string) => (s.cacheSeat === null || s.cacheSeat === seat ? base : base + rewrite);
     const served = send(first, costOn, s.id);
     if (!served) { m.dry += base; return; }
-    if (s.cacheSeat !== null && s.cacheSeat !== served) { m.moves++; m.moveCost += rewrite; }
+    if (s.cacheSeat !== null && s.cacheSeat !== served) {
+      m.moves++; m.moveCost += rewrite;
+      if (now - SIM_EPOCH < 30 * MIN_MS) earlyMoves++;
+      if (firstMoveAtMs === null) firstMoveAtMs = now - SIM_EPOCH;
+    }
     s.cacheSeat = served;
     s.requests++;
     // Grows from its own size: a restored session keeps the prefix it came with.
@@ -462,5 +489,5 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   const meanShare = over.reduce((a, o) => a + o.share, 0) / Math.max(1, over.length);
   for (const o of over) overspendAtEnd += Math.max(0, o.share - meanShare) * o.cap;
 
-  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, placed, servedBySeat, utilAtReset };
+  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, earlyMoves, firstMoveAtMs, placed, servedBySeat, utilAtReset };
 }
