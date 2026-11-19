@@ -146,6 +146,38 @@ describe("the balance rules", () => {
   });
 });
 
+describe("seat size", () => {
+  it("turns shares into amounts: the same share left on a seat twice the size ranks first", () => {
+    const pool = [T("small"), T("big")];
+    const same = seat({ util: 0.5, hoursLeft: 80 });
+    const r = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const sized = (t: SessionTarget) => ({ ...same, size: t.accountId === "big" ? 2 : 1 });
+    expect(r.resolve("a", pool, () => true, sized)!.accountId).toBe("big");
+    // Equal sizes tie and rotate.
+    const r2 = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const picks = ["a", "b"].map(id => r2.resolve(id, pool, () => true, () => same)!.accountId);
+    expect(picks.sort()).toEqual(["big", "small"]);
+  });
+
+  it("is ignored by the legacy rules", () => {
+    const pool = [T("small"), T("big")];
+    const m = (t: SessionTarget) => ({ ...seat({ util: 0.5, hoursLeft: 80 }, { util: t.accountId === "big" ? 0.3 : 0.1, hoursLeft: 3 }), size: t.accountId === "big" ? 5 : 1 });
+    expect(place({ softCapUtil: 0.98, balance: false }, pool, m)).toBe("small");
+  });
+
+  it("on the live snapshot with kyte measured at twice a Team seat, ranks kyte, vega and heewon above lyra and rigel", () => {
+    const sized = (t: SessionTarget) => ({ ...LIVE_POOL(t), size: t.accountId === "kyte" ? 2.03 : 1 });
+    const r = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const picks = Array.from({ length: 5 }, (_, i) => r.resolve(`s${i}`, LIVE_SEATS, () => true, sized)!.accountId);
+    // kyte holds about 1.6B tokens of its week: it takes several sessions before
+    // a Team seat with a third of its week left outranks it.
+    expect(picks.slice(0, 2)).toEqual(["kyte", "kyte"]);
+    expect(picks).toContain("vega");
+    expect(picks).not.toContain("lyra");
+    expect(picks).not.toContain("rigel");
+  });
+});
+
 describe("routing.balance.legacy", () => {
   it("is read from the routing block: the balance rules are on unless legacy is true", () => {
     expect(parseBalanceRules(undefined)).toBe(true);
@@ -192,6 +224,15 @@ describe("a router with neither softCapUtil nor weeklyPace", () => {
 describe("in the balance simulator", () => {
   beforeAll(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
   afterAll(() => { vi.useRealTimers(); });
+
+  it("on the live snapshot spends lyra's leftover before its reset and fills kyte far more than before", () => {
+    const sc = SCENARIOS.find(s => s.name === "live-snapshot")!;
+    const r = simulate(sc, { setClock: ms => vi.setSystemTime(ms) });
+    // lyra starts at 95% with 27.5 hours left; its last points are spent by
+    // the sessions already on it. The baseline policy left kyte at 54%.
+    expect(r.utilAtReset["lyra"][0]).toBeGreaterThanOrEqual(0.95);
+    expect(r.utilAtReset["kyte"][0]).toBeGreaterThanOrEqual(0.75);
+  }, 120_000);
 
   it("is strictly better than the baseline on the live snapshot", () => {
     const base = JSON.parse(readFileSync(fileURLToPath(new URL("../../docs/balance/baseline.json", import.meta.url)), "utf8")) as

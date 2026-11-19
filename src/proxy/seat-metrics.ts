@@ -51,6 +51,8 @@ export interface SeatSources {
   /** The OpenAI picker's own predicate, so a session is never pinned to an
    *  account the picker would refuse. */
   canServeOpenAI: (a: OpenAIAccount) => boolean;
+  /** Each seat's size relative to a typical seat (seat-size.ts). Absent: all 1. */
+  sizeOf?: (accountId: string) => number;
 }
 
 export interface Seats {
@@ -68,12 +70,15 @@ export interface Seats {
 }
 
 export function createSeats(src: SeatSources): Seats {
-  const { pool, openAIAccounts, canServeOpenAI } = src;
+  const { pool, openAIAccounts, canServeOpenAI, sizeOf } = src;
   const openAI = (id: string) => openAIAccounts.some(a => a.id === id && canServeOpenAI(a));
   return {
-    metrics: t => seatMetrics(t.provider === "anthropic"
-      ? pool.getById(t.accountId)?.rateLimits
-      : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits),
+    metrics: t => {
+      const m = seatMetrics(t.provider === "anthropic"
+        ? pool.getById(t.accountId)?.rateLimits
+        : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits);
+      return sizeOf ? { ...m, size: sizeOf(t.accountId) } : m;
+    },
     usable: (t, model) => t.provider === "anthropic" ? pool.canServe(t.accountId, model) : openAI(t.accountId),
     retainable: (t, model) => t.provider === "anthropic" ? pool.canRetain(t.accountId, model) : openAI(t.accountId),
     failoverPick: (tried, model) => {

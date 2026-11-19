@@ -367,7 +367,13 @@ export interface ProxyConfig {
     weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number; fiveHour?: boolean; fiveHourSlack?: number };
     /** How `softCapUtil` and `weeklyPace` judge seats. `legacy: true` keeps the
      *  rules from before the balance work (session-router.ts, `balance`). */
-    balance?: { legacy?: boolean };
+    balance?: {
+      legacy?: boolean;
+      /** Per-account weekly quota relative to a typical seat (1), used only
+       *  while that seat's size cannot be measured from its quota history
+       *  (seat-size.ts). E.g. { "kyte": 2 }. */
+      capacityWeight?: Record<string, number>;
+    };
     /** In-router failover for POST /v1/messages (server.ts). On unless
      *  `enabled` is explicitly false. */
     failover?: { enabled?: boolean };
@@ -457,6 +463,17 @@ export function getBalanceRules(): boolean {
 /** `getBalanceRules` on a given `routing` block. */
 export function parseBalanceRules(routing: ProxyConfig["routing"] | undefined): boolean {
   return routing?.balance?.legacy !== true;
+}
+
+/** `routing.balance.capacityWeight`, or undefined. Values are checked by seat-size.ts. */
+export function getCapacityWeights(): Record<string, unknown> | undefined {
+  return parseCapacityWeights(readConfig().routing);
+}
+
+/** `getCapacityWeights` on a given `routing` block. */
+export function parseCapacityWeights(routing: ProxyConfig["routing"] | undefined): Record<string, unknown> | undefined {
+  const w = routing?.balance?.capacityWeight;
+  return w && typeof w === "object" && !Array.isArray(w) ? w : undefined;
 }
 
 /** `getSoftCapUtil` on a given `routing` block, for callers that hold one. */
