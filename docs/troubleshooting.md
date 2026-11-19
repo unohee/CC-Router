@@ -433,6 +433,10 @@ on pace, and a seat over the soft cap waits for every seat to be.
   `routing.balance.capacityWeight` for seats you know are larger, or wait a few hours of traffic.
 - **A seat is `placeable: false` with `usable: true`:** it is ahead of pace while others are on pace.
   Its `weekRatio` rises as the week elapses, so it comes back by itself; nothing to reset.
+- **A seat's week just reset and it shows `weekRatio: null`:** it has no reading of the new window
+  yet. It is `placeable` all the same (tier `on-pace`), competing on the score with a full week to
+  its reset, and the first response routed to it gives it a reading; a seat is never shut out of
+  placement for lack of a reading.
 - **The rules say `legacy`:** `routing.balance.legacy` is `true`, or neither `softCapUtil` nor
   `weeklyPace` is set. Remove the key to get the balance rules.
 - **It looks wrong anyway:** `routing.balance.legacy: true` restores the old rules at once. The

@@ -84,9 +84,8 @@ export interface SeatExplanation {
   /** Which tier paceTier puts the seat in: on-pace (both windows), week-ok
    *  (ahead on the 5-hour window only), behind (ahead on the week: spending
    *  it faster than it elapses), or over-cap (at or past the soft cap, not
-   *  placed at all). A seat with no weekly reading reads on-pace, yet is
-   *  placeable only while no measured seat under the cap exists (`placeable`
-   *  says which). */
+   *  placed at all). A seat with no weekly reading reads on-pace and is
+   *  placeable, competing on the score until its first reading. */
   tier: SeatTier;
 }
 
@@ -902,10 +901,19 @@ export class SessionRouter {
    * week (a five-hour burst refills within hours). When every seat is behind
    * on its week, all of them compete, and the score is scaled by each seat's
    * weekly pace ratio (`paceFactor`) so pace still counts without ever
-   * narrowing the choice to one seat. A seat with no weekly reading counts as
-   * on pace only while no measured seat under the cap exists: a fresh seat
-   * (or one the router has never read) must take work to produce a reading,
-   * but must not take every session while measured seats have room.
+   * narrowing the choice to one seat.
+   *
+   * A seat with no weekly reading (never read, or its reset passed and the
+   * pool swept the reading) is in no tier by rule: the tiers are decided
+   * among the measured seats, and the unmeasured seat joins whichever tier
+   * the pool resolves to, competing on the score with util 0 and a full week
+   * to its reset (balanceScore reads a null week that way; paceFactor is 1).
+   * Its load counts as every seat's does, so it wins at most a session or two
+   * before the score of a loaded seat falls under the measured ones, and its
+   * first response gives it a reading. Before this (run 2) it was dropped from
+   * the pool while any measured seat under the cap existed, and a seat whose
+   * week had just reset waited for a request without a session id, or for a
+   * dry seat to move a pin onto it, before it took any work.
    */
   private paceTier(
     pool: SessionTarget[],
@@ -913,13 +921,14 @@ export class SessionRouter {
   ): { pool: SessionTarget[]; behind: boolean } {
     const paces = pool.map(t => this.paceRatios(t, utilOf));
     const measured = pool.filter((_, i) => paces[i].week !== null);
-    const among = measured.length > 0 ? measured : pool;
-    const amongPaces = among.map(t => paces[pool.indexOf(t)]);
-    const onPace = among.filter((_, i) => amongPaces[i].onPace);
-    const weekOk = among.filter((_, i) => !amongPaces[i].weekAhead);
-    if (onPace.length > 0) return { pool: onPace, behind: false };
-    if (weekOk.length > 0) return { pool: weekOk, behind: false };
-    return { pool: among, behind: true };
+    const unmeasured = pool.filter((_, i) => paces[i].week === null);
+    if (measured.length === 0) return { pool, behind: false };
+    const paceOf = (t: SessionTarget) => paces[pool.indexOf(t)];
+    const onPace = measured.filter(t => paceOf(t).onPace);
+    const weekOk = measured.filter(t => !paceOf(t).weekAhead);
+    if (onPace.length > 0) return { pool: [...onPace, ...unmeasured], behind: false };
+    if (weekOk.length > 0) return { pool: [...weekOk, ...unmeasured], behind: false };
+    return { pool, behind: true };
   }
 
   /** The weekly pace ratio as a score factor (1 with no reading), to PACE_POWER. */
