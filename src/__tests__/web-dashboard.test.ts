@@ -72,6 +72,7 @@ async function boot(
   respond: () => Promise<unknown>,
   usage: () => Promise<unknown> = ok(usageSummary()),
   series: () => Promise<unknown> = ok(usageSeries()),
+  storage?: Map<string, string>,
 ): Promise<Booted> {
   const urls: string[] = [];
   const els = new Map<string, FakeEl>();
@@ -88,7 +89,10 @@ async function boot(
       createTextNode: (t: string) => new FakeText(t),
       addEventListener() {},
     },
-    window: { getSelection: () => ({ isCollapsed: true }) },
+    window: {
+      getSelection: () => ({ isCollapsed: true }),
+      ...(storage ? { localStorage: { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); } } } : {}),
+    },
     fetch: (url: string) => {
       urls.push(String(url));
       if (String(url).startsWith(USAGE_HISTORY_PATH)) return usage();
@@ -815,10 +819,13 @@ describe("the status strip", () => {
     }
   });
 
-  it("is the first thing on the page, with the accounts straight after it and the history below", () => {
+  it("is the first thing on the page, with the accounts straight after it, the history below and diagnostics last", () => {
     const html = renderDashboardHtml();
     const at = (needle: string) => html.indexOf(needle);
-    const order = ['id="banner"', 'id="strip"', 'aria-labelledby="acc-h"', 'id="since"', 'id="usage"', 'aria-labelledby="log-h"'].map(at);
+    const order = [
+      'id="banner"', 'id="strip"', 'aria-labelledby="acc-h"', 'id="since"', 'id="usage"', 'aria-labelledby="det-h"',
+      'aria-labelledby="perf-h"', 'aria-labelledby="log-h"', 'id="ops"', 'id="focard"', 'id="ctcard"', 'id="supcard"', "</main>",
+    ].map(at);
     expect(order.every(i => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     // The six since-start tiles are gone from the top of the page.
@@ -1232,5 +1239,99 @@ describe("weekly windows and old readings", () => {
     doc.severity.accounts[0] = { ...doc.severity.accounts[0], age: "old" as never };
     const page = await boot(ok(doc));
     expect(page.el("strip").attrs["data-level"]).toBe("unknown");
+  });
+});
+
+// ─── Diagnostics: failover, continuity and supply, folded at the bottom ──────
+
+const CAUSES = ["http-401", "http-429", "http-5xx", "stream-stalled", "stream-broken", "stream-truncated"];
+function ctWindow(byCause: Record<string, number> = {}) {
+  const full = Object.fromEntries(CAUSES.map(c => [c, byCause[c] ?? 0]));
+  return { total: Object.values(full).reduce((a, b) => a + b, 0), byCause: full };
+}
+function continuity(over: Record<string, unknown> = {}) {
+  return {
+    lastHour: ctWindow(), lastDay: ctWindow(),
+    handoffs: { lastDay: 2, droppedLastDay: 0, last: { at: Date.now() - 60_000, finished: 3, dropped: 0, unsaved: 0 } },
+    workerCrashes: 0,
+    clients: { versions: [{ version: "2.1.327", verified: true, requestsLastDay: 40 }], unverified: [] },
+    ...over,
+  };
+}
+function failover(over: Record<string, unknown> = {}) {
+  return {
+    enabled: true, requests: 3, retries: 4, lastAt: Date.now() - 600_000,
+    byOutcome: { recovered: 3, ollama: 0, exhausted: 0, refused: 0, clientGone: 0 },
+    byReason: Object.fromEntries(["401", "429", "529", "500", "502", "503", "504", "connection", "timeout", "token-refresh"].map(r => [r, r === "429" ? 4 : 0])),
+    ...over,
+  };
+}
+function supWin(over: Record<string, unknown> = {}) {
+  return { capacity: { status: "ok", samples: 30, tokensPerPercent: 2_000_000 }, remaining: 40_000_000, exhaustsAt: null, exhaustsBeforeReset: false, ...over };
+}
+function supply(over: Record<string, unknown> = {}) {
+  return {
+    accounts: [{ id: "lyra", fiveHour: supWin(), sevenDay: supWin() }],
+    demand: { profileHours: 336, next24h: 9_000_000 },
+    budget: { today: 12_000_000, known: 1, unknown: 0 },
+    ...over,
+  };
+}
+const opsLine = (page: Booted) => page.el("opssum").textContent.replace(/\s+/g, " ").trim();
+const attention = (page: Booted) =>
+  find(page.el("opssum"), e => e.className === "att").map(e => e.textContent);
+
+describe("diagnostics", () => {
+  it("stays hidden when the router sends none of the three blocks", async () => {
+    const page = await boot(ok(health([account()])));
+    expect(page.el("ops").hidden).toBe(true);
+  });
+
+  it("shows when one block is valid, and a malformed block hides only its own card", async () => {
+    const page = await boot(ok(health([account()], { continuity: continuity(), failover: { enabled: "yes" } })));
+    expect(page.el("ops").hidden).toBe(false);
+    expect(page.el("ctcard").hidden).toBe(false);
+    expect(page.el("focard").hidden).toBe(true);
+    expect(page.el("supcard").hidden).toBe(true);
+    expect(opsLine(page)).toBe("no client-visible failure in the last day");
+  });
+
+  it("sums all three on the folded line, with nothing marked when all is well", async () => {
+    const page = await boot(ok(health([account()], { continuity: continuity(), failover: failover(), supply: supply() })));
+    expect(opsLine(page)).toBe("no client-visible failure in the last day · 3 failovers · pool budget today 12M");
+    expect(attention(page)).toEqual([]);
+  });
+
+  it("marks client-visible failures, dropped streams and unverified clients on the folded line", async () => {
+    const page = await boot(ok(health([account()], {
+      continuity: continuity({
+        lastDay: ctWindow({ "http-429": 2, "stream-stalled": 1 }),
+        handoffs: { lastDay: 1, droppedLastDay: 1, last: null },
+        clients: { versions: [{ version: "2.2.0", verified: false, requestsLastDay: 5 }], unverified: ["2.2.0"] },
+      }),
+      failover: failover({ enabled: false }),
+      supply: supply({ accounts: [{ id: "rigel", fiveHour: supWin(), sevenDay: supWin({ exhaustsAt: Date.now() + 3_600_000, exhaustsBeforeReset: true }) }] }),
+    })));
+    expect(attention(page)).toEqual([
+      "3 client-visible failures in the last day", "1 stream dropped at a handoff", "1 unverified Claude Code version",
+    ]);
+    expect(opsLine(page)).toContain("failover off");
+    expect(opsLine(page)).toContain("1 account out before the 7-day reset");
+  });
+
+  it("starts folded, and the folded state survives a page without storage", async () => {
+    const page = await boot(ok(health([account()], { continuity: continuity() })));
+    expect((page.el("opsdet") as unknown as { open?: boolean }).open).toBeFalsy();
+    expect(() => page.el("opsdet").listeners.toggle()).not.toThrow();
+  });
+
+  it("reopens where the viewer left it, and remembers a fold", async () => {
+    const store = new Map([["cc-router.diagnostics.open", "1"]]);
+    const page = await boot(ok(health([account()], { continuity: continuity() })), undefined, undefined, store);
+    const det = page.el("opsdet") as unknown as { open?: boolean; listeners: Record<string, () => void> };
+    expect(det.open).toBe(true);
+    det.open = false;
+    det.listeners.toggle();
+    expect(store.get("cc-router.diagnostics.open")).toBe("0");
   });
 });
