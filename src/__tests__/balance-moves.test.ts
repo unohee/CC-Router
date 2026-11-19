@@ -118,6 +118,29 @@ describe("a pin moves for weekly pace only when", () => {
   });
 });
 
+describe("load", () => {
+  it("is the requests a seat was given lately: an idle pin counts for nothing, a request with no session counts like a pinned one", () => {
+    const { r, clock } = router({ softCapUtil: 0.98 });
+    const pool = [T("a"), T("b")];
+    const same = (t: SessionTarget) => seat(clock.now, { util: 0.5, hoursLeft: 80 });
+    // Ten sessions on a, each sent one request; b is empty. New sessions go to b.
+    for (let i = 0; i < 10; i++) r.resolve(`on-a-${i}`, pool, t => t.accountId === "a", same);
+    expect(r.resolve("new", pool, () => true, same)!.accountId).toBe("b");
+    // Eleven minutes later those pins are idle: a and b tie, and the next two rotate.
+    clock.now += 11 * MIN;
+    const picks = ["p", "q"].map(id => r.resolve(id, pool, () => true, same)!.accountId).sort();
+    expect(picks).toEqual(["a", "b"]);
+    // Requests with no session land as load too: send twelve to a, and a new session goes to b.
+    for (let i = 0; i < 12; i++) r.rank([T("a")], () => true, same, "rotate");
+    expect(r.resolve("after", pool, () => true, same)!.accountId).toBe("b");
+    // Under the legacy rules pins are load for as long as they live.
+    const legacy = router({ softCapUtil: 0.98, balance: false });
+    for (let i = 0; i < 10; i++) legacy.r.resolve(`on-a-${i}`, pool, t => t.accountId === "a", same);
+    legacy.clock.now += 11 * MIN;
+    expect(legacy.r.resolve("new", pool, () => true, same)!.accountId).toBe("b");
+  });
+});
+
 describe("a pin shed over the soft cap", () => {
   it("goes only to a seat with real room under the cap", () => {
     const { r, clock, moves } = router({ softCapUtil: 0.98 });
@@ -153,7 +176,7 @@ describe("in the balance simulator", () => {
   const base = JSON.parse(readFileSync(fileURLToPath(new URL("../../docs/balance/baseline.json", import.meta.url)), "utf8")) as
     { scenarios: Record<string, ScenarioScore> };
 
-  it("is no worse than the baseline on any scenario, with fewer pin-move cache rewrites on the ping-pong pool", () => {
+  it("is no worse than the baseline on any scenario, and better on the ping-pong pool", () => {
     const worse: string[] = [];
     let pingPong: ScenarioScore | null = null;
     for (const sc of SCENARIOS) {
@@ -162,8 +185,9 @@ describe("in the balance simulator", () => {
       if (sc.name === "five-hour-ping-pong") pingPong = current;
     }
     expect(worse).toEqual([]);
-    // Fewer rewrites. Their total cost is about level (each session carries a
-    // larger prefix by the time it moves), which the regression check covers.
-    expect(pingPong!.moves).toBeLessThan(base.scenarios["five-hour-ping-pong"].moves);
+    const b = base.scenarios["five-hour-ping-pong"];
+    expect(pingPong!.total).toBeLessThan(b.total);
+    expect(pingPong!.dry).toBeLessThan(b.dry);
+    expect(pingPong!.unusedAtReset).toBeLessThan(b.unusedAtReset);
   }, 300_000);
 });

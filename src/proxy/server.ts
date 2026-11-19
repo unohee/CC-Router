@@ -632,7 +632,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const seats = createSeats({
     pool, openAIAccounts, canServeOpenAI: a => canServeOpenAI(a, codexBudget ?? undefined),
     sizeOf: id => currentSeatSizes().get(id)?.relative ?? 1,
-    rank: (c, usable, utilOf) => sessionRouter.rank(c, usable, utilOf),
+    rank: (c, usable, utilOf, mode) => sessionRouter.rank(c, usable, utilOf, mode),
   });
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
   const sessionTargetRetainable = seats.retainable;
@@ -1999,7 +1999,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         pinnedAccount.requestCount++;
         pinnedAccount.lastUsed = Date.now();
       }
-      account = pinnedAccount ?? pool.getNext(req._ccAnthropicModel);
+      // No pin: the balance ranking when it is on, else the pool's round-robin.
+      // A pinned request is counted as load by `resolve`; a ranked one by
+      // `rank`; `markSelected` is what getNext does on its pick, done here for
+      // a ranked one.
+      const ranked = pinnedAccount ? null : seats.pickForRequest(req._ccAnthropicModel);
+      if (ranked) { ranked.requestCount++; ranked.lastUsed = Date.now(); }
+      account = pinnedAccount ?? ranked ?? pool.getNext(req._ccAnthropicModel);
     } catch (err) {
       if (err instanceof EmptyPoolError) {
         stats.totalErrors++;

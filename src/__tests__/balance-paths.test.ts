@@ -15,8 +15,10 @@ import { waitForListening } from "./helpers/router-process.js";
 // seat: the failover pick now ranks as a new session would (under the balance
 // rules), and a session follows the seat that failover served it from, so it
 // pays one cache rewrite rather than one for failover and another for the
-// re-placement on its next request. Requests without a session id keep the
-// pool's round-robin (see SessionRouter.rank for why).
+// re-placement on its next request. A request without a session id goes
+// through the same ranking in rotate mode: the seats a session could be placed
+// on, in turn (it leaves no cache behind, so it is spent on a seat's last
+// stretch under the cap rather than held off it).
 
 const NOW = Date.UTC(2026, 10, 19, 4, 29);
 const nowSec = NOW / 1000;
@@ -41,7 +43,7 @@ function sources(accounts: Account[], router: SessionRouter | null): SeatSources
     } as unknown as SeatSources["pool"],
     openAIAccounts: [],
     canServeOpenAI: () => false,
-    rank: router ? (c, usable, utilOf) => router.rank(c, usable, utilOf) : undefined,
+    rank: router ? (c, usable, utilOf, mode) => router.rank(c, usable, utilOf, mode) : undefined,
   };
 }
 
@@ -69,6 +71,31 @@ describe("the failover pick", () => {
     seats.failoverPick(new Set(), undefined);
     expect(r.size()).toBe(0);
     expect(accounts.every(a => a.requestCount === 0)).toBe(true);
+  });
+});
+
+describe("a request without a session id", () => {
+  const accounts = [acct("over", 0.985, 50, 0.1), acct("a", 0.3, 100, 0.1), acct("b", 0.3, 100, 0.1)];
+
+  it("takes the seats under the cap in turn, and every usable seat only when none is", () => {
+    const r = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const seats = createSeats(sources(accounts, r));
+    const picks = Array.from({ length: 4 }, () => seats.pickForRequest(undefined)?.id);
+    expect(picks).toEqual(["a", "b", "a", "b"]);
+    const allOver = [acct("x", 0.99, 50), acct("y", 0.985, 50)];
+    const r2 = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const s2 = createSeats(sources(allOver, r2));
+    expect([s2.pickForRequest(undefined)?.id, s2.pickForRequest(undefined)?.id].sort()).toEqual(["x", "y"]);
+  });
+
+  it("counts as load on the seat, like a pinned request, and is null under the legacy rules", () => {
+    const r = new SessionRouter({ now: () => NOW, softCapUtil: 0.98 });
+    const seats = createSeats(sources(accounts, r));
+    for (let i = 0; i < 20; i++) seats.pickForRequest(undefined);
+    expect(r.size()).toBe(0);
+    const legacy = new SessionRouter({ now: () => NOW, softCapUtil: 0.98, balance: false });
+    expect(createSeats(sources(accounts, legacy)).pickForRequest(undefined)).toBeNull();
+    expect(createSeats(sources(accounts, null)).pickForRequest(undefined)).toBeNull();
   });
 });
 
@@ -106,10 +133,11 @@ describe("SessionRouter.pinTo", () => {
 describe("server wiring", () => {
   it("ranks the failover pick through the session router and re-pins after failover", () => {
     const src = readFileSync(fileURLToPath(new URL("../proxy/server.ts", import.meta.url)), "utf8");
-    expect(src).toMatch(/rank: \(c, usable, utilOf\) => sessionRouter\.rank\(c, usable, utilOf\)/);
+    expect(src).toMatch(/rank: \(c, usable, utilOf, mode\) => sessionRouter\.rank\(c, usable, utilOf, mode\)/);
     expect(src).toMatch(/sessionRouter\.pinTo\(sid, \{ provider: "anthropic", accountId: next\.id \}\)/);
-    // Requests without a session id still go through the pool's own order.
-    expect(src).toMatch(/account = pinnedAccount \?\? pool\.getNext\(req\._ccAnthropicModel\)/);
+    // Requests without a session id go through the same ranking first.
+    expect(src).toMatch(/seats\.pickForRequest\(req\._ccAnthropicModel\)/);
+    expect(src).toMatch(/account = pinnedAccount \?\? ranked \?\? pool\.getNext\(req\._ccAnthropicModel\)/);
   });
 });
 

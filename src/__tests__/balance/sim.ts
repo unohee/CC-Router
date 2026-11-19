@@ -201,7 +201,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
   // through the router when the balance rules are on.
   const seats: Seats = createSeats({
     pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf,
-    rank: (c, usable, utilOf) => router.rank(c, usable, utilOf),
+    rank: (c, usable, utilOf, mode) => router.rank(c, usable, utilOf, mode),
   });
   const candidates: SessionTarget[] = accounts.map(a => ({ provider: "anthropic", accountId: a.id }));
 
@@ -280,6 +280,8 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
 
   /** The seat for a request with no pin, as the /v1 handler picks it. */
   const getNext = (): Account | null => {
+    const ranked = seats.pickForRequest(undefined);
+    if (ranked) { ranked.requestCount++; ranked.lastUsed = now; return ranked; }
     try { return pool.getNext(); } catch (e) {
       if (e instanceof NoAvailableAccountError || e instanceof EmptyPoolError) return null;
       throw e;
