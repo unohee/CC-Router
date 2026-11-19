@@ -16,6 +16,25 @@
 export const WEEK_SEC = 7 * 24 * 60 * 60;
 export const FIVE_HOUR_SEC = 5 * 60 * 60;
 
+/**
+ * Pure. A window's pace as a ratio, the figure the balance rules place by
+ * (session-router.ts):
+ *
+ *     r = share of the quota left / share of the window left
+ *
+ * 1 is an even spend; below 1 the seat is spending faster than the window
+ * allows, above 1 it has quota to spare. Unlike the difference against a line
+ * clamped at 1 (`weeklyPace`), the ratio does not go blind near the reset: a
+ * seat at 98% with a sixth of its week left reads r = 0.12. Null when the
+ * reset is unknown or past.
+ */
+export function paceRatio(util: number, resetAtSec: number | undefined, nowMs: number, windowSec: number): number | null {
+  const nowSec = nowMs / 1000;
+  if (!resetAtSec || resetAtSec <= nowSec || !Number.isFinite(util)) return null;
+  const timeLeft = Math.min(1, (resetAtSec - nowSec) / windowSec);
+  return Math.max(0, 1 - util) / Math.max(timeLeft, 1e-6);
+}
+
 export interface WeeklyPaceConfig {
   /** Allowance above the linear line, as a fraction of the window (0–1). A
    *  seat at `elapsed + slack` is still on pace. */

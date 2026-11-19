@@ -1,4 +1,4 @@
-import { FIVE_HOUR_SEC, NO_PACE, weeklyPace, type WeeklyPace, type WeeklyPaceConfig } from "./weekly-pace.js";
+import { FIVE_HOUR_SEC, NO_PACE, paceRatio, weeklyPace, type WeeklyPace, type WeeklyPaceConfig } from "./weekly-pace.js";
 
 /** A routable destination for one Claude Code session. */
 export interface SessionTarget {
@@ -42,6 +42,28 @@ export interface TargetMetrics {
 
 /** Why an existing session left its target. */
 export type ReassignReason = "unservable" | "soft-cap" | "weekly-pace";
+
+/** What placement sees for one seat (SessionRouter.explain). */
+export interface SeatExplanation {
+  /** Pace ratio of the 7-day window (paceRatio in weekly-pace.ts); null with no window. */
+  weekRatio: number | null;
+  /** The same for the 5-hour window. */
+  fiveHourRatio: number | null;
+  /** On pace on every paced window. */
+  onPace: boolean;
+  /** At or past the soft cap on its binding window. */
+  overCap: boolean;
+  /** Could take a new session now (the caller's usable predicate). */
+  usable: boolean;
+  /** The load the score divides by: requests in the last ten minutes, as sessions. */
+  load: number;
+  /** The balance score (cost-weighted tokens left per hour to the weekly reset, scaled). */
+  score: number;
+  /** Where a new session would be placed: 1 first. */
+  rank: number;
+  /** In the set a new session is placed from right now. */
+  placeable: boolean;
+}
 
 export interface SessionRouterOptions {
   /** How long an unused assignment survives. Default 1 hour. */
@@ -287,6 +309,63 @@ export class SessionRouter {
   }
 
   /**
+   * What placement sees for each of `candidates` right now, for health: the
+   * pace ratio of each window, whether the seat is on pace, the load the score
+   * divides by, the score itself, and the rank a new session would be placed
+   * by (1 is first; seats over the cap or filtered out by pace rank after the
+   * rest in the order the score gives them). Null under the legacy rules.
+   * Reads only; it does not pin, count or rotate.
+   */
+  explain(
+    candidates: SessionTarget[],
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): Map<string, SeatExplanation> | null {
+    if (!this.balanced) return null;
+    const out = new Map<string, SeatExplanation>();
+    const usable = candidates.filter(isUsable);
+    const underCap = usable.filter(t => !this.overSoftCap(t, utilOf));
+    const load = this.loadOf(candidates);
+    // The same narrowing placeBalanced applies, so the rank is the real order.
+    let pool = underCap;
+    if (this.weeklyPace && pool.length > 1) {
+      const paces = pool.map(t => this.paceRatios(t, utilOf));
+      const onPace = pool.filter((_, i) => paces[i].onPace);
+      const weekOk = pool.filter((_, i) => !paces[i].weekAhead);
+      if (onPace.length > 0) pool = onPace;
+      else if (weekOk.length > 0) pool = weekOk;
+      else {
+        const best = Math.max(...paces.map(p => p.week ?? 1));
+        pool = pool.filter((_, i) => (paces[i].week ?? 1) >= best - PACE_RATIO_TIE);
+      }
+    }
+    const inPool = new Set(pool.map(targetKey));
+    const scored = candidates.map(t => {
+      const p = this.paceRatios(t, utilOf);
+      return {
+        t, key: targetKey(t), pace: p,
+        usable: usable.includes(t), overCap: this.overSoftCap(t, utilOf),
+        load: load.get(targetKey(t)) ?? 0,
+        score: this.balanceScore(t, utilOf, load),
+      };
+    });
+    // Rank: the pool first by score, then the rest by score.
+    const order = [...scored].sort((a, b) => {
+      const pa = inPool.has(a.key) ? 0 : a.usable ? 1 : 2;
+      const pb = inPool.has(b.key) ? 0 : b.usable ? 1 : 2;
+      return pa - pb || b.score - a.score;
+    });
+    order.forEach((s, i) => {
+      out.set(s.key, {
+        weekRatio: s.pace.week, fiveHourRatio: s.pace.five, onPace: s.pace.onPace,
+        overCap: s.overCap, usable: s.usable, load: Math.round(s.load * 100) / 100,
+        score: s.score, rank: i + 1, placeable: inPool.has(s.key),
+      });
+    });
+    return out;
+  }
+
+  /**
    * Pin `sessionId` to `target` as the seat that answered it, after failover
    * served the request there. The pin the session had was unusable (that is
    * why failover ran) and would have been re-placed on the next request,
@@ -528,10 +607,7 @@ export class SessionRouter {
    * it as on pace. Null when the window's reset is unknown or past (no pace).
    */
   private windowRatio(w: { util: number; resetAtSec?: number } | undefined, windowSec: number): number | null {
-    const nowSec = this.now() / 1000;
-    if (!w || !w.resetAtSec || w.resetAtSec <= nowSec || !Number.isFinite(w.util)) return null;
-    const timeLeft = Math.min(1, (w.resetAtSec - nowSec) / windowSec);
-    return Math.max(0, 1 - w.util) / Math.max(timeLeft, 1e-6);
+    return w ? paceRatio(w.util, w.resetAtSec, this.now(), windowSec) : null;
   }
 
   /**
@@ -742,18 +818,7 @@ export class SessionRouter {
     }
 
     const load = this.loadOf(pool);
-    const nowSec = this.now() / 1000;
-    const score = (t: SessionTarget): number => {
-      const m = this.metricsOf(t, utilOf);
-      const week = m.weekly && m.weekly.resetAtSec && m.weekly.resetAtSec > nowSec ? m.weekly : null;
-      const util = week ? week.util : m.weekly?.util ?? 0;
-      const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
-      const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
-      const fiveRoom = five ? Math.pow(Math.min(1, Math.max(0, cap - five.util)), FIVE_HOUR_ROOM_POWER) : 1;
-      const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
-      return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
-        / (1 + (load.get(targetKey(t)) ?? 0));
-    };
+    const score = (t: SessionTarget): number => this.balanceScore(t, utilOf, load);
 
     const scores = pool.map(score);
     const best = Math.max(...scores);
@@ -761,6 +826,25 @@ export class SessionRouter {
     const chosen = tied[this.cursor % tied.length];
     this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
     return chosen;
+  }
+
+  /** The balance score of one seat (see placeBalanced), given the load map. */
+  private balanceScore(
+    t: SessionTarget,
+    utilOf: ((target: SessionTarget) => number | TargetMetrics) | undefined,
+    load: Map<string, number>,
+  ): number {
+    const cap = this.softCapUtil ?? 1;
+    const nowSec = this.now() / 1000;
+    const m = this.metricsOf(t, utilOf);
+    const week = m.weekly && m.weekly.resetAtSec && m.weekly.resetAtSec > nowSec ? m.weekly : null;
+    const util = week ? week.util : m.weekly?.util ?? 0;
+    const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
+    const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
+    const fiveRoom = five ? Math.pow(Math.min(1, Math.max(0, cap - five.util)), FIVE_HOUR_ROOM_POWER) : 1;
+    const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
+    return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
+      / (1 + (load.get(targetKey(t)) ?? 0));
   }
 
   /**

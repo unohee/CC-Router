@@ -20,7 +20,7 @@ import { accountCooldownSummary, accountProviderTag, paddedProviderTag } from ".
 import type { ModelsStatus } from "./modelsApi.js";
 import { planLayout, DETAILS_LINES } from "./status-layout.js";
 import type { LayoutPlan, WidthTier } from "./status-layout.js";
-import type { AccountStat, Focus, HealthData, Mode, OperationalStatus, OllamaFallbackView } from "./status-types.js";
+import type { AccountStat, BalanceBlock, Focus, HealthData, Mode, OperationalStatus, OllamaFallbackView } from "./status-types.js";
 import {
   cellWidth, fitSegs, padCells, seg, segsWidth, terminalSafeText, truncateCells,
 } from "./term-text.js";
@@ -216,6 +216,13 @@ function stateWord(a: AccountStat, s: AccountSeverity, now: number): { text: str
   }
 }
 
+/** The balance view of one seat, or null when the router sends none or the legacy rules are on. */
+function balanceSeat(balance: BalanceBlock | undefined, id: string): BalanceBlock["seats"][number] | null {
+  if (!balance || balance.rules !== "balance" || !Array.isArray(balance.seats)) return null;
+  const x = balance.seats.find(s => s && s.id === id);
+  return x && typeof x.rank === "number" && (x.weekRatio === null || typeof x.weekRatio === "number") ? x : null;
+}
+
 export function accountLine(
   a: AccountStat,
   s: AccountSeverity,
@@ -223,6 +230,8 @@ export function accountLine(
   selected: boolean,
   now: number,
   thresholds: PoolSeverity["thresholds"],
+  /** health.balance, when the router sends one. */
+  balance?: BalanceBlock,
 ): Seg[] {
   const tier = ACCOUNT_TIERS[plan.width];
   const st = stateWord(a, s, now);
@@ -258,6 +267,19 @@ export function accountLine(
   if (cooldown) extras.push([seg("  "), seg(cooldown, "red")]);
   if (s5 < 100 || w7 < 100) {
     extras.push([seg(`  cap${s5 < 100 ? ` 5h≤${s5}%` : ""}${w7 < 100 ? ` 7d≤${w7}%` : ""}`, "yellow")]);
+  }
+  // Placement, from health.balance: where a new session would go (#1 first)
+  // and the pace ratio placement ranks the weekly window by (1 = even spend,
+  // below 1 spends faster than the window allows). The same figures the web
+  // dashboard's Placement column shows.
+  const bal = balanceSeat(balance, a.id);
+  if (bal) {
+    const where = bal.placeable ? `#${bal.rank}` : bal.overCap ? "cap" : bal.usable ? "wait" : "n/a";
+    const pace = bal.weekRatio === null ? "  —  " : padCells(bal.weekRatio.toFixed(2), 5, "right");
+    extras.push([
+      seg("  place ", "gray"), seg(padCells(where, 4), bal.placeable ? "white" : "yellow"),
+      seg(" pace ", "gray"), seg(pace, bal.weekRatio !== null && bal.weekRatio < 1 ? "yellow" : "white"),
+    ]);
   }
   extras.push([
     seg("  req "), seg(padCells(String(a.requestCount), 5, "right"), "white"),
@@ -614,7 +636,7 @@ export function buildFrame(input: FrameInput): Frame {
   for (const i of shown) {
     const a = data.accounts[i]!;
     const s = byId.get(a.id) ?? computeSeverity([a], [], now).accounts[0]!;
-    lines.push(accountLine(a, s, plan, input.focus === "accounts" && i === input.selectedAccountIndex, now, sev.thresholds));
+    lines.push(accountLine(a, s, plan, input.focus === "accounts" && i === input.selectedAccountIndex, now, sev.thresholds, data.balance));
   }
   if (plan.accountFold) lines.push(fitSegs(foldLine(rungs, shown, input.focus === "accounts"), plan.fit));
   if (plan.ollamaRow && data.ollamaFallback) lines.push(ollamaLine(data.ollamaFallback, plan.fit, now));

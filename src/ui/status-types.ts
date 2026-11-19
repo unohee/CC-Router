@@ -91,6 +91,23 @@ export interface HealthData {
   recentLogs: LogEntry[];
   /** Absent from a router older than the one that introduced it; the dashboard then computes it. */
   severity?: PoolSeverity;
+  /** What placement sees per seat (proxy/balance-view.ts); absent from older routers. */
+  balance?: BalanceBlock;
+}
+
+/** The parts of health.balance the TUI reads. */
+export interface BalanceBlock {
+  rules: "balance" | "legacy";
+  seats: Array<{
+    id: string;
+    weekRatio: number | null;
+    fiveHourRatio: number | null;
+    rank: number;
+    placeable: boolean;
+    overCap: boolean;
+    usable: boolean;
+    size: { relative: number; source: string };
+  }>;
 }
 
 export interface OllamaFallbackView {

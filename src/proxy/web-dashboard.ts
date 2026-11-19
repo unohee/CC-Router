@@ -255,7 +255,7 @@ const BODY = String.raw`
         <table>
           <thead><tr>
             <th scope="col">Account</th><th scope="col">Status</th>
-            <th scope="col">5-hour window</th><th scope="col">7-day window</th>
+            <th scope="col">5-hour window</th><th scope="col">7-day window</th><th scope="col">Placement</th>
             <th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
             <th scope="col">Last hour</th><th scope="col">Last used</th><th scope="col">Token</th>
           </tr></thead>
@@ -588,13 +588,24 @@ const SCRIPT = String.raw`
       // The figure behind a warning can be days old on an idle account; say so beside it.
       var sv = accountSeverity(a);
       if (sv && sv.age && sv.window === (key === "fiveHour" ? "5h" : "7d")) text.appendChild(el("span", "note", "read " + dur(sv.age) + " ago"));
-      // Weekly pace: spent share against elapsed share (plus slack) of the window.
-      var wp = key === "sevenDay" ? a.weeklyPace : a.fiveHourPace;
-      if (wp && wp.ahead > -1) {
-        var off = Math.round(wp.ahead * 100);
-        var pn = el("span", "note", off > 0 ? "ahead of pace +" + off + "%" : "on pace");
-        pn.title = "Even spend over the window, plus slack, allows " + Math.round(wp.target * 100) + "% by now.";
-        text.appendChild(pn);
+      // Pace. Under the balance rules this is the ratio placement ranks by
+      // (health.balance.seats[].weekRatio / fiveHourRatio): quota left over
+      // window left, 1 = even spend. Otherwise the legacy line: spent share
+      // against elapsed share plus slack.
+      var bs = balanceSeat(a.id);
+      var ratio = bs ? (key === "sevenDay" ? bs.weekRatio : bs.fiveHourRatio) : null;
+      if (bs && isNum(ratio)) {
+        var pr = el("span", "note", "pace " + ratio.toFixed(2) + (ratio < 1 ? " (ahead)" : ""));
+        pr.title = "Share of the quota left over share of the window left, as placement ranks it; 1 is an even spend, below 1 spends faster than the window allows.";
+        text.appendChild(pr);
+      } else if (!bs) {
+        var wp = key === "sevenDay" ? a.weeklyPace : a.fiveHourPace;
+        if (wp && wp.ahead > -1) {
+          var off = Math.round(wp.ahead * 100);
+          var pn = el("span", "note", off > 0 ? "ahead of pace +" + off + "%" : "on pace");
+          pn.title = "Even spend over the window, plus slack, allows " + Math.round(wp.target * 100) + "% by now.";
+          text.appendChild(pn);
+        }
       }
     }
     if (cap > 0 && cap < 100) {
@@ -619,6 +630,46 @@ const SCRIPT = String.raw`
       + " · " + num(h.totalRefreshes) + (h.totalRefreshes === 1 ? " token refresh" : " token refreshes");
   }
 
+  // ── balance ────────────────────────────────────────────────────────────────
+  // health.balance: what placement sees per seat. An older router sends none,
+  // and a malformed block reads as none: the Placement column then says so.
+  function validBalanceSeat(x) {
+    return !!x && typeof x.id === "string" && isNum(x.rank) && isNum(x.load)
+      && (x.weekRatio === null || isNum(x.weekRatio)) && (x.fiveHourRatio === null || isNum(x.fiveHourRatio))
+      && (x.surplusPerHour === null || isNum(x.surplusPerHour)) && (x.remainingTokens === null || isNum(x.remainingTokens))
+      && !!x.size && isNum(x.size.relative) && typeof x.size.source === "string";
+  }
+  function balanceSeat(id) {
+    var b = S.data && S.data.balance;
+    if (!b || b.rules !== "balance" || !Array.isArray(b.seats)) return null;
+    for (var i = 0; i < b.seats.length; i++) if (b.seats[i] && b.seats[i].id === id) return validBalanceSeat(b.seats[i]) ? b.seats[i] : null;
+    return null;
+  }
+  function placementCell(id) {
+    var td = el("td", "dim");
+    var bs = balanceSeat(id);
+    if (!bs) {
+      var b = S.data && S.data.balance;
+      td.textContent = b && b.rules === "legacy" ? "legacy rules" : "—";
+      return td;
+    }
+    var head = el("span", "lh", (bs.placeable ? "#" + bs.rank : bs.overCap ? "over cap" : bs.usable ? "waits (#" + bs.rank + ")" : "unavailable"));
+    head.title = bs.placeable ? "Where a new session would be placed now; 1 is first."
+      : bs.overCap ? "At or past the soft cap: takes a new session only when every seat is."
+      : bs.usable ? "Usable, but ahead of pace while other seats are on pace: new sessions go there first."
+      : "Cannot take a request now.";
+    td.appendChild(head);
+    var size = bs.size.source === "measured" ? "size " + bs.size.relative.toFixed(2) + "x"
+      : bs.size.source === "weight" ? "weight " + bs.size.relative.toFixed(2) + "x" : "size unknown";
+    var sub = el("span", "lh", size + (bs.surplusPerHour === null ? "" : " · " + (bs.surplusPerHour >= 0 ? "+" : "−") + big(Math.abs(bs.surplusPerHour)) + "/h"));
+    sub.title = (bs.size.source === "measured" ? "Weekly quota against the median seat, measured from " + bs.size.samples + " hourly readings."
+      : bs.size.source === "weight" ? "routing.balance.capacityWeight; the quota history cannot measure this seat yet."
+      : "Taken as a typical seat until the quota history can measure it.")
+      + (bs.surplusPerHour === null ? "" : " Surplus: cost-weighted tokens per hour it could add and still reach its reset at an even spend; negative means it is spending faster than that.");
+    td.appendChild(sub);
+    return td;
+  }
+
   function renderAccounts(h) {
     var rows = h.accounts.map(function (a) {
       var tr = el("tr");
@@ -637,6 +688,7 @@ const SCRIPT = String.raw`
 
       var w5 = lab(el("td"), "5-hour window", true); w5.appendChild(windowCell(a, "fiveHour", a.sessionLimitPercent)); tr.appendChild(w5);
       var w7 = lab(el("td"), "7-day window", true); w7.appendChild(windowCell(a, "sevenDay", a.weeklyLimitPercent)); tr.appendChild(w7);
+      tr.appendChild(lab(placementCell(a.id), "Placement"));
       tr.appendChild(lab(el("td", "num", num(a.requestCount)), "Requests"));
       tr.appendChild(lab(el("td", "num", num(a.errorCount)), "Errors"));
       tr.appendChild(lastHourCell(a.id));
