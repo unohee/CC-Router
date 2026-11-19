@@ -81,7 +81,16 @@ export interface SeatExplanation {
   rank: number;
   /** In the set a new session is placed from right now. */
   placeable: boolean;
+  /** Which tier paceTier puts the seat in: on-pace (both windows), week-ok
+   *  (ahead on the 5-hour window only), behind (ahead on the week: spending
+   *  it faster than it elapses), or over-cap (at or past the soft cap, not
+   *  placed at all). A seat with no weekly reading reads on-pace, yet is
+   *  placeable only while no measured seat under the cap exists (`placeable`
+   *  says which). */
+  tier: SeatTier;
 }
+
+export type SeatTier = "on-pace" | "week-ok" | "behind" | "over-cap";
 
 export interface SessionRouterOptions {
   /** How long an unused assignment survives. Default 1 hour. */
@@ -387,6 +396,7 @@ export class SessionRouter {
         weekRatio: s.pace.week, fiveHourRatio: s.pace.five, onPace: s.pace.onPace,
         overCap: s.overCap, usable: s.usable, load: Math.round(s.load * 100) / 100,
         score: s.score, rank: i + 1, placeable: inPool.has(s.key),
+        tier: s.overCap ? "over-cap" : s.pace.onPace ? "on-pace" : !s.pace.weekAhead ? "week-ok" : "behind",
       });
     });
     return out;

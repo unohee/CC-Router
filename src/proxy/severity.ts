@@ -43,6 +43,9 @@ export interface SeverityRateLimits {
   status?: string;
   fiveHourUtil?: number;
   fiveHourReset?: number;
+  /** The last response carried a 5-hour header (rate-limit-headers.ts); false
+   *  is a seat whose plan reports no 5-hour window. */
+  fiveHourReported?: boolean;
   sevenDayUtil?: number;
   sevenDayReset?: number;
   lastUpdated?: number;
@@ -102,7 +105,7 @@ export type WindowKey = "fiveHour" | "sevenDay";
 
 export type WindowReading =
   | { ok: true; util: number; reset: number }
-  | { ok: false; note: "not measured yet" | "no reading" | "reset since last reading" };
+  | { ok: false; note: "not measured yet" | "no reading" | "not reported" | "reset since last reading" };
 
 /**
  * A usage figure is only a reading if it has a window to belong to. Three
@@ -117,6 +120,8 @@ export function windowReading(
   now: number,
 ): WindowReading {
   if (!rl || !rl.lastUpdated) return { ok: false, note: "not measured yet" };
+  // The response said nothing about this window: not a reading of 0.
+  if (key === "fiveHour" && rl.fiveHourReported === false) return { ok: false, note: "not reported" };
   const util = (key === "fiveHour" ? rl.fiveHourUtil : rl.sevenDayUtil) || 0;
   const reset = (key === "fiveHour" ? rl.fiveHourReset : rl.sevenDayReset) || 0;
   if (reset <= 0 && util <= 0) return { ok: false, note: "no reading" };

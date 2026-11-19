@@ -72,6 +72,8 @@ function restoreReading(raw: unknown, now: number): AccountRateLimits | null {
   return {
     status: status === "rate_limited" && !stillLimited ? "allowed" : status,
     fiveHourUtil, fiveHourReset, sevenDayUtil, sevenDayReset, claim,
+    // Kept only when the saved reading said so; an older file has no opinion.
+    ...(typeof r["fiveHourReported"] === "boolean" ? { fiveHourReported: r["fiveHourReported"] } : {}),
     plan: typeof r["plan"] === "string" ? r["plan"].slice(0, 32) : "",
     requestsLimit: finite(r["requestsLimit"]) && r["requestsLimit"] >= 0 ? r["requestsLimit"] : 0,
     lastUpdated,

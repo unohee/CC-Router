@@ -1339,7 +1339,7 @@ describe("diagnostics", () => {
 describe("outcomes card", () => {
   const seat = (id: string, outcomes: Record<string, unknown> | undefined, over: Record<string, unknown> = {}) => ({
     id, size: { relative: 1, source: "equal", tokensPerWeek: null, samples: 0 }, remainingTokens: null, weekRatio: 1, fiveHourRatio: null,
-    surplusPerHour: null, onPace: true, overCap: false, usable: true, load: 0, rank: 1, placeable: true, ...(outcomes ? { outcomes } : {}), ...over,
+    paceDeficitPerHour: null, onPace: true, overCap: false, usable: true, load: 0, rank: 1, placeable: true, ...(outcomes ? { outcomes } : {}), ...over,
   });
   const balance = (seats: unknown[]) => ({ rules: "balance", seats, placements: { lastHour: {}, lastDay: {} } });
   const outcomes = (over: Record<string, unknown> = {}) => ({ days: 7, resets: 0, unusedAtReset: null, strandedMinutes: 0, ...over });
@@ -1367,5 +1367,65 @@ describe("outcomes card", () => {
     const quiet = await boot(ok(health([account()], { balance: balance([seat("lyra", outcomes()), seat("kyte", outcomes({ strandedMinutes: 20 }))]) })));
     expect(textOf(quiet.el("outsum"))).toBe("no weekly reset seen yet · 20 min stranded in 7 days");
     expect(find(quiet.el("opssum"), el => el.className === "att")).toEqual([]);
+  });
+});
+
+describe("placement column", () => {
+  const seat = (over: Record<string, unknown> = {}) => ({
+    id: "lyra", size: { relative: 2.03, source: "measured", tokensPerWeek: 920_000_000, samples: 8, spanHours: 52.3, errorBand: 0.042 },
+    remainingTokens: 745_000_000, weekRatio: 0.92, fiveHourRatio: null, paceDeficitPerHour: 118_000, onPace: true, overCap: false,
+    tier: "on-pace", score: 0.0000123, fiveHourReported: false, usable: true, load: 0.4, rank: 1, placeable: true,
+    outcomes: { days: 7, resets: 0, unusedAtReset: null, strandedMinutes: 0 }, ...over,
+  });
+  const balance = (s: unknown) => ({ rules: "balance", seats: [s], placements: { lastHour: {}, lastDay: {} } });
+
+  it("shows the rank with the tier, the measured size with its error band, and the pace deficit from the seat's side", async () => {
+    const page = await boot(ok(health([account()], { balance: balance(seat()) })));
+    const cells = find(page.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "Placement");
+    expect(cells).toHaveLength(1);
+    const lines = cells[0]!.children.map(textOf);
+    expect(lines[0]).toBe("#1 · on-pace");
+    expect(lines[1]).toBe("size 2.03x ±4% · short 118K/h");
+    const head = cells[0]!.children[0] as FakeEl;
+    expect(head.title).toContain("Tier: on pace on both windows.");
+    expect(head.title).toContain("Score 1.23e-5");
+    const sub = cells[0]!.children[1] as FakeEl;
+    expect(sub.title).toContain("8 pairs of hourly readings over 2 days, within ±4%");
+    expect(sub.title).toContain("Pace deficit");
+  });
+
+  it("says spare when quota would be left at the reset, and names the behind and over-cap tiers", async () => {
+    const spare = await boot(ok(health([account()], { balance: balance(seat({ paceDeficitPerHour: -2_500_000, tier: "behind", placeable: false })) })));
+    const cell = find(spare.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "Placement")[0]!;
+    expect(cell.children.map(textOf)).toEqual(["waits (#1) · behind", "size 2.03x ±4% · spare 2.5M/h"]);
+    const cap = await boot(ok(health([account()], { balance: balance(seat({ tier: "over-cap", overCap: true, placeable: false, paceDeficitPerHour: null })) })));
+    const capCell = find(cap.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "Placement")[0]!;
+    expect(capCell.children.map(textOf)).toEqual(["over cap · over-cap", "size 2.03x ±4%"]);
+  });
+
+  it("draws a seat from an older router (no tier, score, span or band) as before", async () => {
+    const old = seat();
+    delete (old as Record<string, unknown>)["tier"]; delete (old as Record<string, unknown>)["score"];
+    old.size = { relative: 2.03, source: "measured", tokensPerWeek: 920_000_000, samples: 8 } as typeof old.size;
+    const page = await boot(ok(health([account()], { balance: balance(old) })));
+    const cell = find(page.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "Placement")[0]!;
+    expect(cell.children.map(textOf)).toEqual(["#1", "size 2.03x · short 118K/h"]);
+  });
+});
+
+describe("a 5-hour window the response did not report", () => {
+  it("reads 'not reported', never 0%", async () => {
+    const rl = { status: "allowed", fiveHourUtil: 0, fiveHourReset: 0, fiveHourReported: false, sevenDayUtil: 0.42, sevenDayReset: Math.floor(Date.now() / 1000) + 300_000, claim: "", plan: "", requestsLimit: 0, lastUpdated: Date.now() };
+    const page = await boot(ok(health([account({ rateLimits: rl })])));
+    const cell = find(page.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "5-hour window")[0]!;
+    expect(textOf(cell)).toContain("not reported");
+    expect(textOf(cell)).not.toContain("0%");
+    const weekly = find(page.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "7-day window")[0]!;
+    expect(textOf(weekly)).toContain("42%");
+    // Without the flag (an older router), the window reads as before.
+    const { fiveHourReported: _f, ...old } = rl;
+    void _f;
+    const before = await boot(ok(health([account({ rateLimits: old })])));
+    expect(textOf(find(before.el("accbody"), el => el.tag === "td" && el.attrs["data-label"] === "5-hour window")[0]!)).toContain("no reading");
   });
 });
