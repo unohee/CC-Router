@@ -1,0 +1,225 @@
+{
+  "note": "Scores of the placement policy at the time the run-3 pools were added (balance rules as of PR #52, 2026-11-19), under score-3: the run-2 metrics plus the live outcomes (unused share at reset, stranded seat-minutes) as the simulated router reads them. Cost-weighted tokens; queueWait in seconds; strandedSeatMinutes in seat-minutes; unusedShareAtReset 0..1. Frozen: see src/__tests__/balance/score-3.ts.",
+  "scenarios": {
+    "all-ahead": {
+      "unusedAtReset": 0,
+      "shortfallAtEnd": 0,
+      "dry": 0,
+      "moveCost": 0,
+      "demand": 628513450,
+      "refusals": 0,
+      "moves": 0,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 178712604.0828157,
+      "queueWait": 8868,
+      "queueWaitMaxSeat": 8868,
+      "resets": 0,
+      "unusedShareAtReset": 0,
+      "strandedSeatMinutes": 2880,
+      "outcomesBySeat": {
+        "rigel": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1440
+        },
+        "lyra": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1440
+        },
+        "heewon": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        },
+        "vega": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        },
+        "kyte": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      "total": 307214604.0828157
+    },
+    "fresh-reset": {
+      "unusedAtReset": 164128700,
+      "shortfallAtEnd": 6321428.571428597,
+      "dry": 0,
+      "moveCost": 21599375,
+      "demand": 1323444900,
+      "refusals": 0,
+      "moves": 91,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 286720744.4354727,
+      "queueWait": 79147,
+      "queueWaitMaxSeat": 50194,
+      "resets": 2,
+      "unusedShareAtReset": 0.18,
+      "strandedSeatMinutes": 5491,
+      "outcomesBySeat": {
+        "rigel": {
+          "resets": 1,
+          "unusedAtReset": 0.020000000000000018,
+          "strandedMinutes": 2340
+        },
+        "lyra": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 2880
+        },
+        "heewon": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 271
+        },
+        "vega": {
+          "resets": 1,
+          "unusedAtReset": 0.33999999999999997,
+          "strandedMinutes": 0
+        },
+        "kyte": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      "total": 979130748.0069013
+    },
+    "deploy-restore": {
+      "unusedAtReset": 0,
+      "shortfallAtEnd": 0,
+      "dry": 0,
+      "moveCost": 14875000,
+      "demand": 953378700,
+      "refusals": 0,
+      "moves": 34,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 349297186.6818496,
+      "queueWait": 116041,
+      "queueWaitMaxSeat": 105832,
+      "resets": 0,
+      "unusedShareAtReset": 0,
+      "strandedSeatMinutes": 3049,
+      "outcomesBySeat": {
+        "rigel": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1440
+        },
+        "lyra": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1440
+        },
+        "heewon": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 144
+        },
+        "vega": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 25
+        },
+        "kyte": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      "total": 660193686.6818496
+    },
+    "kyte-five-hour": {
+      "unusedAtReset": 2237800,
+      "shortfallAtEnd": 0,
+      "dry": 193731050,
+      "moveCost": 39028125,
+      "demand": 1355784200,
+      "refusals": 6,
+      "moves": 190,
+      "strandedMinutes": 107,
+      "overspendAtEnd": 273454985.28571427,
+      "queueWait": 258019,
+      "queueWaitMaxSeat": 133560,
+      "resets": 1,
+      "unusedShareAtReset": 0,
+      "strandedSeatMinutes": 8788,
+      "outcomesBySeat": {
+        "rigel": {
+          "resets": 1,
+          "unusedAtReset": 0,
+          "strandedMinutes": 2315
+        },
+        "lyra": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 2854
+        },
+        "heewon": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1638
+        },
+        "vega": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 1442
+        },
+        "kyte": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 539
+        }
+      },
+      "total": 1634462560.2857141
+    },
+    "live-week": {
+      "unusedAtReset": 20102649.850000024,
+      "shortfallAtEnd": 0,
+      "dry": 0,
+      "moveCost": 25912225,
+      "demand": 1389598853.3999875,
+      "refusals": 0,
+      "moves": 62,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 213623983.0225097,
+      "queueWait": 583.5,
+      "queueWaitMaxSeat": 578,
+      "resets": 2,
+      "unusedShareAtReset": 0.020000000000000018,
+      "strandedSeatMinutes": 2199,
+      "outcomesBySeat": {
+        "heewon": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 268
+        },
+        "kyte": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        },
+        "lyra": {
+          "resets": 1,
+          "unusedAtReset": 0.020000000000000018,
+          "strandedMinutes": 956
+        },
+        "rigel": {
+          "resets": 1,
+          "unusedAtReset": 0.020000000000000018,
+          "strandedMinutes": 780
+        },
+        "vega": {
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 195
+        }
+      },
+      "total": 366474107.8725097
+    }
+  }
+}

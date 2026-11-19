@@ -1,0 +1,16 @@
+{
+  "routing": {
+    "softCapUtil": 0.98,
+    "weeklyPace": {
+      "enabled": true,
+      "fiveHour": true
+    }
+  },
+  "throttle": {
+    "perAccountMaxInFlight": 4,
+    "minIntervalMs": 250,
+    "startUtil": 0.75,
+    "hardUtil": 0.95,
+    "enabled": true
+  }
+}

@@ -41,7 +41,7 @@ import { SessionRouter, type SessionTarget, type ReassignReason } from "../../pr
 import { TokenPool, NoAvailableAccountError, EmptyPoolError } from "../../proxy/token-pool.js";
 import { createSeats, pinnedAnthropicAccount, type Seats } from "../../proxy/seat-metrics.js";
 import { parseBalanceRules, parseCapacityWeights, parseSoftCapUtil, parseWeeklyPace } from "../../config/manager.js";
-import { QuotaHistory } from "../../proxy/quota-history.js";
+import { QuotaHistory, strandedSeats, type SeatOutcomes } from "../../proxy/quota-history.js";
 import { seatSizes, type SeatSize } from "../../proxy/seat-size.js";
 import { DEFAULT_RATE_LIMITS, type Account } from "../../proxy/types.js";
 import type { SeatSpec } from "./scenarios.js";
@@ -133,6 +133,15 @@ export interface SimResult {
   servedBySeat: Record<string, number>;
   /** Each seat's 7-day utilization at every reset inside the run. */
   utilAtReset: Record<string, number[]>;
+  /**
+   * The live outcomes (quota-history.ts), as the router itself would record
+   * them from its readings: per seat, the resets it saw, the mean share of the
+   * week unused at them, and the minutes it sat at or past the soft cap while
+   * another usable seat under the cap had a fifth of its week left. Scored by
+   * score-3, not by score or score-2. `strandedSeatMinutes` sums the seats.
+   */
+  outcomesBySeat: Record<string, SeatOutcomes>;
+  strandedSeatMinutes: number;
 }
 
 function round2(x: number): number {
@@ -278,6 +287,8 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   let placed = 0;
   let earlyMoves = 0;
   let firstMoveAtMs: number | null = null;
+  let strandedSeatMinutes = 0;
+  const softCap = parseSoftCapUtil(sc.routing as never);
   let nextSession = 0;
   const sessions: Session[] = [];
 
@@ -434,7 +445,21 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
       for (const a of accounts) { a.rateLimits = { ...DEFAULT_RATE_LIMITS }; a.coolingUntil = undefined; }
     }
 
-    // Stranded: a seat that cannot serve while another still has a fifth of its week.
+    // The live judgement, on the router's readings (quota-history.ts): a seat
+    // the router reads at or past the soft cap while another usable seat it
+    // reads under the cap has a fifth of its week left. Idle seats' resets are
+    // noted by the same tick, as the router's minute tick does.
+    quota.noteElapsedResets(now);
+    if (softCap !== undefined) {
+      for (const id of strandedSeats(accounts.map(a => ({
+        id: a.id, usable: a.enabled && a.healthy, sevenDayUtil: a.rateLimits.sevenDayUtil, sevenDayReset: a.rateLimits.sevenDayReset,
+      })), softCap, now / 1000)) {
+        quota.noteStranded(id, 1, now);
+        strandedSeatMinutes++;
+      }
+    }
+
+    // Stranded (run-1 metric, frozen): a seat that cannot serve while another still has a fifth of its week.
     const spent = [...states.values()].map(s =>
       s.spentWeek >= s.spec.weeklyCap || (s.spec.fiveHourCap > 0 && s.fiveResetAt > now && s.spentFive >= s.spec.fiveHourCap));
     const roomy = [...states.values()].some((s, i) => !spent[i] && s.spentWeek <= 0.8 * s.spec.weeklyCap);
@@ -489,5 +514,8 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   const meanShare = over.reduce((a, o) => a + o.share, 0) / Math.max(1, over.length);
   for (const o of over) overspendAtEnd += Math.max(0, o.share - meanShare) * o.cap;
 
-  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, earlyMoves, firstMoveAtMs, placed, servedBySeat, utilAtReset };
+  // Resets due exactly at the end are seen by the tick too.
+  quota.noteElapsedResets(now);
+  const outcomesBySeat = Object.fromEntries(sc.seats.map(s => [s.id, quota.outcomes(s.id, (sc.days + 1) * 24 * HOUR_MS, now)]));
+  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, earlyMoves, firstMoveAtMs, placed, servedBySeat, utilAtReset, outcomesBySeat, strandedSeatMinutes };
 }
