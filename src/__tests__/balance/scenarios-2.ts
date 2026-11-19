@@ -13,12 +13,15 @@
  *
  * Calibration, from mini on 2026-11-19 ~07:00Z (read-only):
  * - Weekly ratios heewon 0.68, vega 0.81, kyte 0.87 (every seat under
- *   1 - slack = 0.9); lyra and rigel over the 0.98 cap with 25 h and 15 h to
- *   their resets.
- * - Throttle: `perAccountMaxInFlight` 4, `maxWaitMs` 20000 (live config);
- *   p50 finish 4.8 s, p95 33.8 s since the deploy. Service time is taken as
- *   12 s, between the two, so the model neither frees slots every tick nor
- *   holds them for the whole minute.
+ *   1 - slack = 0.9); lyra and rigel over the 0.98 cap. Live their resets were
+ *   25 h and 15 h away; the pools put them at 49 h and 39 h so that no reset
+ *   falls inside the one-day runs and the state under test holds.
+ * - Throttle: `perAccountMaxInFlight` 4, `startUtil` 0.75, `hardUtil` 0.95,
+ *   `maxWaitMs` 20000 (live config): the gate holds four at or below 75% of
+ *   a seat's worse window and ramps down to one at 95% (throttle.ts,
+ *   admissionLimit, which the simulator calls). p50 finish 4.8 s, p95 33.8 s
+ *   since the deploy. Service time is taken as 12 s, between the two, so the
+ *   model neither frees slots every tick nor holds them for the whole minute.
  * - kyte reports no 5-hour window; its 5-hour cap in `kyte-five-hour` is an
  *   ASSUMED 15% of its week (as the Team seats are modelled), not a
  *   measurement: the pool exists so that concentrating on kyte can cost
@@ -27,8 +30,13 @@
 import type { Scenario, SeatSpec, DemandSpec, ScenarioEvents } from "./scenarios.js";
 
 export interface ThrottleSpec {
-  /** Requests a seat serves at once (live: 4). */
+  /** Requests a seat serves at once at or below `startUtil` (live: 4). */
   perAccountMaxInFlight: number;
+  /** Utilization (the worse of a seat's two windows) from which the live gate
+   *  lowers the slots linearly (live: 0.75)... */
+  startUtil: number;
+  /** ...to one slot at this utilization (live: 0.95). throttle.ts admissionLimit. */
+  hardUtil: number;
   /** How long a request holds a slot. */
   serviceSeconds: number;
   /** Longest a request waits before it goes anyway (live: 20). */
@@ -70,7 +78,7 @@ const DEMAND: DemandSpec = {
 };
 
 const LIVE_ROUTING = { softCapUtil: 0.98, weeklyPace: { enabled: true, fiveHour: true } };
-const LIVE_THROTTLE: ThrottleSpec = { perAccountMaxInFlight: 4, serviceSeconds: 12, maxWaitSeconds: 20 };
+const LIVE_THROTTLE: ThrottleSpec = { perAccountMaxInFlight: 4, startUtil: 0.75, hardUtil: 0.95, serviceSeconds: 12, maxWaitSeconds: 20 };
 
 /**
  * The live pool at 2026-11-19 07:00Z: every seat under the cap is behind pace

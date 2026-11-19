@@ -2,10 +2,17 @@
  * Scoring for the run-2 pools (scenarios-2.ts). FROZEN after the milestone
  * that introduced it, like score.ts, which it extends and does not edit.
  *
- * Adds one cost to the run-1 metrics: time requests spent in a seat's
- * admission queue. The live finding behind run 2 was not refusals but a queue
- * (one seat at 4/4 with 501 waits in an hour while 8 slots sat free), so a
- * policy that stacks a seat's queue must score for it.
+ * Adds two costs to the run-1 metrics.
+ *
+ * 1. Time requests spent in a seat's admission queue. The live finding behind
+ *    run 2 was not refusals but a queue (one seat at 4/4 with 501 waits in an
+ *    hour while 8 slots sat free), so a policy that stacks a seat's queue
+ *    must score for it.
+ * 2. Spend past the pace line in windows still open at the end of the run
+ *    (`overspendAtEnd`): a seat driven past an even spend plus the pacing
+ *    slack has that much less for the rest of its week. The run-1 score sees
+ *    only under-spend at the end, so on a one-day pool a policy could drain a
+ *    seat to empty its queue and score as balance; this charges the drain.
  *
  * Unit: cost-weighted tokens, as in score.ts. A second of queue wait is priced
  * at QUEUE_WAIT_TOKENS_PER_SECOND so that the live hour's 4,929 s of waiting
@@ -20,6 +27,8 @@ import { DRY_WEIGHT, TOLERANCE, type RunMetrics, type ScenarioScore } from "./sc
 export const QUEUE_WAIT_TOKENS_PER_SECOND = 1_500;
 
 export interface RunMetrics2 extends RunMetrics {
+  /** Cost-weighted tokens spent past the pace line in windows open at the end. */
+  overspendAtEnd: number;
   /** Seconds requests waited in admission queues, summed over seats. */
   queueWait: number;
   /** The most any one seat's queue held over the run, in seconds. */
@@ -31,7 +40,7 @@ export interface ScenarioScore2 extends RunMetrics2 {
 }
 
 export function total2(m: RunMetrics2): number {
-  return m.unusedAtReset + m.shortfallAtEnd + DRY_WEIGHT * m.dry + m.moveCost + QUEUE_WAIT_TOKENS_PER_SECOND * m.queueWait;
+  return m.unusedAtReset + m.shortfallAtEnd + m.overspendAtEnd + DRY_WEIGHT * m.dry + m.moveCost + QUEUE_WAIT_TOKENS_PER_SECOND * m.queueWait;
 }
 
 export function score2(m: RunMetrics2): ScenarioScore2 {

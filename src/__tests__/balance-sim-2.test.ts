@@ -33,7 +33,7 @@ function run(name: string): SimResult {
 }
 export function metrics2(r: SimResult): RunMetrics2 {
   const waits = Object.values(r.queueWaitBySeat);
-  return { ...r.metrics, queueWait: waits.reduce((a, b) => a + b, 0), queueWaitMaxSeat: Math.max(0, ...waits) };
+  return { ...r.metrics, overspendAtEnd: r.overspendAtEnd, queueWait: waits.reduce((a, b) => a + b, 0), queueWaitMaxSeat: Math.max(0, ...waits) };
 }
 
 beforeAll(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
@@ -73,6 +73,15 @@ describe("the run-2 pools", () => {
     expect(top[1] / total).toBeGreaterThan(0.6);
     const waits = r.queueWaitBySeat;
     expect(waits[top[0]]).toBeGreaterThan(0.8 * Object.values(waits).reduce((a, b) => a + b, 0));
+  });
+
+  it("charges uneven overspend, not the pool being over capacity: a run-1 pool with room reports none", () => {
+    // equal-seats: fresh seats with staggered resets, demand under capacity.
+    const sc = { ...SCENARIOS.find(s => s.name === "equal-seats")!, days: 1 };
+    const r = simulate(sc, { setClock: ms => vi.setSystemTime(ms) });
+    // Not exactly zero: s1's week resets at the end of the run, and what it
+    // served in the last minute is past a line that is now at 0. Negligible.
+    expect(r.overspendAtEnd).toBeLessThan(0.005 * r.metrics.demand);
   });
 });
 
