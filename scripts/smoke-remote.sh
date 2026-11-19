@@ -94,6 +94,22 @@ balance_line=$(curl -sf --max-time 10 "$base/cc-router/health" | node -e '
   });' || balance_line="missing")
 read -r bal_rules bal_seats bal_sized bal_first bal_placed bal_moves <<<"$balance_line"
 test "$bal_rules" != missing || fail "health has no balance block"
+# Outcomes per seat over the last week (balance.seats[].outcomes): weekly
+# resets seen, the share of the quota unused at them, minutes stranded at the
+# cap while another seat had week left. A router without the field is a build
+# from before outcomes were kept.
+outcomes_line=$(curl -sf --max-time 10 "$base/cc-router/health" | node -e '
+  let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+    try {
+      const b = JSON.parse(s).balance;
+      const seats = (b && Array.isArray(b.seats) ? b.seats : []).filter(x => x.outcomes && typeof x.outcomes.strandedMinutes === "number");
+      if (!seats.length) { console.log("missing"); return; }
+      const days = seats[0].outcomes.days;
+      const per = seats.map(x => `${x.id}: ${x.outcomes.resets} reset(s), ${x.outcomes.unusedAtReset === null ? "-" : Math.round(x.outcomes.unusedAtReset * 100) + "% unused"}, ${Math.round(x.outcomes.strandedMinutes)} min stranded`);
+      console.log(`${days}d ${per.join("; ")}`);
+    } catch { console.log("missing"); }
+  });' || outcomes_line="missing")
+test "$outcomes_line" != missing || fail "health balance has no outcomes per seat"
 test "$handoff" != missing || fail "health has no continuity ledger"
 test "$handoff" != unreachable || fail "health stopped answering"
 dropped=${handoff##*dropped=}
@@ -105,6 +121,7 @@ printf '[smoke] continuity: last handoff %s; client-visible failures %s in the l
   "$handoff" "$hour_failures" "$day_failures" "$day_handoffs"
 printf '[smoke] balance: %s rules, %s seats (%s measured), next session goes to %s; today %s placed, %s moved\n' \
   "$bal_rules" "$bal_seats" "$bal_sized" "$bal_first" "$bal_placed" "$bal_moves"
+printf '[smoke] outcomes (last %s): %s\n' "${outcomes_line%% *}" "${outcomes_line#* }"
 if test -n "$unverified"; then
   printf '[smoke] warning: unverified Claude Code version(s) sent traffic in the last day: %s\n' "$unverified"
   printf '[smoke]          run CC_ROUTER_REAL_CLIENT=1 npx vitest run src/__tests__/client-conformance.real.test.ts with that version installed\n'

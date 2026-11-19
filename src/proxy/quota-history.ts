@@ -12,6 +12,7 @@
  */
 
 import { HOUR_MS, DAY_MS, RETENTION_DAYS } from "./usage-history.js";
+import { WEEK_SEC } from "./weekly-pace.js";
 
 /** Distinct accounts kept; readings for further accounts are dropped. */
 export const MAX_QUOTA_ACCOUNTS = 64;
@@ -61,7 +62,40 @@ export interface QuotaFile {
   ]>;
   /** Cumulative cost-weighted tokens per account, so the counter survives a restart. */
   spent?: Record<string, number>;
+  /** Outcomes (see `noteReset`, `noteStranded`). Added without a version bump,
+   *  like `spentAt`: an older build reads the file and drops only these. */
+  resets?: Array<[resetAtSec: number, accountId: string, util: number, seenAtSec?: number]>;
+  stranded?: Array<[hourSec: number, accountId: string, minutes: number]>;
 }
+
+/**
+ * What the balance rules achieved for one seat, over a window: what was left
+ * unused when its week reset, and how long it sat at the cap while another
+ * seat still had week to give. These are outcomes, not what placement sees
+ * right now (balance-view.ts shows that); they say whether placement worked.
+ */
+export interface SeatOutcomes {
+  /** Weekly resets seen in the window. */
+  resets: number;
+  /** Mean share of the weekly quota unused at those resets (0..1); null with none. */
+  unusedAtReset: number | null;
+  /** Minutes at or past the cap while another seat under the cap had at least
+   *  STRANDED_WEEK_LEFT of its week left. */
+  strandedMinutes: number;
+}
+
+/** A seat counts as stranded only while another seat has this much of its week left. */
+export const STRANDED_WEEK_LEFT = 0.2;
+
+/** Resets closer than this to the last known one are the same reset, jittered. */
+const RESET_JITTER_SEC = 3600;
+
+/** `seenAt`: when the reset was noted (seconds). A window upstream rolled over
+ *  early has a resetAt still ahead of the clock; the outcome dates from the
+ *  earlier of the two. */
+interface ResetOutcome { accountId: string; resetAt: number; util: number; seenAt: number }
+const resetTime = (r: ResetOutcome): number => Math.min(r.resetAt, r.seenAt) * 1000;
+interface Latest { util: number; resetAt: number }
 
 /** An account id safe to key on and print; null for anything else. */
 export function sanitizeAccountId(raw: unknown): string | null {
@@ -95,6 +129,13 @@ export class QuotaHistory {
   private readonly accounts = new Set<string>();
   // Cumulative cost-weighted tokens per account; never pruned (one number each).
   private readonly spent = new Map<string, number>();
+  // The last weekly reading per account, in memory: a new reset time against
+  // it is a reset, and the util it held is what the seat reached.
+  private readonly latest = new Map<string, Latest>();
+  // Keyed `${resetAtSec}|${accountId}`: the utilization a seat reached at a weekly reset.
+  private readonly resets = new Map<string, ResetOutcome>();
+  // Keyed `${hour}|${accountId}`: minutes at the cap while another seat had week left.
+  private readonly stranded = new Map<string, { hour: number; accountId: string; minutes: number }>();
   private isDirty = false;
   private lastPruneHour = -Infinity;
 
@@ -153,6 +194,7 @@ export class QuotaHistory {
     const now = this.now();
     const ts = Number.isFinite(at) ? Math.min(at, now) : now;
     if (ts <= now - this.retentionMs) return false;
+    this.watchReset(id, sevenUtil, sevenReset, ts);
     const hour = Math.floor(ts / HOUR_MS) * HOUR_MS;
     const key = `${hour}|${id}`;
     if (this.byKey.has(key)) return false;
@@ -168,6 +210,102 @@ export class QuotaHistory {
     this.isDirty = true;
     if (hour > this.lastPruneHour) this.prune();
     return true;
+  }
+
+  /**
+   * Compare a weekly reading with the last one held for the account. A reset
+   * time later than the last by more than jitter means the window rolled over:
+   * the util the last reading held is what the seat reached at that reset.
+   * Every response passes through here (unlike the hourly rows), so a reset is
+   * seen on the first response after it. Upstream's word is the evidence: a new
+   * window named before the old reset time by our clock is still a reset.
+   */
+  private watchReset(id: string, util: number, resetAt: number, at: number): void {
+    // A response with 5-hour headers only says nothing about the week: taking
+    // its zeros would record the reset at 0% reached.
+    if (util === 0 && resetAt === 0) return;
+    const last = this.latest.get(id);
+    if (last && last.resetAt > 0 && resetAt > last.resetAt + RESET_JITTER_SEC) {
+      this.noteReset(id, last.resetAt, last.util, at);
+    }
+    if (!last && this.latest.size >= this.maxAccounts) return;
+    if (resetAt > 0 || !last) this.latest.set(id, { util, resetAt });
+    else if (resetAt === 0) this.latest.set(id, { util, resetAt: last.resetAt });
+  }
+
+  /**
+   * Record the utilization an account had reached when its weekly window
+   * reset at `resetAtSec`. One row per reset; a second note for the same reset
+   * keeps the higher util (a later reading before the reset is never lower).
+   */
+  noteReset(accountId: unknown, resetAtSec: number, util: number, at: number = this.now()): boolean {
+    const id = sanitizeAccountId(accountId);
+    const reset = resetOf(resetAtSec), u = utilOf(util);
+    if (id === null || reset === null || reset === 0 || u === null) return false;
+    const now = this.now();
+    const seenAt = Math.floor((Number.isFinite(at) ? Math.min(at, now) : now) / 1000);
+    if (Math.min(reset, seenAt) * 1000 <= now - this.retentionMs) return false;
+    // Further ahead than a window can reach is garbage, and would never be pruned.
+    if (reset * 1000 > now + 2 * WEEK_SEC * 1000) return false;
+    const key = `${reset}|${id}`;
+    const held = this.resets.get(key);
+    if (held && held.util >= u) return false;
+    if (!held && !this.accounts.has(id) && !this.latest.has(id) && this.accounts.size >= this.maxAccounts) return false;
+    this.resets.set(key, { accountId: id, resetAt: reset, util: u, seenAt: held ? Math.min(held.seenAt, seenAt) : seenAt });
+    this.isDirty = true;
+    return true;
+  }
+
+  /**
+   * A seat whose last known weekly reset has passed with no reading since has
+   * reset too: record what it held. Called from the minute tick, so an idle
+   * seat's reset is not missed until its next request.
+   */
+  noteElapsedResets(now: number = this.now()): number {
+    let noted = 0;
+    for (const [id, last] of this.latest) {
+      if (last.resetAt > 0 && last.resetAt * 1000 + RESET_JITTER_SEC * 1000 < now) {
+        if (this.noteReset(id, last.resetAt, last.util, now)) noted++;
+        // Not a reset again until a reading names the new window.
+        this.latest.set(id, { util: last.util, resetAt: 0 });
+      }
+    }
+    return noted;
+  }
+
+  /** Add minutes a seat spent at the cap while another seat had week left (see `strandedSeats`). */
+  noteStranded(accountId: unknown, minutes: number, at: number = this.now()): boolean {
+    const id = sanitizeAccountId(accountId);
+    if (id === null || !Number.isFinite(minutes) || minutes <= 0) return false;
+    const now = this.now();
+    const ts = Number.isFinite(at) ? Math.min(at, now) : now;
+    if (ts <= now - this.retentionMs) return false;
+    const hour = Math.floor(ts / HOUR_MS) * HOUR_MS;
+    const key = `${hour}|${id}`;
+    const held = this.stranded.get(key);
+    if (held) held.minutes += minutes;
+    else {
+      if (!this.accounts.has(id) && !this.latest.has(id) && this.accounts.size >= this.maxAccounts) return false;
+      this.stranded.set(key, { hour, accountId: id, minutes });
+    }
+    this.isDirty = true;
+    return true;
+  }
+
+  /** The outcomes of one account over the last `windowMs` (resets whose time, and stranded hours that overlap, fall inside). */
+  outcomes(accountId: string, windowMs: number, now: number = this.now()): SeatOutcomes {
+    const from = now - windowMs;
+    let resets = 0, unused = 0, minutes = 0;
+    for (const r of this.resets.values()) {
+      if (r.accountId !== accountId || resetTime(r) < from || resetTime(r) > now) continue;
+      resets++;
+      unused += Math.max(0, 1 - r.util);
+    }
+    for (const s of this.stranded.values()) {
+      if (s.accountId !== accountId || s.hour + HOUR_MS <= from || s.hour > now) continue;
+      minutes += s.minutes;
+    }
+    return { resets, unusedAtReset: resets > 0 ? unused / resets : null, strandedMinutes: minutes };
   }
 
   /** Copies, oldest first, then by account id. */
@@ -186,6 +324,12 @@ export class QuotaHistory {
     for (const [key, r] of this.byKey) {
       if (r.hour + HOUR_MS <= cutoff) { this.byKey.delete(key); removed++; }
     }
+    for (const [key, r] of this.resets) {
+      if (resetTime(r) <= cutoff) { this.resets.delete(key); removed++; }
+    }
+    for (const [key, s] of this.stranded) {
+      if (s.hour + HOUR_MS <= cutoff) { this.stranded.delete(key); removed++; }
+    }
     if (removed > 0) {
       this.accounts.clear();
       for (const r of this.byKey.values()) this.accounts.add(r.accountId);
@@ -202,6 +346,12 @@ export class QuotaHistory {
         r.fiveHour.util, r.fiveHour.resetAt, r.sevenDay.util, r.sevenDay.resetAt, r.spentAt,
       ]),
       spent: Object.fromEntries(this.spent),
+      resets: [...this.resets.values()]
+        .sort((a, b) => a.resetAt - b.resetAt || (a.accountId < b.accountId ? -1 : a.accountId > b.accountId ? 1 : 0))
+        .map(r => [r.resetAt, r.accountId, r.util, r.seenAt]),
+      stranded: [...this.stranded.values()]
+        .sort((a, b) => a.hour - b.hour || (a.accountId < b.accountId ? -1 : a.accountId > b.accountId ? 1 : 0))
+        .map(s => [s.hour / 1000, s.accountId, Math.round(s.minutes * 1000) / 1000]),
     };
   }
 
@@ -215,7 +365,7 @@ export class QuotaHistory {
    */
   restore(raw: unknown): boolean {
     if (typeof raw !== "object" || raw === null) return false;
-    const file = raw as { version?: unknown; rows?: unknown; spent?: unknown };
+    const file = raw as { version?: unknown; rows?: unknown; spent?: unknown; resets?: unknown; stranded?: unknown };
     if (file.version !== 1 || !Array.isArray(file.rows)) return false;
     for (const row of file.rows as unknown[]) {
       if (!Array.isArray(row) || (row.length !== 7 && row.length !== 8)) continue;
@@ -244,11 +394,73 @@ export class QuotaHistory {
         this.spent.set(id, Math.max(this.spent.get(id) ?? 0, value));
       }
     }
+    // The last reading per account comes back from its newest hourly row, so a
+    // reset across the restart is still seen (with the util of up to an hour
+    // before it). A reading taken live before the merge is newer and stays.
+    const newest = new Map<string, Latest>();
+    for (const r of this.readings()) { // oldest first: the last write is the newest row that names a weekly window
+      if (r.sevenDay.util > 0 || r.sevenDay.resetAt > 0) newest.set(r.accountId, { util: r.sevenDay.util, resetAt: r.sevenDay.resetAt });
+    }
+    for (const [id, last] of newest) if (!this.latest.has(id)) this.latest.set(id, last);
+    // Absent in files from before outcomes were kept.
+    const now = this.now();
+    if (Array.isArray(file.resets)) {
+      for (const row of file.resets as unknown[]) {
+        if (!Array.isArray(row) || (row.length !== 3 && row.length !== 4)) continue;
+        const [resetAtSec, accountId, util, seenAtSec] = row as unknown[];
+        if (typeof resetAtSec !== "number") continue;
+        // A three-field row (before seenAt was kept) dates from its reset time.
+        const seenAt = typeof seenAtSec === "number" && Number.isFinite(seenAtSec) ? seenAtSec * 1000 : resetAtSec * 1000;
+        this.noteReset(accountId, resetAtSec, typeof util === "number" ? util : NaN, Math.min(seenAt, now));
+      }
+    }
+    if (Array.isArray(file.stranded)) {
+      for (const row of file.stranded as unknown[]) {
+        if (!Array.isArray(row) || row.length !== 3) continue;
+        const [hourSec, accountId, minutes] = row as unknown[];
+        const id = sanitizeAccountId(accountId);
+        if (id === null || typeof hourSec !== "number" || !Number.isFinite(hourSec) || typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) continue;
+        const hour = Math.floor(hourSec * 1000 / HOUR_MS) * HOUR_MS;
+        if (hour + HOUR_MS <= now - this.retentionMs) continue;
+        const key = `${hour}|${id}`;
+        const held = this.stranded.get(key);
+        // What is held was recorded in this process; the file's figure for the
+        // same hour comes from before the restart: the two add up.
+        if (held) held.minutes += minutes;
+        else this.stranded.set(key, { hour, accountId: id, minutes });
+      }
+    }
     // As in usage-history: what was merged is on disk already, so the dirty flag
     // is left to whatever was recorded before the merge.
     this.prune();
     return true;
   }
+}
+
+/** What `strandedSeats` reads of a seat. */
+export interface StrandedInput {
+  id: string;
+  /** Enabled, healthy and with a working token: a seat that could take work
+   *  (or hold it) but for its week. A dead seat keeps a stale reading, and is
+   *  neither stranded nor shelter. */
+  usable: boolean;
+  sevenDayUtil: number;
+  /** Unix seconds; 0 when no weekly window is known. */
+  sevenDayReset: number;
+}
+
+/**
+ * The seats stranded right now: at or past `cap` on their week while another
+ * usable seat under the cap has at least STRANDED_WEEK_LEFT of its week left.
+ * A seat at the cap when every other seat is nearly out too is not stranded:
+ * there was nowhere else for its work to go. Seats with no weekly window are
+ * neither stranded nor shelter.
+ */
+export function strandedSeats(seats: ReadonlyArray<StrandedInput>, cap: number, nowSec: number): string[] {
+  const open = seats.filter(s => s.usable && s.sevenDayReset > nowSec);
+  const shelter = open.some(s => s.sevenDayUtil < cap && (s.sevenDayReset - nowSec) / WEEK_SEC >= STRANDED_WEEK_LEFT);
+  if (!shelter) return [];
+  return open.filter(s => s.sevenDayUtil >= cap).map(s => s.id);
 }
 
 export const QUOTA_HISTORY_DEFAULT_DAYS = 7;
