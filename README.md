@@ -737,6 +737,38 @@ With session affinity, a session stays on its account until that account answers
 
 Must be a fraction strictly between 0 and 1; anything else (including `90`) leaves placement exactly as it was.
 
+### How seats are judged: the balance rules
+
+Once `softCapUtil` or `weeklyPace` is set, seats are judged by the **balance rules** (session-router.ts, `balance`). They replaced the rules above on 2026-11-19 after the live pool showed two seats at 95-98% of their week taking new sessions while two others sat at 53-65% and the Max 20x seat at 19%. With neither key set, placement is exactly as it always was.
+
+- **The soft cap filters before pace.** A seat at or past the cap takes a new session only when every usable seat is. (Pace used to run first and could narrow the choice to one seat that was over the cap.)
+- **Pace is a ratio, and holds up to the reset.** For each window, `pace = share of the quota left / share of the window left`: 1 is an even spend, below 1 the seat is spending faster than the window allows. A seat is ahead on a window when its ratio is under `1 − slack` (`fiveHourSlack` for the 5-hour window). The two windows are never compared with each other.
+- **New sessions go where the most quota is about to be lost.** Among seats under the cap, those on pace on both windows come first, then those ahead only on the 5-hour window (it refills within hours), then the closest to weekly pace. Within that set the score is the cost-weighted tokens left per hour to the weekly reset:
+
+  ```
+  (cap − weeklyUtil) × size / max(hours to weekly reset, 1) × (cap − fiveHourUtil)² / (1 + load)
+  ```
+
+  `size` is the seat's weekly quota against a typical seat (next section). `load` is the requests the seat was given in the last ten minutes, as sessions at a request a minute: an idle pin adds nothing. The 5-hour headroom is squared because a session stays for hours.
+- **A pinned session moves only to escape a dry week.** It leaves for pace when its seat's weekly ratio is under 0.75 (projected to run out a quarter of the week early), another on-pace seat has a ratio at least 0.35 higher, and the pin is at least 30 minutes old. A 5-hour burst never moves a pin. The release is time-based: the ratio rises as the week elapses, so a seat that stops spending is on pace again by itself. A pin shed over the soft cap goes only to a seat with 40% of its window under the cap.
+- **Failover and requests without a session use the same ranking.** The failover pick is the seat a new session would be placed on; after failover the session is pinned to the seat that answered (one cache rewrite, not two). A request without a session id takes the seats under the cap in turn.
+
+**Seat size** (`seat-size.ts`): utilization is a share of each seat's own quota, so the router measures how many cost-weighted tokens move a seat's weekly utilization by one point, from its hourly quota history (3 pairs of readings and 0.08 of movement are enough; readings older than 14 days are ignored). Sizes are relative to the median measured seat; within 1.2× of it a seat counts as typical. On the live pool the Max 20x seat measured about 2× a Team seat, not the 4× its plan name suggests. A seat the history cannot measure yet takes `routing.balance.capacityWeight[id]` (a multiplier against a typical seat), and otherwise 1:
+
+```json
+{ "routing": { "balance": { "capacityWeight": { "kyte": 2 } } } }
+```
+
+**Escape hatch.** `routing.balance.legacy: true` restores the rules as they were before, under the same `softCapUtil` and `weeklyPace` keys:
+
+```json
+{ "routing": { "balance": { "legacy": true } } }
+```
+
+**Seeing it.** Health has a `balance` block: `rules` (`balance` or `legacy`), one entry per seat with `size` (and its `source`: `measured`, `weight` or `equal`), `remainingTokens`, `weekRatio`, `fiveHourRatio`, `surplusPerHour` (tokens per hour the seat could add and still reach its reset at an even spend), `onPace`, `overCap`, `load`, `rank` (where a new session goes, 1 first) and `placeable`; plus `placements` by reason for the last hour and day. The web dashboard's Accounts table shows the same pace ratio beside each window and a Placement column (rank, size, surplus); the terminal dashboard shows `place #n pace r` on each account row when the pane is wide enough. These are the figures placement ranks by, not a second computation. `scripts/smoke-remote.sh` fails a deploy whose health has no `balance` block.
+
+The rules were chosen in a simulator that drives the router's own placement code over days of synthetic traffic on frozen pools (`src/__tests__/balance/`, scores in `docs/balance/baseline.json`); every change to placement must be no worse than that baseline on every pool.
+
 ---
 
 ## Request pacing / admission throttle (opt-in)
@@ -892,7 +924,7 @@ Each step is logged as `failover: <from> answered HTTP 429; retrying on <to> (at
 | `fiveHour` | `false` | Also pace the 5-hour window; the worse of the two counts. |
 | `fiveHourSlack` | `0.20` | Allowance for the 5-hour window, which is burstier. |
 
-Pace only reorders. When every seat is ahead, the least-ahead one still takes the session, and nothing is refused. Health shows `weeklyPace` and `fiveHourPace` per account.
+Pace only reorders. When every seat is ahead, the least-ahead one still takes the session, and nothing is refused. Health shows `weeklyPace` and `fiveHourPace` per account (the legacy line), and `balance.seats[].weekRatio` / `fiveHourRatio`, the ratio the balance rules place by (see [How seats are judged](#how-seats-are-judged-the-balance-rules)).
 
 ### Ollama spill (opt-in)
 

@@ -59,6 +59,7 @@ import { startCodexUsageLoop } from "../providers/openai/usage-probe.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
 import { createSeats, isFirstPlacement, pinnedAnthropicAccount } from "./seat-metrics.js";
 import { seatSizes, type SeatSize } from "./seat-size.js";
+import { balanceView } from "./balance-view.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
 import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
@@ -931,6 +932,17 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         lastHour: usageHistory.placementTotals(HOUR_MS),
         lastDay: usageHistory.placementTotals(DAY_MS),
       },
+      // What placement sees for each seat right now (balance-view.ts): sizes,
+      // pace ratios, the rank a new session would be placed by.
+      balance: balanceView(
+        pool.getAll(),
+        sessionRouter.explain(
+          pool.getAll().map(a => ({ provider: "anthropic" as const, accountId: a.id })),
+          t => sessionTargetUsable(t), sessionTargetUtil),
+        currentSeatSizes(),
+        { lastHour: usageHistory.placementTotals(HOUR_MS), lastDay: usageHistory.placementTotals(DAY_MS) },
+        Date.now(),
+      ),
       // What clients actually saw go wrong, last hour and last day, and every
       // worker handoff: the evidence for "a session is never cut".
       continuity: continuity.snapshot(),

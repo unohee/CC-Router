@@ -409,6 +409,36 @@ That is the cost of the move, logged so the thresholds above can be tuned from
 real numbers. Frequent moves on large sessions mean one account is spending most
 of its time rate-limited — check `cc-router accounts list` for utilization.
 
+Under the balance rules (README, "How seats are judged") a pin moves for one of
+three reasons, counted per hour in health as `placements`:
+
+| Reason | What happened |
+| --- | --- |
+| `unservable` | The seat could not take the request (cooldown, disabled, needs re-login), or failover answered from another seat and the session followed it. |
+| `soft-cap` | The seat reached `softCapUtil` and another seat had 40% of its window under the cap. |
+| `weekly-pace` | The seat's weekly pace ratio fell under 0.75 with another on-pace seat 0.35 higher, after the pin had been there 30 minutes. |
+
+---
+
+## Why does one account get all the new sessions? (balance)
+
+Read `balance` in `/cc-router/health`, or the Placement column of the web dashboard: `rank` is where
+the next session goes. A seat ranks first when it has the most cost-weighted tokens left per hour
+to its weekly reset, so a seat that is about to lose unspent quota, or a bigger seat, is meant to
+go first; a seat ahead of pace on its week (`weekRatio` under `1 − slack`) waits while others are
+on pace, and a seat over the soft cap waits for every seat to be.
+
+- **Every seat's `size.source` is `equal`:** the quota history has too few readings to measure
+  sizes yet (3 hourly pairs that moved the weekly window by 0.08 in all). Until then set
+  `routing.balance.capacityWeight` for seats you know are larger, or wait a few hours of traffic.
+- **A seat is `placeable: false` with `usable: true`:** it is ahead of pace while others are on pace.
+  Its `weekRatio` rises as the week elapses, so it comes back by itself; nothing to reset.
+- **The rules say `legacy`:** `routing.balance.legacy` is `true`, or neither `softCapUtil` nor
+  `weeklyPace` is set. Remove the key to get the balance rules.
+- **It looks wrong anyway:** `routing.balance.legacy: true` restores the old rules at once. The
+  decision is reproducible offline: `npx vitest run src/__tests__/balance-sim.test.ts` scores both
+  against the frozen baseline in `docs/balance/baseline.json`.
+
 ---
 
 ## How do I go back to using Claude Code normally?
