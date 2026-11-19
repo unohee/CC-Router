@@ -417,12 +417,14 @@ describe("SessionRouter soft cap", () => {
     expect(r.resolve("s", POOL, notVega, lyraResetsSoon)!.accountId).toBe("lyra");
   });
 
-  it("ranks an account with a weekly window by the five-hour window it shares with the rest", () => {
+  it("legacy rules: rank an account with a weekly window by the five-hour window it shares with the rest", () => {
     // vela on 2026-10-22: kyte alone reports a weekly window (27%, 6.7 days out)
     // and its five-hour window is unopened; lyra is half way through hers.
     // Ranked on its weekly window kyte scored ~34x below lyra and sat idle.
+    // The balance rules rank on every seat's weekly window instead (all seats
+    // now report one); see balance-placement.test.ts.
     const now = 1_792_597_026;
-    const r = new SessionRouter({ softCapUtil: 0.98, now: () => now * 1000 });
+    const r = new SessionRouter({ softCapUtil: 0.98, balance: false, now: () => now * 1000 });
     const pool = ["lyra", "kyte"].map(T);
     const vela = (t: SessionTarget) => t.accountId === "kyte"
       ? { util: 0.27, resetAtSec: 1_793_174_400, pace: { util: 0, resetAtSec: 0 } }

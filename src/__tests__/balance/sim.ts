@@ -31,7 +31,7 @@
 import { SessionRouter, type SessionTarget, type ReassignReason } from "../../proxy/session-router.js";
 import { TokenPool, NoAvailableAccountError, EmptyPoolError } from "../../proxy/token-pool.js";
 import { createSeats, pinnedAnthropicAccount, type Seats } from "../../proxy/seat-metrics.js";
-import { parseSoftCapUtil, parseWeeklyPace } from "../../config/manager.js";
+import { parseBalanceRules, parseSoftCapUtil, parseWeeklyPace } from "../../config/manager.js";
 import { DEFAULT_RATE_LIMITS, type Account } from "../../proxy/types.js";
 import type { Scenario, SeatSpec } from "./scenarios.js";
 import type { RunMetrics } from "./score.js";
@@ -161,6 +161,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     now: () => now,
     softCapUtil: parseSoftCapUtil(sc.routing as never),
     weeklyPace: parseWeeklyPace(sc.routing as never),
+    balance: parseBalanceRules(sc.routing as never),
     onReassign: ({ reason }) => { reassigned[reason]++; },
   });
   const candidates: SessionTarget[] = accounts.map(a => ({ provider: "anthropic", accountId: a.id }));

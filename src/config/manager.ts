@@ -365,6 +365,9 @@ export interface ProxyConfig {
     /** Weekly pacing: prefer seats spending their 7-day window no faster than
      *  the week elapses. Opt-in: off unless `enabled` is true. */
     weeklyPace?: { enabled?: boolean; slack?: number; migrateAhead?: number; fiveHour?: boolean; fiveHourSlack?: number };
+    /** How `softCapUtil` and `weeklyPace` judge seats. `legacy: true` keeps the
+     *  rules from before the balance work (session-router.ts, `balance`). */
+    balance?: { legacy?: boolean };
     /** In-router failover for POST /v1/messages (server.ts). On unless
      *  `enabled` is explicitly false. */
     failover?: { enabled?: boolean };
@@ -444,6 +447,16 @@ export function getThrottleConfig(): ThrottleConfig {
  */
 export function getSoftCapUtil(): number | undefined {
   return parseSoftCapUtil(readConfig().routing);
+}
+
+/** Whether the balance rules judge seats (true unless `routing.balance.legacy` is true). */
+export function getBalanceRules(): boolean {
+  return parseBalanceRules(readConfig().routing);
+}
+
+/** `getBalanceRules` on a given `routing` block. */
+export function parseBalanceRules(routing: ProxyConfig["routing"] | undefined): boolean {
+  return routing?.balance?.legacy !== true;
 }
 
 /** `getSoftCapUtil` on a given `routing` block, for callers that hold one. */
