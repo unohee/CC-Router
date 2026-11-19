@@ -18,8 +18,9 @@ import { simulate } from "./balance/sim.js";
 //
 // Now: with no seat on pace every seat under the cap competes on the score,
 // with the pace ratio as a factor; a seat with no weekly reading is not the
-// sole candidate while measured seats under the cap exist; and a seat whose
-// admission gate is full scores down by (1 + saturation)^4.
+// sole candidate while measured seats under the cap exist (since run 3 it
+// competes among them: balance-explore.test.ts); and a seat whose admission
+// gate is full scores down by (1 + saturation)^4.
 
 const NOW = Date.UTC(2026, 10, 19, 7, 0);
 const nowSec = NOW / 1000;
