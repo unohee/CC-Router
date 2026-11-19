@@ -155,6 +155,38 @@ describe("in the balance simulator", () => {
     }
   }, 1_800_000);
 
+  it("no placement policy can be strictly better than baseline-3 on fresh-reset by stranded minutes: the floor set by the seats that start at the cap is above the gate", () => {
+    // Stranded minutes are judged on readings. A seat that starts the run at
+    // or past the soft cap reads so until its week resets (placement cannot
+    // lower a reading; the cap keeps it from being spent further), and is
+    // stranded every one of those minutes while any usable seat under the cap
+    // has a fifth of its week left, which heewon, vega and kyte have all run.
+    // In fresh-reset rigel (0.98, reset at 39 h) and lyra (0.98, reset after
+    // the run) give 2,340 + 2,880 = 5,220 seat-minutes before any policy acts.
+    // strictlyBetter3 needs fewer than baseline - max(5, 5%) = 5,216.45.
+    const sc = SCENARIOS_2.find(s => s.name === "fresh-reset")!;
+    const cap = (sc.routing as { softCapUtil: number }).softCapUtil;
+    const runMin = sc.days * 24 * 60;
+    const floor = sc.seats.filter(s => s.weeklyUtil >= cap).reduce((n, s) => n + Math.min(runMin, s.weeklyResetH * 60), 0);
+    expect(floor).toBe(5220);
+    const base = base3.scenarios["fresh-reset"]!;
+    const gate = base.strandedSeatMinutes - Math.max(5, 0.05 * base.strandedSeatMinutes);
+    expect(floor).toBeGreaterThan(gate);
+    // The baseline's own figure for those two seats is the floor; what a policy
+    // answers for is heewon's 271 (it reached the cap during the run), under the gate.
+    expect(base.outcomesBySeat["rigel"]!.strandedMinutes + base.outcomesBySeat["lyra"]!.strandedMinutes).toBe(floor);
+    // By unused share instead: rigel resets at the cap (0.02 is the cap's
+    // own 2%); only vega, 47% left with 6 hours to its reset, could be spent
+    // harder, and the score already prefers it about 9x (its hours to reset
+    // divide the score). live-week's floor is rigel's 780 minutes (reset at
+    // 13 h); its gate, 2,089, would need lyra (0.97 at the start) kept under
+    // the cap all day, which leaves a point of its week unused at its reset:
+    // the unused share then rises by exactly the 0.005 the gate allows.
+    expect(base.outcomesBySeat["rigel"]!.unusedAtReset).toBeCloseTo(1 - cap, 6);
+    const live = base3.scenarios["live-week"]!;
+    expect(live.outcomesBySeat["rigel"]!.strandedMinutes).toBe(13 * 60);
+  });
+
   it("a seat that resets while every other seat is on pace, with no session-less requests, serves its first session within minutes of its reset", () => {
     // fresh-reset reshaped (not a frozen pool): vega starts over the cap and
     // resets 6 minutes in; the other seats are on pace on their weeks (ratio
