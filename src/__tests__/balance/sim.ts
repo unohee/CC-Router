@@ -18,8 +18,14 @@
  *   id goes to TokenPool.getNext(). Not modelled: the hold-on-cooldown answer
  *   (session-migration.ts) holds a large session only for a cooldown of at
  *   most 60 s, and every cooldown here lasts until a window resets, so it
- *   would always proceed; the admission throttle, which delays but never
- *   chooses a seat; OpenAI targets, which the live pool does not use.
+ *   would always proceed; OpenAI targets, which the live pool does not use.
+ * - **The admission throttle**, when a scenario sets `throttle`: each seat
+ *   serves at most `perAccountMaxInFlight` requests at once, each holding a
+ *   slot for `serviceSeconds`, so a minute has a fixed number of slots per
+ *   seat. Requests past that wait (first come first served), up to
+ *   `maxWaitSeconds`, then go anyway as the live gate does. The wait is a
+ *   reported cost (`queueWait`); it changes no token count, so the frozen
+ *   scenarios, which set no `throttle`, score exactly as before.
  * - **Clients.** Sessions arrive by an hourly profile, live for a while, send a
  *   request in a minute with some chance, and grow a prompt prefix that sits in
  *   one seat's cache. Served elsewhere, the prefix is re-written there.
@@ -35,7 +41,8 @@ import { parseBalanceRules, parseCapacityWeights, parseSoftCapUtil, parseWeeklyP
 import { QuotaHistory } from "../../proxy/quota-history.js";
 import { seatSizes, type SeatSize } from "../../proxy/seat-size.js";
 import { DEFAULT_RATE_LIMITS, type Account } from "../../proxy/types.js";
-import type { Scenario, SeatSpec } from "./scenarios.js";
+import type { SeatSpec } from "./scenarios.js";
+import type { Scenario2 } from "./scenarios-2.js";
 import type { RunMetrics } from "./score.js";
 
 const MIN_MS = 60_000;
@@ -94,6 +101,11 @@ export interface SimOptions {
 
 export interface SimResult {
   metrics: RunMetrics;
+  /** Seconds requests waited in the admission queue, per seat (0 without `throttle`). */
+  queueWaitBySeat: Record<string, number>;
+  /** Requests that waited at all, and that hit the cap and went anyway. */
+  queued: number;
+  queueCapped: number;
   /** Pin moves the router reported, by reason. */
   reassigned: Record<ReassignReason, number>;
   /** Sessions that got their first pin. */
@@ -133,7 +145,7 @@ function reading(s: SeatState, now: number, status: "allowed" | "rate_limited", 
   };
 }
 
-export function simulate(sc: Scenario, opts: SimOptions): SimResult {
+export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   const rand = rng(sc.seed);
   let now = SIM_EPOCH;
   opts.setClock(now);
@@ -207,6 +219,24 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
 
   const m: RunMetrics = { unusedAtReset: 0, shortfallAtEnd: 0, dry: 0, moveCost: 0, demand: 0, refusals: 0, moves: 0, strandedMinutes: 0 };
   const servedBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  const queueWaitBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  let queued = 0, queueCapped = 0;
+  // Admission throttle: requests a seat was given this minute, reset each tick.
+  const thr = sc.throttle;
+  const slotsPerMinute = thr ? Math.max(1, Math.floor(thr.perAccountMaxInFlight * 60 / thr.serviceSeconds)) : Infinity;
+  const givenThisMinute: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  /** Charge the queue wait a request on `seat` pays this minute, as the live gate would. */
+  const admit = (seat: string): void => {
+    if (!thr) return;
+    const n = givenThisMinute[seat]++;
+    if (n < slotsPerMinute) return;
+    // The (n - slots)th overflow request waits for that many service times
+    // across the seat's slots, capped like the live gate (then it goes anyway).
+    const wait = Math.min(thr.maxWaitSeconds, (n - slotsPerMinute + 1) * thr.serviceSeconds / thr.perAccountMaxInFlight);
+    queueWaitBySeat[seat] += wait;
+    queued++;
+    if (wait >= thr.maxWaitSeconds) queueCapped++;
+  };
   const utilAtReset: Record<string, number[]> = Object.fromEntries(sc.seats.map(s => [s.id, [] as number[]]));
   let placed = 0;
   let nextSession = 0;
@@ -252,6 +282,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
       return false;
     }
     if (s.spec.fiveHourCap > 0 && s.fiveResetAt <= now) { s.fiveResetAt = now + FIVE_HOURS_MS; s.spentFive = 0; }
+    admit(a.id);
     s.spentWeek += cost;
     if (s.spec.fiveHourCap > 0) s.spentFive += cost;
     servedBySeat[a.id] += cost;
@@ -336,6 +367,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
 
   for (; now < end; now += MIN_MS) {
     opts.setClock(now);
+    for (const id in givenThisMinute) givenThisMinute[id] = 0;
 
     rollWindows();
 
@@ -381,5 +413,5 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     m.shortfallAtEnd += Math.max(0, elapsed * s.spec.weeklyCap - s.spentWeek);
   }
 
-  return { metrics: m, reassigned, placed, servedBySeat, utilAtReset };
+  return { metrics: m, queueWaitBySeat, queued, queueCapped, reassigned, placed, servedBySeat, utilAtReset };
 }
