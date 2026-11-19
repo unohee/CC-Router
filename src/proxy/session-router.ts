@@ -38,6 +38,12 @@ export interface TargetMetrics {
    *  shares of different seats compare as amounts. Absent means 1. Read only
    *  by the balance rules. */
   size?: number;
+  /** How full the seat's admission gate is right now: requests in flight over
+   *  the slots the throttle allows it at its utilization (0 = idle, 1 = full,
+   *  above 1 = queueing). Absent means unknown, read as 0. Read only by the
+   *  balance rules: a seat whose queue is full cannot absorb a new session
+   *  however much of its week is left. */
+  saturation?: number;
 }
 
 /** Why an existing session left its target. */
@@ -125,9 +131,19 @@ const MIN_TTR_MIN = 5;
  *  The last hour of a week still ranks high (its quota is about to be lost),
  *  but no longer as a spike that takes every new session. */
 const BALANCE_MIN_TTR_MIN = 60;
-/** Balance rules: when every seat is ahead of its weekly pace, seats within
- *  this much of the best pace ratio count as tied. */
-const PACE_RATIO_TIE = 0.05;
+/** Balance rules: when every seat under the cap is behind its weekly pace,
+ *  no tier applies and the weekly ratio enters the score as a factor,
+ *  ratio^PACE_POWER. A tie band on the best ratio was tried first and is what
+ *  the first live hour showed (2026-11-19): it left one seat placeable while
+ *  the size-and-load score rated another 8x higher. */
+const PACE_POWER = 1;
+/** Balance rules: a seat's score is divided by (1 + saturation)^this. The
+ *  live finding behind it (2026-11-19): one seat at 4/4 in flight with 501
+ *  waits in an hour kept taking every new session while two seats had 8 free
+ *  slots; the request-rate load term alone did not stop it. Chosen in the
+ *  balance simulator on the run-2 pools: 2 / 4 gave all-ahead queue wait
+ *  15,581 / 8,868 s (baseline 23,871) with every other pool better too. */
+const SATURATION_POWER = 4;
 const WEEK_SEC = 7 * 24 * 60 * 60;
 /** Balance rules: a pin is not moved for pace within this long of being
  *  placed or last moved. Every move is a cache rewrite, and the window that
@@ -328,25 +344,21 @@ export class SessionRouter {
     const load = this.loadOf(candidates);
     // The same narrowing placeBalanced applies, so the rank is the real order.
     let pool = underCap;
+    let behind = false;
     if (this.weeklyPace && pool.length > 1) {
-      const paces = pool.map(t => this.paceRatios(t, utilOf));
-      const onPace = pool.filter((_, i) => paces[i].onPace);
-      const weekOk = pool.filter((_, i) => !paces[i].weekAhead);
-      if (onPace.length > 0) pool = onPace;
-      else if (weekOk.length > 0) pool = weekOk;
-      else {
-        const best = Math.max(...paces.map(p => p.week ?? 1));
-        pool = pool.filter((_, i) => (paces[i].week ?? 1) >= best - PACE_RATIO_TIE);
-      }
+      const tiered = this.paceTier(pool, utilOf);
+      pool = tiered.pool;
+      behind = tiered.behind;
     }
     const inPool = new Set(pool.map(targetKey));
     const scored = candidates.map(t => {
       const p = this.paceRatios(t, utilOf);
+      const base = this.balanceScore(t, utilOf, load);
       return {
         t, key: targetKey(t), pace: p,
         usable: usable.includes(t), overCap: this.overSoftCap(t, utilOf),
         load: load.get(targetKey(t)) ?? 0,
-        score: this.balanceScore(t, utilOf, load),
+        score: behind ? base * this.paceFactor(t, utilOf) : base,
       };
     });
     // Rank: the pool first by score, then the rest by score.
@@ -769,7 +781,12 @@ export class SessionRouter {
    *    seats closest to their weekly pace.
    * 3. Among those, the most weekly headroom per hour to the weekly reset:
    *
-   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil)^2 / (1 + load)
+   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil)^2 / (1 + load) / (1 + saturation)^4
+   *
+   *    `saturation` is the seat's admission gate: requests in flight over the
+   *    slots the throttle allows it. A full queue cannot absorb a session
+   *    however much week is left. When every seat is behind its weekly pace
+   *    the score is also multiplied by the seat's weekly pace ratio (`paceTier`).
    *
    *    The soft cap and the score now read the same window: a seat at 97% of
    *    its week used to score on an idle five-hour window as if it had 98% to
@@ -805,27 +822,54 @@ export class SessionRouter {
     }
     if (pool.length === 0) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);
 
+    let behind = false;
     if (this.weeklyPace && pool.length > 1) {
-      const paces = pool.map(t => this.paceRatios(t, utilOf));
-      const onPace = pool.filter((_, i) => paces[i].onPace);
-      const weekOk = pool.filter((_, i) => !paces[i].weekAhead);
-      if (onPace.length > 0) pool = onPace;
-      else if (weekOk.length > 0) pool = weekOk;
-      else {
-        const best = Math.max(...paces.map(p => p.week ?? 1));
-        pool = pool.filter((_, i) => (paces[i].week ?? 1) >= best - PACE_RATIO_TIE);
-      }
+      const tiered = this.paceTier(pool, utilOf);
+      pool = tiered.pool;
+      behind = tiered.behind;
     }
 
     const load = this.loadOf(pool);
     const score = (t: SessionTarget): number => this.balanceScore(t, utilOf, load);
 
-    const scores = pool.map(score);
+    const scores = pool.map(t => behind ? score(t) * this.paceFactor(t, utilOf) : score(t));
     const best = Math.max(...scores);
     const tied = pool.filter((_, i) => best - scores[i] <= Math.abs(best) * 1e-9);
     const chosen = tied[this.cursor % tied.length];
     this.cursor = (this.cursor + 1) % Math.max(tied.length, 1);
     return chosen;
+  }
+
+  /**
+   * Balance rules: the seats a new session is placed from, by pace. Seats on
+   * pace on every paced window come first; then seats not ahead on their
+   * week (a five-hour burst refills within hours). When every seat is behind
+   * on its week, all of them compete, and the score is scaled by each seat's
+   * weekly pace ratio (`paceFactor`) so pace still counts without ever
+   * narrowing the choice to one seat. A seat with no weekly reading counts as
+   * on pace only while no measured seat under the cap exists: a fresh seat
+   * (or one the router has never read) must take work to produce a reading,
+   * but must not take every session while measured seats have room.
+   */
+  private paceTier(
+    pool: SessionTarget[],
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+  ): { pool: SessionTarget[]; behind: boolean } {
+    const paces = pool.map(t => this.paceRatios(t, utilOf));
+    const measured = pool.filter((_, i) => paces[i].week !== null);
+    const among = measured.length > 0 ? measured : pool;
+    const amongPaces = among.map(t => paces[pool.indexOf(t)]);
+    const onPace = among.filter((_, i) => amongPaces[i].onPace);
+    const weekOk = among.filter((_, i) => !amongPaces[i].weekAhead);
+    if (onPace.length > 0) return { pool: onPace, behind: false };
+    if (weekOk.length > 0) return { pool: weekOk, behind: false };
+    return { pool: among, behind: true };
+  }
+
+  /** The weekly pace ratio as a score factor (1 with no reading), to PACE_POWER. */
+  private paceFactor(t: SessionTarget, utilOf?: (target: SessionTarget) => number | TargetMetrics): number {
+    const week = this.windowRatio(this.metricsOf(t, utilOf).weekly, WEEK_SEC);
+    return week === null ? 1 : Math.pow(Math.max(week, 1e-3), PACE_POWER);
   }
 
   /** The balance score of one seat (see placeBalanced), given the load map. */
@@ -843,8 +887,9 @@ export class SessionRouter {
     const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
     const fiveRoom = five ? Math.pow(Math.min(1, Math.max(0, cap - five.util)), FIVE_HOUR_ROOM_POWER) : 1;
     const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
+    const sat = typeof m.saturation === "number" && Number.isFinite(m.saturation) && m.saturation > 0 ? m.saturation : 0;
     return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
-      / (1 + (load.get(targetKey(t)) ?? 0));
+      / (1 + (load.get(targetKey(t)) ?? 0)) / Math.pow(1 + sat, SATURATION_POWER);
   }
 
   /**

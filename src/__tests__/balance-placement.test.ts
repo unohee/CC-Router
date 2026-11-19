@@ -92,9 +92,10 @@ describe("the balance rules", () => {
     // five-hour quota against a share of a weekly one, and chose by it.
     const pool = [T("burst"), T("weekAhead")];
     const m = metrics({
-      // Five-hour window 30 minutes old and 90% spent: far ahead on five hours, which refill soon.
-      burst: seat({ util: 0.4, hoursLeft: 120 }, { util: 0.9, hoursLeft: 4.5 }),
-      // Week ahead: 70% spent with 60% of it left.
+      // On pace for its week (ratio 0.98); five-hour window 30 minutes old and
+      // 90% spent: far ahead on five hours, which refill soon.
+      burst: seat({ util: 0.3, hoursLeft: 120 }, { util: 0.9, hoursLeft: 4.5 }),
+      // Week ahead: 70% spent with 60% of it left (ratio 0.50); five-hour window fresh.
       weekAhead: seat({ util: 0.7, hoursLeft: 100 }, { util: 0.05, hoursLeft: 4.9 }),
     });
     expect(place({ weeklyPace: PACE, balance: false }, pool, m)).toBe("weekAhead");

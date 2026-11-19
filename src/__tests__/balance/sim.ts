@@ -213,6 +213,38 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
     return sizeMemo.sizes.get(id)?.relative ?? 1;
   };
 
+  // Admission throttle: requests a seat was given this minute, reset each tick.
+  const thr = sc.throttle;
+  const thrCfg = thr ? { ...DEFAULT_THROTTLE, enabled: true, perAccountMaxInFlight: thr.perAccountMaxInFlight, startUtil: thr.startUtil, hardUtil: thr.hardUtil, maxWaitMs: thr.maxWaitSeconds * 1000 } : null;
+  const givenThisMinute: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  /** Charge the queue wait a request on `seat` pays this minute, as the live gate would. */
+  /** The router's admission limit for a seat at the reading it holds. */
+  const limitOf = (a: Account): number =>
+    thrCfg ? admissionLimit(Math.max(a.rateLimits.fiveHourUtil, a.rateLimits.sevenDayUtil), thrCfg) : Infinity;
+  /** As server.ts reads it: in flight over the limit. Here, this minute's
+   *  requests over the minute's slots. */
+  const saturationOf = (id: string): number => {
+    if (!thr) return 0;
+    const a = accounts.find(x => x.id === id);
+    if (!a) return 0;
+    const slots = Math.max(1, Math.floor(limitOf(a) * 60 / thr.serviceSeconds));
+    return givenThisMinute[id] / slots;
+  };
+  const admit = (a: Account): void => {
+    if (!thr || !thrCfg) return;
+    // The router's ramp, on the reading the router holds for the seat.
+    const limit = limitOf(a);
+    const slotsPerMinute = Math.max(1, Math.floor(limit * 60 / thr.serviceSeconds));
+    const n = givenThisMinute[a.id]++;
+    if (n < slotsPerMinute) return;
+    // The (n - slots)th overflow request waits for that many service times
+    // across the seat's slots, capped like the live gate (then it goes anyway).
+    const wait = Math.min(thr.maxWaitSeconds, (n - slotsPerMinute + 1) * thr.serviceSeconds / limit);
+    queueWaitBySeat[a.id] += wait;
+    queued++;
+    if (wait >= thr.maxWaitSeconds) queueCapped++;
+  };
+
   const pool = new TokenPool(accounts);
   const reassigned: Record<ReassignReason, number> = { unservable: 0, "soft-cap": 0, "weekly-pace": 0 };
   const router = new SessionRouter({
@@ -225,7 +257,7 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   // As server.ts wires them: the failover pick and the no-session pick rank
   // through the router when the balance rules are on.
   const seats: Seats = createSeats({
-    pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf,
+    pool, openAIAccounts: [], canServeOpenAI: () => false, sizeOf, saturationOf,
     rank: (c, usable, utilOf, mode) => router.rank(c, usable, utilOf, mode),
   });
   const candidates: SessionTarget[] = accounts.map(a => ({ provider: "anthropic", accountId: a.id }));
@@ -235,25 +267,6 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   let overspendAtEnd = 0;
   const queueWaitBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
   let queued = 0, queueCapped = 0;
-  // Admission throttle: requests a seat was given this minute, reset each tick.
-  const thr = sc.throttle;
-  const thrCfg = thr ? { ...DEFAULT_THROTTLE, enabled: true, perAccountMaxInFlight: thr.perAccountMaxInFlight, startUtil: thr.startUtil, hardUtil: thr.hardUtil, maxWaitMs: thr.maxWaitSeconds * 1000 } : null;
-  const givenThisMinute: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
-  /** Charge the queue wait a request on `seat` pays this minute, as the live gate would. */
-  const admit = (a: Account): void => {
-    if (!thr || !thrCfg) return;
-    // The router's ramp, on the reading the router holds for the seat.
-    const limit = admissionLimit(Math.max(a.rateLimits.fiveHourUtil, a.rateLimits.sevenDayUtil), thrCfg);
-    const slotsPerMinute = Math.max(1, Math.floor(limit * 60 / thr.serviceSeconds));
-    const n = givenThisMinute[a.id]++;
-    if (n < slotsPerMinute) return;
-    // The (n - slots)th overflow request waits for that many service times
-    // across the seat's slots, capped like the live gate (then it goes anyway).
-    const wait = Math.min(thr.maxWaitSeconds, (n - slotsPerMinute + 1) * thr.serviceSeconds / limit);
-    queueWaitBySeat[a.id] += wait;
-    queued++;
-    if (wait >= thr.maxWaitSeconds) queueCapped++;
-  };
   const utilAtReset: Record<string, number[]> = Object.fromEntries(sc.seats.map(s => [s.id, [] as number[]]));
   let placed = 0;
   let nextSession = 0;
