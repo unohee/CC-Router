@@ -18,8 +18,17 @@
  *   id goes to TokenPool.getNext(). Not modelled: the hold-on-cooldown answer
  *   (session-migration.ts) holds a large session only for a cooldown of at
  *   most 60 s, and every cooldown here lasts until a window resets, so it
- *   would always proceed; the admission throttle, which delays but never
- *   chooses a seat; OpenAI targets, which the live pool does not use.
+ *   would always proceed; OpenAI targets, which the live pool does not use.
+ * - **The admission throttle**, when a scenario sets `throttle`: each seat
+ *   serves at most `admissionLimit(util)` requests at once (the router's own
+ *   ramp in throttle.ts: `perAccountMaxInFlight` at or below `startUtil`,
+ *   down to one at `hardUtil`, on the worse of the seat's two windows as the
+ *   router reads them), each holding a slot for `serviceSeconds`, so a
+ *   minute has that many slots per seat. Requests past that wait (first come
+ *   first served), up to `maxWaitSeconds`, then go anyway as the live gate
+ *   does. The wait is a reported cost (`queueWait`); it changes no token
+ *   count, so the frozen run-1 scenarios, which set no `throttle`, score
+ *   exactly as before.
  * - **Clients.** Sessions arrive by an hourly profile, live for a while, send a
  *   request in a minute with some chance, and grow a prompt prefix that sits in
  *   one seat's cache. Served elsewhere, the prefix is re-written there.
@@ -35,10 +44,15 @@ import { parseBalanceRules, parseCapacityWeights, parseSoftCapUtil, parseWeeklyP
 import { QuotaHistory } from "../../proxy/quota-history.js";
 import { seatSizes, type SeatSize } from "../../proxy/seat-size.js";
 import { DEFAULT_RATE_LIMITS, type Account } from "../../proxy/types.js";
-import type { Scenario, SeatSpec } from "./scenarios.js";
+import type { SeatSpec } from "./scenarios.js";
+import type { Scenario2 } from "./scenarios-2.js";
+import { admissionLimit, DEFAULT_THROTTLE } from "../../proxy/throttle.js";
 import type { RunMetrics } from "./score.js";
 
 const MIN_MS = 60_000;
+/** Slack over an even spend before spend in an open window counts as overspend
+ *  at the end of a run: the live pacing slack. */
+const OVERSPEND_SLACK = 0.10;
 const HOUR_MS = 60 * MIN_MS;
 const FIVE_HOURS_MS = 5 * HOUR_MS;
 const WEEK_MS = 7 * 24 * HOUR_MS;
@@ -71,6 +85,8 @@ function poisson(mean: number, rand: () => number): number {
 interface SeatState {
   spec: SeatSpec;
   spentWeek: number;
+  /** Spend in the current weekly window when the run started (0 after a reset). */
+  spentWeekAtStart: number;
   weekResetAt: number;
   spentFive: number;
   /** 0 while no 5-hour window is open. */
@@ -94,6 +110,14 @@ export interface SimOptions {
 
 export interface SimResult {
   metrics: RunMetrics;
+  /** Cost-weighted tokens spent past the pace line (even spend + OVERSPEND_SLACK)
+   *  in windows still open at the end; scored by score-2, not by score. */
+  overspendAtEnd: number;
+  /** Seconds requests waited in the admission queue, per seat (0 without `throttle`). */
+  queueWaitBySeat: Record<string, number>;
+  /** Requests that waited at all, and that hit the cap and went anyway. */
+  queued: number;
+  queueCapped: number;
   /** Pin moves the router reported, by reason. */
   reassigned: Record<ReassignReason, number>;
   /** Sessions that got their first pin. */
@@ -133,7 +157,7 @@ function reading(s: SeatState, now: number, status: "allowed" | "rate_limited", 
   };
 }
 
-export function simulate(sc: Scenario, opts: SimOptions): SimResult {
+export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   const rand = rng(sc.seed);
   let now = SIM_EPOCH;
   opts.setClock(now);
@@ -145,6 +169,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     const st: SeatState = {
       spec,
       spentWeek: spec.weeklyUtil * spec.weeklyCap,
+      spentWeekAtStart: spec.weeklyUtil * spec.weeklyCap,
       weekResetAt: now + spec.weeklyResetH * HOUR_MS,
       spentFive: fiveOpen ? (spec.fiveHourUtil ?? 0) * spec.fiveHourCap : 0,
       fiveResetAt: fiveOpen ? now + spec.fiveHourResetMin! * MIN_MS : 0,
@@ -207,6 +232,28 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
 
   const m: RunMetrics = { unusedAtReset: 0, shortfallAtEnd: 0, dry: 0, moveCost: 0, demand: 0, refusals: 0, moves: 0, strandedMinutes: 0 };
   const servedBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  let overspendAtEnd = 0;
+  const queueWaitBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  let queued = 0, queueCapped = 0;
+  // Admission throttle: requests a seat was given this minute, reset each tick.
+  const thr = sc.throttle;
+  const thrCfg = thr ? { ...DEFAULT_THROTTLE, enabled: true, perAccountMaxInFlight: thr.perAccountMaxInFlight, startUtil: thr.startUtil, hardUtil: thr.hardUtil, maxWaitMs: thr.maxWaitSeconds * 1000 } : null;
+  const givenThisMinute: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
+  /** Charge the queue wait a request on `seat` pays this minute, as the live gate would. */
+  const admit = (a: Account): void => {
+    if (!thr || !thrCfg) return;
+    // The router's ramp, on the reading the router holds for the seat.
+    const limit = admissionLimit(Math.max(a.rateLimits.fiveHourUtil, a.rateLimits.sevenDayUtil), thrCfg);
+    const slotsPerMinute = Math.max(1, Math.floor(limit * 60 / thr.serviceSeconds));
+    const n = givenThisMinute[a.id]++;
+    if (n < slotsPerMinute) return;
+    // The (n - slots)th overflow request waits for that many service times
+    // across the seat's slots, capped like the live gate (then it goes anyway).
+    const wait = Math.min(thr.maxWaitSeconds, (n - slotsPerMinute + 1) * thr.serviceSeconds / limit);
+    queueWaitBySeat[a.id] += wait;
+    queued++;
+    if (wait >= thr.maxWaitSeconds) queueCapped++;
+  };
   const utilAtReset: Record<string, number[]> = Object.fromEntries(sc.seats.map(s => [s.id, [] as number[]]));
   let placed = 0;
   let nextSession = 0;
@@ -252,6 +299,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
       return false;
     }
     if (s.spec.fiveHourCap > 0 && s.fiveResetAt <= now) { s.fiveResetAt = now + FIVE_HOURS_MS; s.spentFive = 0; }
+    admit(a);
     s.spentWeek += cost;
     if (s.spec.fiveHourCap > 0) s.spentFive += cost;
     servedBySeat[a.id] += cost;
@@ -322,6 +370,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
         utilAtReset[s.spec.id].push(Math.round(util * 1000) / 1000);
         m.unusedAtReset += Math.max(0, s.spec.weeklyCap - s.spentWeek);
         s.spentWeek = 0;
+        s.spentWeekAtStart = 0;
         s.weekResetAt += WEEK_MS;
       }
       if (s.fiveResetAt > 0 && s.fiveResetAt <= now) { s.fiveResetAt = 0; s.spentFive = 0; }
@@ -336,6 +385,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
 
   for (; now < end; now += MIN_MS) {
     opts.setClock(now);
+    for (const id in givenThisMinute) givenThisMinute[id] = 0;
 
     rollWindows();
 
@@ -380,6 +430,24 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     const elapsed = Math.min(1, Math.max(0, 1 - (s.weekResetAt - now) / WEEK_MS));
     m.shortfallAtEnd += Math.max(0, elapsed * s.spec.weeklyCap - s.spentWeek);
   }
+  // And the other side of the shortfall: spend past the pace line (even spend
+  // plus the pacing slack) is quota a seat will not have later in its week.
+  // The run-1 score (frozen) does not see it; score-2 charges it, or a policy
+  // that drains one seat to end a queue would score as balance. Two rules:
+  // only spend during the run counts (a pool that starts its seats past the
+  // line, as the run-2 pools do, is not charged for where it started), and
+  // only the UNEVEN part counts: when the pool's demand exceeds what every
+  // seat's line allows, some overspend is unavoidable and must go somewhere;
+  // what a policy answers for is putting more of it on one seat (as a share
+  // of that seat's week) than on the others. The charge is each seat's
+  // overspend share above the pool's mean share, in that seat's tokens.
+  const over = [...states.values()].map(s => {
+    const elapsed = Math.min(1, Math.max(0, 1 - (s.weekResetAt - now) / WEEK_MS));
+    const line = Math.min(1, elapsed + OVERSPEND_SLACK) * s.spec.weeklyCap;
+    return { cap: s.spec.weeklyCap, share: Math.max(0, s.spentWeek - Math.max(s.spentWeekAtStart, line)) / s.spec.weeklyCap };
+  });
+  const meanShare = over.reduce((a, o) => a + o.share, 0) / Math.max(1, over.length);
+  for (const o of over) overspendAtEnd += Math.max(0, o.share - meanShare) * o.cap;
 
-  return { metrics: m, reassigned, placed, servedBySeat, utilAtReset };
+  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, placed, servedBySeat, utilAtReset };
 }

@@ -1,0 +1,61 @@
+{
+  "note": "Scores of the placement policy at the time the run-2 pools were added (balance rules as of PR #47, 2026-11-19). Cost-weighted tokens; queueWait in seconds. Frozen: see src/__tests__/balance/score-2.ts.",
+  "scenarios": {
+    "all-ahead": {
+      "unusedAtReset": 0,
+      "shortfallAtEnd": 0,
+      "dry": 0,
+      "moveCost": 0,
+      "demand": 628513450,
+      "refusals": 0,
+      "moves": 0,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 204186423.90855765,
+      "queueWait": 23871,
+      "queueWaitMaxSeat": 23871,
+      "total": 239992923.90855765
+    },
+    "fresh-reset": {
+      "unusedAtReset": 164128700,
+      "shortfallAtEnd": 6321428.571428597,
+      "dry": 0,
+      "moveCost": 32378125,
+      "demand": 1323444900,
+      "refusals": 0,
+      "moves": 165,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 296489112.3557626,
+      "queueWait": 153018,
+      "queueWaitMaxSeat": 70413,
+      "total": 728844365.9271913
+    },
+    "deploy-restore": {
+      "unusedAtReset": 0,
+      "shortfallAtEnd": 0,
+      "dry": 0,
+      "moveCost": 14875000,
+      "demand": 953378700,
+      "refusals": 0,
+      "moves": 34,
+      "strandedMinutes": 0,
+      "overspendAtEnd": 362711738.9089027,
+      "queueWait": 142436,
+      "queueWaitMaxSeat": 135313,
+      "total": 591240738.9089026
+    },
+    "kyte-five-hour": {
+      "unusedAtReset": 0,
+      "shortfallAtEnd": 0,
+      "dry": 200303050,
+      "moveCost": 51141250,
+      "demand": 1349843300,
+      "refusals": 7,
+      "moves": 215,
+      "strandedMinutes": 190,
+      "overspendAtEnd": 275062237.3291926,
+      "queueWait": 302809,
+      "queueWaitMaxSeat": 170642,
+      "total": 1381326137.3291926
+    }
+  }
+}
