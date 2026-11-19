@@ -319,10 +319,11 @@ function applyOutputUsage(entry: LogEntry, usage: Record<string, number>): void 
  */
 const SUPPLY_TTL_MS = 60_000;
 let supplyMemo: { at: number; value: PoolSupply } | null = null;
-function supplySnapshot(accounts: ReadonlyArray<Account>, now: number): PoolSupply {
+function supplySnapshot(accounts: ReadonlyArray<Account>, now: number, seatSizes?: ReadonlyMap<string, SeatSize>): PoolSupply {
   if (supplyMemo && now - supplyMemo.at < SUPPLY_TTL_MS) return supplyMemo.value;
   const value = computeSupply({
     now,
+    seatSizes,
     live: accounts.filter(a => a.enabled).map(a => ({
       id: a.id,
       fiveHour: { util: a.rateLimits.fiveHourUtil, resetAt: a.rateLimits.fiveHourReset },
@@ -463,10 +464,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   });
   // Judged once at start and then every minute, from the supply model and the
   // last day's Anthropic spend. A pinned stage takes effect from the start.
+  // Seat sizes are created further down (placement needs the throttle first);
+  // the supply model reads them through this so both views hold one measurement.
+  let seatSizesNow: () => ReadonlyMap<string, SeatSize> | undefined = () => undefined;
   const governorTick = (): void => {
     if (!governor.config.enabled) return;
     const now = Date.now();
-    const supply = supplySnapshot(pool.getAll(), now);
+    const supply = supplySnapshot(pool.getAll(), now, seatSizesNow());
     const spentLast24h = usageHistory.buckets()
       .filter(b => b.provider === "anthropic" && b.hour + HOUR_MS > now - DAY_MS && b.hour <= now)
       .reduce((n, b) => n + costWeighted(b), 0);
@@ -623,6 +627,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     sizeMemo = { at: now, sizes };
     return sizes;
   };
+  seatSizesNow = currentSeatSizes;
   // The admission gate is created below (it needs the throttle config); the
   // seat metrics read it late so placement can see a full queue.
   let saturationOf: (id: string) => number = () => 0;
@@ -927,7 +932,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       performance: stats.perf.snapshot(Date.now()),
       // Capacity, demand forecast, today's budget and projected exhaustion per
       // account. Cost-weighted tokens; "unknown" until enough readings pair up.
-      supply: supplySnapshot(pool.getAll(), Date.now()),
+      supply: supplySnapshot(pool.getAll(), Date.now(), seatSizesNow()),
       governor: governor.snapshot(),
       // POST /v1/messages requests retried inside the router, by how they ended
       // and by what refused them. Totals since the router started.

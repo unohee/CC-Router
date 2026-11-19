@@ -946,7 +946,7 @@ The router keeps two histories, and from them a supply model works out four thin
 - **The histories.**
   - The hourly usage store (`usage.json`): tokens, plus upstream errors, 429s and throttle waits per hour. It is served by `/cc-router/usage-history` and has an Incidents card.
   - A per-account quota history (`quota-history.json`): each account's 5-hour and 7-day utilization and resets, sampled at most once per hour. It is served behind the proxy secret by `GET /cc-router/quota-history?days=N`.
-- **Capacity:** cost-weighted tokens per 1% of each window, per account. It is `unknown` until 24 paired readings exist. The weights are input 1, output 5, cache write 1.25, cache read 0.1.
+- **Capacity:** cost-weighted tokens per 1% of each window, per account. The 7-day capacity is the seat-size measurement (`seat-size.ts`, the one placement sizes seats by: 3 paired hourly readings that moved the week by 0.08 in all, from the last 14 days, with its error band), so one measurement feeds both the balance rules and this card, `supply.accounts[].sevenDay.remaining` equals `balance.seats[].remainingTokens`, and a capacity is known within hours of readings. The 5-hour capacity keeps its own pairing and is `unknown` until 24 paired readings exist. The weights are input 1, output 5, cache write 1.25, cache read 0.1.
 - **Demand:** the forecast for the rest of each window, from the last 14 days by hour of day.
 - **Today's pool budget:** what the pool can spend today and keep every known account on pace.
 - **Run-out times:** when each window is projected to reach 100%.

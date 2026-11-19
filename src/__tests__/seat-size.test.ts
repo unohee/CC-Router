@@ -95,8 +95,8 @@ describe("seatSizes", () => {
 
   it("with nothing measured, weights stand alone against 1", () => {
     const s = seatSizes(["a", "b"], [], NOW, { a: 2 });
-    expect(s.get("a")).toEqual({ relative: 2, source: "weight", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null });
-    expect(s.get("b")).toEqual({ relative: 1, source: "equal", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null });
+    expect(s.get("a")).toEqual({ relative: 2, source: "weight", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null, moved: 0 });
+    expect(s.get("b")).toEqual({ relative: 1, source: "equal", tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null, moved: 0 });
   });
 
   it("ignores weights that are out of range or inherited", () => {

@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { DAY_MS, HOUR_MS, type UsageBucket } from "../proxy/usage-history.js";
 import { QuotaHistory, type QuotaReading } from "../proxy/quota-history.js";
+import { measureWeeklySize, seatSizes } from "../proxy/seat-size.js";
 import {
-  COST_WEIGHTS, DEFAULT_SUPPLY_OPTIONS, computeSupply, costWeighted, demandProfile, estimateCapacity,
+  COST_WEIGHTS, DEFAULT_SUPPLY_OPTIONS, capacityFromSeatSize, computeSupply, costWeighted, demandProfile, estimateCapacity,
   forecastDemand, projectExhaustion, type LiveAccount,
 } from "../proxy/supply-model.js";
 import { renderDashboardHtml } from "../proxy/web-dashboard.js";
@@ -48,41 +49,82 @@ describe("cost weighting", () => {
 });
 
 describe("capacity", () => {
-  it("is unknown until 24 pairs inside one window have been seen, and says how many it has", () => {
-    const c = estimateCapacity(steadyWeek(24), "sevenDay");
-    expect(c).toEqual({ status: "unknown", tokensPerPercent: null, samples: 23, reason: "too few samples" });
+  // The 7-day capacity is the seat-size measurement (3 pairs, 0.08 moved, 14-day
+  // window); the 5-hour one keeps the 24-pair pairing. `now` is the readings'
+  // end: measureWeeklySize drops readings older than 14 days.
+  const NOW = T0 + 2 * DAY_MS;
+
+  it("7-day: is unknown until 3 pairs inside one window have moved 0.08, and says what it has against each gate", () => {
+    // 3 readings, 2 pairs, moved 0.02.
+    const few = estimateCapacity(steadyWeek(3), "sevenDay", undefined, NOW);
+    expect(few).toMatchObject({ status: "unknown", tokensPerPercent: null, errorBand: null, samples: 2, minSamples: 3, minMoved: 0.08, reason: "too few samples" });
+    expect(few.moved).toBeCloseTo(0.02, 6);
+    // 5 readings, 4 pairs, moved 0.04: enough pairs, too little movement.
+    expect(estimateCapacity(steadyWeek(5), "sevenDay", undefined, NOW)).toMatchObject({ status: "unknown", samples: 4, reason: "too little movement" });
   });
 
-  it("is the ratio of spend to utilization moved once there are enough pairs", () => {
-    const c = estimateCapacity(steadyWeek(25), "sevenDay");
+  it("7-day: is the ratio of spend to utilization moved once the gates pass, with the error band 0.01 / moved", () => {
+    // 10 readings, 9 pairs, moved 0.09.
+    const c = estimateCapacity(steadyWeek(10), "sevenDay", undefined, NOW);
     expect(c.status).toBe("ok");
-    expect(c.samples).toBe(24);
+    expect(c.samples).toBe(9);
     expect(c.tokensPerPercent).toBeCloseTo(1_000_000, 0);
+    expect(c.errorBand).toBeCloseTo(0.01 / 0.09, 6);
+    // The same figure placement sizes the seat by.
+    const m = measureWeeklySize(steadyWeek(10), NOW);
+    expect(c.tokensPerPercent! * 100).toBeCloseTo(m.tokensPerWeek!, 6);
+    expect(c.errorBand).toBe(m.errorBand);
+  });
+
+  it("7-day: read from the seat sizes placement holds when they are given, so the two views cannot drift between refreshes", () => {
+    const rs = steadyWeek(10);
+    const sizes = seatSizes(["lyra"], rs, NOW);
+    const s = computeSupply({ now: NOW, readings: [], buckets: [], since: null, live: [live(0, 0.4, NOW - 60_000, { id: "lyra", sevenReset: Math.floor((NOW + DAY_MS) / 1000) })], seatSizes: sizes });
+    const cap = s.accounts[0]!.sevenDay.capacity;
+    expect(cap).toMatchObject({ status: "ok", samples: 9 });
+    expect(cap.tokensPerPercent).toBeCloseTo(sizes.get("lyra")!.tokensPerWeek! / 100, 6);
+    expect(cap.errorBand).toBe(sizes.get("lyra")!.errorBand);
+    // Without the sizes, measured from the readings: the same figure.
+    const fromReadings = estimateCapacity(rs, "sevenDay", undefined, NOW);
+    expect(cap.tokensPerPercent).toBeCloseTo(fromReadings.tokensPerPercent!, 6);
+    // A size that is a configured weight or equal is not a capacity.
+    const weight = capacityFromSeatSize({ relative: 2, source: "weight", tokensPerWeek: null, samples: 1, spanHours: 1, errorBand: null, moved: 0.02 });
+    expect(weight).toMatchObject({ status: "unknown", reason: "too few samples", samples: 1 });
+  });
+
+  it("7-day: readings older than 14 days are left out, as the seat-size measurement leaves them out", () => {
+    expect(estimateCapacity(steadyWeek(10), "sevenDay", undefined, T0 + 15 * DAY_MS)).toMatchObject({ status: "unknown", samples: 0 });
+    expect(estimateCapacity(steadyWeek(10), "sevenDay", undefined, T0 + 13 * DAY_MS).status).toBe("ok");
   });
 
   it("leaves out pairs across a reset, a lost counter, a falling utilization and readings without spend", () => {
-    const rs = steadyWeek(25);
+    const rs = steadyWeek(10);
     // Clean pairs give 1M per percent; add pairs that would wreck it if counted.
     rs.push(reading(30, 0, 0.05, 99e9, { sevenReset: WEEK_RESET + 7 * 86400 })); // new window
     rs.push(reading(31, 0, 0.06, 1)); // counter went backwards (a crash), and the reset is back
     rs.push(reading(32, 0, 0.01, 2e9)); // utilization fell without a reset change
     rs.push(reading(33, 0, 0.9, null)); // from before spend was kept
-    const c = estimateCapacity(rs, "sevenDay");
-    expect(c.samples).toBe(24);
+    const c = estimateCapacity(rs, "sevenDay", undefined, NOW);
+    expect(c.samples).toBe(9);
     expect(c.tokensPerPercent).toBeCloseTo(1_000_000, 0);
   });
 
-  it("is unknown when the pairs moved too little to divide by", () => {
-    const flat = Array.from({ length: 30 }, (_, i) => reading(i, 0, 0.1, i * 1000));
-    expect(estimateCapacity(flat, "sevenDay")).toMatchObject({ status: "unknown", reason: "too little movement", samples: 29 });
+  it("5-hour: keeps its own pairing: unknown until 24 pairs, and until they moved 0.02", () => {
+    const rs = Array.from({ length: 30 }, (_, i) => reading(i, 0.02 * i, 0.002 * i, i * 400_000));
+    expect(estimateCapacity(rs.slice(0, 24), "fiveHour", undefined, NOW)).toMatchObject({ status: "unknown", samples: 23, minSamples: 24, minMoved: 0.02, reason: "too few samples" });
+    const flat = Array.from({ length: 30 }, (_, i) => reading(i, 0.0005 * i, 0.1, i * 1000));
+    expect(estimateCapacity(flat, "fiveHour", undefined, NOW)).toMatchObject({ status: "unknown", reason: "too little movement", samples: 29 });
+    const five = estimateCapacity(rs, "fiveHour", undefined, NOW);
+    expect(five.tokensPerPercent).toBeCloseTo(200_000, 0);
+    expect(five.errorBand).toBeCloseTo(0.01 / 0.58, 6);
   });
 
-  it("estimates each window on its own", () => {
+  it("estimates each window on its own: a week that moved 0.058 is unknown while its 5-hour window is known", () => {
     const rs = Array.from({ length: 30 }, (_, i) => reading(i, 0.02 * i, 0.002 * i, i * 400_000));
-    const five = estimateCapacity(rs, "fiveHour");
-    const seven = estimateCapacity(rs, "sevenDay");
-    expect(five.tokensPerPercent).toBeCloseTo(200_000, 0);
-    expect(seven.tokensPerPercent).toBeCloseTo(2_000_000, 0);
+    expect(estimateCapacity(rs, "fiveHour", undefined, NOW).status).toBe("ok");
+    expect(estimateCapacity(rs, "sevenDay", undefined, NOW)).toMatchObject({ status: "unknown", reason: "too little movement" });
+    const wide = Array.from({ length: 30 }, (_, i) => reading(i, 0.02 * i, 0.004 * i, i * 400_000));
+    expect(estimateCapacity(wide, "sevenDay", undefined, NOW).tokensPerPercent).toBeCloseTo(1_000_000, 0);
   });
 });
 
@@ -256,7 +298,8 @@ async function startRouter(dir: string, upstreamPort: number): Promise<Router> {
     ACCOUNTS_PATH: join(dir, "accounts.json"), CONFIG_PATH: join(dir, "config.json"),
     SESSIONS_PATH: join(dir, "sessions.json"),
   };
-  delete env["QUOTA_HISTORY_PATH"];
+  env["QUOTA_HISTORY_PATH"] = join(dir, "quota-history.json");
+  env["ACCOUNT_STATE_PATH"] = join(dir, "account-state.json");
   delete env["USAGE_PATH"];
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
     `import {startServer} from './src/proxy/server.ts'; await startServer({port:${port}, litellmUrl:'http://127.0.0.1:${upstreamPort}'});`], {
@@ -318,6 +361,55 @@ describe("supply in health through a real router", () => {
       expect(h.supply.accounts[0].sevenDay.capacity).toMatchObject({ status: "unknown", samples: 0 });
       expect(h.supply.accounts[0].sevenDay.remaining).toBeNull();
       expect(h.supply.budget).toEqual({ today: null, known: 0, unknown: 1 });
+    } finally {
+      await r.stop();
+      await new Promise<void>(res => upstream.close(() => res()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("knows a seat's 7-day capacity from four hourly readings, and its remaining supply is the figure the balance block shows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cc-router-supply-http-"));
+    const nowMs = Date.now();
+    const nowS = Math.floor(nowMs / 1000);
+    const reset = nowS + 4 * 86_400;
+    // Four hourly readings in the current week: utilization 0.40 -> 0.52 (moved 0.12, 3 pairs) on 1.2M cost-weighted tokens per point.
+    const hour = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+    const rows = [3, 2, 1, 0].map((k, i) => {
+      const h = hour - k * HOUR_MS;
+      return [h / 1000, "fixture", h / 1000 + 300, 0.1, nowS + 3600, 0.4 + 0.04 * i, reset, 1_200_000 * 4 * i];
+    });
+    writeFileSync(join(dir, "quota-history.json"), JSON.stringify({ version: 1, rows, spent: { fixture: 1_200_000 * 12 } }));
+    // The pool's last reading, so health has a live utilization before any request.
+    writeFileSync(join(dir, "account-state.json"), JSON.stringify({ version: 1, savedAt: nowMs, accounts: { fixture: {
+      rateLimits: { status: "allowed", fiveHourUtil: 0.1, fiveHourReset: nowS + 3600, sevenDayUtil: 0.52, sevenDayReset: reset, claim: "", plan: "", requestsLimit: 0, lastUpdated: nowMs - 60_000 },
+      sevenDayWindowSeen: true,
+    } } }));
+    const upstream: Server = createServer((req: IncomingMessage, res: ServerResponse) => { req.resume(); req.on("end", () => { res.writeHead(500); res.end(); }); });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    writeFileSync(join(dir, "accounts.json"), JSON.stringify([{ id: "fixture", accessToken: "fixture", refreshToken: "fixture", expiresAt: nowMs + 86_400_000, scopes: [], enabled: true }]));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ routing: { softCapUtil: 0.98, weeklyPace: { enabled: true } } }));
+    const r = await startRouter(dir, (upstream.address() as { port: number }).port);
+    try {
+      const h = await (await fetch(`${r.base}/cc-router/health`, { signal: AbortSignal.timeout(5000) })).json() as {
+        supply: { accounts: Array<{ id: string; sevenDay: { capacity: { status: string; samples: number; tokensPerPercent: number | null; errorBand: number | null; minSamples: number }; remaining: number | null } }>; budget: { today: number | null; known: number; unknown: number } };
+        balance: { seats: Array<{ id: string; remainingTokens: number | null; size: { source: string; tokensPerWeek: number | null; errorBand: number | null; samples: number } }> };
+      };
+      const sup = h.supply.accounts.find(a => a.id === "fixture")!.sevenDay;
+      const bal = h.balance.seats.find(s => s.id === "fixture")!;
+      expect(sup.capacity).toMatchObject({ status: "ok", samples: 3, minSamples: 3 });
+      // 1.2M per point: 120M a week, within 0.01 / 0.12.
+      expect(sup.capacity.tokensPerPercent).toBeCloseTo(1_200_000, -3);
+      expect(sup.capacity.errorBand).toBeCloseTo(0.01 / 0.12, 4);
+      expect(bal.size).toMatchObject({ source: "measured", samples: 3 });
+      expect(bal.size.tokensPerWeek).toBe(Math.round(sup.capacity.tokensPerPercent! * 100));
+      expect(bal.size.errorBand).toBeCloseTo(sup.capacity.errorBand!, 3);
+      // The two views agree: 48% of 120M left.
+      expect(sup.remaining).toBe(bal.remainingTokens);
+      expect(sup.remaining).toBeCloseTo(0.48 * 120_000_000, -4);
+      expect(h.supply.budget.known).toBe(1);
+      expect(h.supply.budget.today).toBeCloseTo(sup.remaining! / 4, -4);
     } finally {
       await r.stop();
       await new Promise<void>(res => upstream.close(() => res()));

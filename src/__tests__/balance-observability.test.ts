@@ -101,9 +101,9 @@ const NO_OUTCOMES = () => ({ resets: 0, unusedAtReset: null, strandedMinutes: 0 
 
 describe("balanceView", () => {
   const sizes = new Map<string, SeatSize>(IDS.map(id => [id, id === "kyte"
-    ? { relative: 2.03, source: "measured", tokensPerWeek: 920e6, samples: 8, spanHours: 52.25, errorBand: 0.0417 }
-    : id === "vega" ? { relative: 1, source: "measured", tokensPerWeek: 450e6, samples: 12, spanHours: 100, errorBand: 0.02 }
-      : { relative: 1, source: "equal", tokensPerWeek: null, samples: 1, spanHours: 3, errorBand: null }]));
+    ? { relative: 2.03, source: "measured", tokensPerWeek: 920e6, samples: 8, spanHours: 52.25, errorBand: 0.0417, moved: 0.24 }
+    : id === "vega" ? { relative: 1, source: "measured", tokensPerWeek: 450e6, samples: 12, spanHours: 100, errorBand: 0.02, moved: 0.5 }
+      : { relative: 1, source: "equal", tokensPerWeek: null, samples: 1, spanHours: 3, errorBand: null, moved: 0.01 }]));
   const placements = { lastHour: emptyPlacementCounts(), lastDay: { ...emptyPlacementCounts(), placed: 40, "soft-cap": 3 } };
 
   it("joins the router's explanation, the seat sizes and the placement counts", () => {

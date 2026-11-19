@@ -81,7 +81,7 @@ export function balanceView(
   const nowSec = nowMs / 1000;
   const seats: BalanceSeatView[] = accounts.map(a => {
     const x = explained?.get(`anthropic:${a.id}`);
-    const size = sizes.get(a.id) ?? { relative: 1, source: "equal" as const, tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null };
+    const size = sizes.get(a.id) ?? { relative: 1, source: "equal" as const, tokensPerWeek: null, samples: 0, spanHours: 0, errorBand: null, moved: 0 };
     const r = a.rateLimits;
     const weekOpen = r.sevenDayReset > nowSec;
     const remaining = size.tokensPerWeek !== null && weekOpen ? Math.max(0, 1 - r.sevenDayUtil) * size.tokensPerWeek : null;

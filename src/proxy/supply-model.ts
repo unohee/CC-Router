@@ -13,6 +13,7 @@
 
 import { HOUR_MS, DAY_MS, type UsageBucket } from "./usage-history.js";
 import type { QuotaReading } from "./quota-history.js";
+import { measureWeeklySize, DEFAULT_SEAT_SIZE_OPTIONS, type SeatSize, type SeatSizeOptions } from "./seat-size.js";
 
 export const COST_WEIGHTS = { input: 1, output: 5, cacheCreation: 1.25, cacheRead: 0.1 } as const;
 
@@ -27,10 +28,13 @@ export type WindowName = "fiveHour" | "sevenDay";
 export const WINDOW_MS: Record<WindowName, number> = { fiveHour: 5 * HOUR_MS, sevenDay: 7 * DAY_MS };
 
 export interface SupplyOptions {
-  /** Paired samples needed before a capacity is reported (the decision is 24). */
+  /** 5-hour window: paired samples needed before a capacity is reported (the decision is 24). */
   minSamples: number;
-  /** Utilization the pairs must move in total (0..1); less is noise. */
+  /** 5-hour window: utilization the pairs must move in total (0..1); less is noise. */
   minUtilMoved: number;
+  /** 7-day window: the seat-size measurement's gates (seat-size.ts), the same
+   *  measurement placement sizes seats by. One measurement feeds both views. */
+  seatSize: SeatSizeOptions;
   /** Days of hourly history the demand profile is built from. */
   profileDays: number;
   /** How far back the burn slope for the exhaustion estimate looks. */
@@ -42,6 +46,7 @@ export interface SupplyOptions {
 export const DEFAULT_SUPPLY_OPTIONS: SupplyOptions = {
   minSamples: 24,
   minUtilMoved: 0.02,
+  seatSize: DEFAULT_SEAT_SIZE_OPTIONS,
   profileDays: 14,
   slopeLookbackMs: 6 * HOUR_MS,
   resetToleranceSec: 600,
@@ -53,6 +58,14 @@ export interface CapacityEstimate {
   tokensPerPercent: number | null;
   /** Reading pairs inside one window that the estimate rests on. */
   samples: number;
+  /** Pairs the estimate needs before it is reported (the gate `samples` is read against). */
+  minSamples: number;
+  /** Utilization the pairs moved in total (0..1), and the least that counts. */
+  moved: number;
+  minMoved: number;
+  /** Relative error bound (±) of tokensPerPercent: headers round utilization to
+   *  0.01, so the estimate is off by at most 0.01 / moved. Null while unknown. */
+  errorBand: number | null;
   /** Why it is unknown. */
   reason?: "too few samples" | "too little movement";
 }
@@ -73,7 +86,9 @@ export function estimateCapacity(
   readings: ReadonlyArray<QuotaReading>,
   window: WindowName,
   opts: SupplyOptions = DEFAULT_SUPPLY_OPTIONS,
+  now?: number,
 ): CapacityEstimate {
+  if (window === "sevenDay") return weeklyCapacity(readings, now ?? Date.now(), opts.seatSize);
   const sorted = [...readings].sort((a, b) => a.sampledAt - b.sampledAt);
   let samples = 0, tokens = 0, moved = 0;
   for (let i = 1; i < sorted.length; i++) {
@@ -88,9 +103,36 @@ export function estimateCapacity(
     tokens += spent;
     moved += du;
   }
-  if (samples < opts.minSamples) return { status: "unknown", tokensPerPercent: null, samples, reason: "too few samples" };
-  if (moved < opts.minUtilMoved) return { status: "unknown", tokensPerPercent: null, samples, reason: "too little movement" };
-  return { status: "ok", tokensPerPercent: tokens / (moved * 100), samples };
+  const gates = { samples, minSamples: opts.minSamples, moved, minMoved: opts.minUtilMoved };
+  if (samples < opts.minSamples) return { status: "unknown", tokensPerPercent: null, errorBand: null, reason: "too few samples", ...gates };
+  if (moved < opts.minUtilMoved) return { status: "unknown", tokensPerPercent: null, errorBand: null, reason: "too little movement", ...gates };
+  return { status: "ok", tokensPerPercent: tokens / (moved * 100), errorBand: moved > 0 ? 0.01 / moved : null, ...gates };
+}
+
+/**
+ * The 7-day capacity is the seat-size measurement (seat-size.ts
+ * measureWeeklySize: 3 pairs, 0.08 of utilization moved, readings from the
+ * last 14 days, with its error band), divided by 100 for tokens per percent.
+ * Placement sizes seats by that measurement; the Supply card, the pool budget
+ * and the governor read the same one, so "7-day left" here equals
+ * balance.seats[].remainingTokens and a capacity is known within hours of
+ * readings rather than after a day of them.
+ */
+function weeklyCapacity(readings: ReadonlyArray<QuotaReading>, now: number, opts: SeatSizeOptions): CapacityEstimate {
+  return fromSeatSize(measureWeeklySize(readings, now, opts), opts);
+}
+
+/** The 7-day capacity from a seat size placement already holds (the same measurement, not a second run of it). */
+export function capacityFromSeatSize(size: SeatSize, opts: SeatSizeOptions = DEFAULT_SEAT_SIZE_OPTIONS): CapacityEstimate {
+  return fromSeatSize({ tokensPerWeek: size.source === "measured" ? size.tokensPerWeek : null, samples: size.samples, errorBand: size.errorBand, moved: size.moved }, opts);
+}
+
+function fromSeatSize(m: { tokensPerWeek: number | null; samples: number; errorBand: number | null; moved: number }, opts: SeatSizeOptions): CapacityEstimate {
+  const gates = { samples: m.samples, minSamples: opts.minSamples, moved: m.moved, minMoved: opts.minMoved };
+  if (m.tokensPerWeek === null) {
+    return { status: "unknown", tokensPerPercent: null, errorBand: null, reason: m.samples < opts.minSamples ? "too few samples" : "too little movement", ...gates };
+  }
+  return { status: "ok", tokensPerPercent: m.tokensPerWeek / 100, errorBand: m.errorBand, ...gates };
 }
 
 export interface DemandProfile {
@@ -230,6 +272,10 @@ export function computeSupply(input: {
   buckets: ReadonlyArray<UsageBucket>;
   since: number | null;
   opts?: Partial<SupplyOptions>;
+  /** The seat sizes placement holds right now (server: its memo). When given,
+   *  the 7-day capacity is read from them, so the two views cannot drift
+   *  between the memos' refreshes; otherwise it is measured from `readings`. */
+  seatSizes?: ReadonlyMap<string, SeatSize>;
 }): PoolSupply {
   const opts = { ...DEFAULT_SUPPLY_OPTIONS, ...input.opts };
   const { now } = input;
@@ -245,12 +291,15 @@ export function computeSupply(input: {
   const accounts = input.live.map((live): AccountSupply => {
     const own = byAccount.get(live.id) ?? [];
     const windowSupply = (w: WindowName): WindowSupply => {
-      const capacity = estimateCapacity(own, w, opts);
+      const size = w === "sevenDay" ? input.seatSizes?.get(live.id) : undefined;
+      const capacity = size ? capacityFromSeatSize(size, opts.seatSize) : estimateCapacity(own, w, opts, now);
       const cur = live[w];
-      const remaining = capacity.tokensPerPercent === null || live.readAt <= 0
-        ? null
-        : Math.max(0, 1 - cur.util) * 100 * capacity.tokensPerPercent;
       const resetMs = cur.resetAt * 1000;
+      // As balance-view.ts computes remainingTokens: a window that has reset (or
+      // was never named) has no remaining to report, whatever the last reading said.
+      const remaining = capacity.tokensPerPercent === null || live.readAt <= 0 || resetMs <= now
+        ? null
+        : Math.round(Math.max(0, 1 - cur.util) * 100 * capacity.tokensPerPercent);
       const poolDemandToReset = profile && resetMs > now ? forecastDemand(profile, now, resetMs) : null;
       const ex = projectExhaustion(own, live, w, now, opts);
       return { capacity, remaining, poolDemandToReset, exhaustsAt: ex.at, exhaustsBeforeReset: ex.beforeReset };
