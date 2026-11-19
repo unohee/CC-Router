@@ -3,76 +3,84 @@
   "scenarios": {
     "live-snapshot": {
       "unusedAtReset": 472928850,
+      "shortfallAtEnd": 184550676.19047615,
       "dry": 0,
       "moveCost": 4092500,
       "demand": 2247326300,
       "refusals": 0,
       "moves": 31,
       "strandedMinutes": 0,
-      "total": 477021350
+      "total": 661572026.1904762
     },
     "equal-seats": {
-      "unusedAtReset": 1102542750,
+      "unusedAtReset": 1286159200,
+      "shortfallAtEnd": 255121335.7142857,
       "dry": 0,
       "moveCost": 0,
       "demand": 2282213600,
       "refusals": 0,
       "moves": 0,
       "strandedMinutes": 0,
-      "total": 1102542750
+      "total": 1541280535.7142856
     },
     "unknown-capacity": {
       "unusedAtReset": 501584075,
+      "shortfallAtEnd": 184744926.19047615,
       "dry": 0,
       "moveCost": 3881875,
       "demand": 2246972100,
       "refusals": 0,
       "moves": 32,
       "strandedMinutes": 0,
-      "total": 505465950
+      "total": 690210876.1904762
     },
     "restart-wiped": {
       "unusedAtReset": 492420525,
+      "shortfallAtEnd": 202025526.19047615,
       "dry": 0,
       "moveCost": 6751250,
       "demand": 2199020750,
       "refusals": 0,
       "moves": 46,
       "strandedMinutes": 0,
-      "total": 499171775
+      "total": 701197301.1904762
     },
     "session-burst": {
       "unusedAtReset": 466045700,
+      "shortfallAtEnd": 98840451.19047615,
       "dry": 0,
       "moveCost": 8965625,
       "demand": 2376097850,
       "refusals": 0,
       "moves": 49,
       "strandedMinutes": 0,
-      "total": 475011325
+      "total": 573851776.1904762
     },
     "no-session-id": {
       "unusedAtReset": 462847950,
+      "shortfallAtEnd": 160804876.19047615,
       "dry": 0,
       "moveCost": 4857500,
       "demand": 2296076950,
       "refusals": 0,
       "moves": 46,
       "strandedMinutes": 0,
-      "total": 467705450
+      "total": 628510326.1904762
     },
     "restored-pins": {
-      "unusedAtReset": 478022575,
+      "unusedAtReset": 416290200,
+      "shortfallAtEnd": 141666026.19047615,
       "dry": 0,
-      "moveCost": 13530625,
-      "demand": 2309892900,
+      "moveCost": 22570625,
+      "demand": 2379664800,
       "refusals": 0,
-      "moves": 86,
+      "moves": 217,
       "strandedMinutes": 0,
-      "total": 491553200
+      "total": 580526851.1904762
     },
     "live-heavy": {
       "unusedAtReset": 28355950,
+      "shortfallAtEnd": 0,
       "dry": 175006750,
       "moveCost": 162857500,
       "demand": 3892398200,
@@ -83,6 +91,7 @@
     },
     "five-hour-ping-pong": {
       "unusedAtReset": 565375150,
+      "shortfallAtEnd": 0,
       "dry": 218426250,
       "moveCost": 213782500,
       "demand": 2278960800,

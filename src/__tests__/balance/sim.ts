@@ -165,7 +165,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
   });
   const candidates: SessionTarget[] = accounts.map(a => ({ provider: "anthropic", accountId: a.id }));
 
-  const m: RunMetrics = { unusedAtReset: 0, dry: 0, moveCost: 0, demand: 0, refusals: 0, moves: 0, strandedMinutes: 0 };
+  const m: RunMetrics = { unusedAtReset: 0, shortfallAtEnd: 0, dry: 0, moveCost: 0, demand: 0, refusals: 0, moves: 0, strandedMinutes: 0 };
   const servedBySeat: Record<string, number> = Object.fromEntries(sc.seats.map(s => [s.id, 0]));
   const utilAtReset: Record<string, number[]> = Object.fromEntries(sc.seats.map(s => [s.id, [] as number[]]));
   let placed = 0;
@@ -253,13 +253,28 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
     if (s.cacheSeat !== null && s.cacheSeat !== served) { m.moves++; m.moveCost += rewrite; }
     s.cacheSeat = served;
     s.requests++;
-    s.prefix = Math.min(d.prefix.max, d.prefix.start + d.prefix.perRequest * s.requests);
+    // Grows from its own size: a restored session keeps the prefix it came with.
+    s.prefix = Math.min(Math.max(d.prefix.max, s.prefix), s.prefix + d.prefix.perRequest);
   };
 
   const plainRequest = (): void => {
     const cost = sc.demand.noSessionCost;
     m.demand += cost;
     if (!send(getNext(), () => cost)) m.dry += cost;
+  };
+
+  /** Windows roll over upstream; a weekly reset scores what was left. */
+  const rollWindows = (): void => {
+    for (const s of states.values()) {
+      while (s.weekResetAt <= now) {
+        const util = Math.min(1, s.spentWeek / s.spec.weeklyCap);
+        utilAtReset[s.spec.id].push(Math.round(util * 1000) / 1000);
+        m.unusedAtReset += Math.max(0, s.spec.weeklyCap - s.spentWeek);
+        s.spentWeek = 0;
+        s.weekResetAt += WEEK_MS;
+      }
+      if (s.fiveResetAt > 0 && s.fiveResetAt <= now) { s.fiveResetAt = 0; s.spentFive = 0; }
+    }
   };
 
   const profileSum = sc.demand.profile.reduce((x, y) => x + y, 0);
@@ -271,17 +286,7 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
   for (; now < end; now += MIN_MS) {
     opts.setClock(now);
 
-    // Windows roll over upstream; a weekly reset scores what was left.
-    for (const s of states.values()) {
-      while (s.weekResetAt <= now) {
-        const util = Math.min(1, s.spentWeek / s.spec.weeklyCap);
-        utilAtReset[s.spec.id].push(Math.round(util * 1000) / 1000);
-        m.unusedAtReset += Math.max(0, s.spec.weeklyCap - s.spentWeek);
-        s.spentWeek = 0;
-        s.weekResetAt += WEEK_MS;
-      }
-      if (s.fiveResetAt > 0 && s.fiveResetAt <= now) { s.fiveResetAt = 0; s.spentFive = 0; }
-    }
+    rollWindows();
 
     const elapsedH = (now - SIM_EPOCH) / HOUR_MS;
     if (wipeAt !== undefined && elapsedH === wipeAt) {
@@ -310,6 +315,19 @@ export function simulate(sc: Scenario, opts: SimOptions): SimResult {
       sessionRequest(s);
       if (rand() < noSessionRatio) plainRequest();
     }
+  }
+
+  // The end of the run: a reset due exactly now is scored as a reset, and a
+  // window still open is charged for falling behind an even spend. A window
+  // `e` of the way through should have spent at least `e` of its quota; what
+  // it is short of that is quota on course to be lost. Without this, a policy
+  // could hide leftover quota in windows that reset after the run ends.
+  now = end;
+  opts.setClock(now);
+  rollWindows();
+  for (const s of states.values()) {
+    const elapsed = Math.min(1, Math.max(0, 1 - (s.weekResetAt - now) / WEEK_MS));
+    m.shortfallAtEnd += Math.max(0, elapsed * s.spec.weeklyCap - s.spentWeek);
   }
 
   return { metrics: m, reassigned, placed, servedBySeat, utilAtReset };

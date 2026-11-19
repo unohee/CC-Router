@@ -14,6 +14,10 @@ export interface RunMetrics {
   /** Quota left in a seat's 7-day window when that window reset, summed over
    *  every reset inside the run. Quota not spent by the reset is lost. */
   unusedAtReset: number;
+  /** For each 7-day window still open when the run ends: how far its spend is
+   *  behind an even spend of the window (elapsed share x quota - spent), so
+   *  leftover quota cannot be hidden in windows that reset after the run. */
+  shortfallAtEnd: number;
   /** Demand no seat served: the request was refused by every seat, or no seat
    *  was available to try. */
   dry: number;
@@ -40,7 +44,7 @@ export const DRY_WEIGHT = 3;
 
 /** One number to compare runs by. Lower is better. */
 export function total(m: RunMetrics): number {
-  return m.unusedAtReset + DRY_WEIGHT * m.dry + m.moveCost;
+  return m.unusedAtReset + m.shortfallAtEnd + DRY_WEIGHT * m.dry + m.moveCost;
 }
 
 export interface ScenarioScore extends RunMetrics {
@@ -58,14 +62,24 @@ export function score(m: RunMetrics): ScenarioScore {
  */
 export const TOLERANCE = {
   /** `total` may exceed the baseline by this fraction of the scenario's demand. */
-  totalOfDemand: 0.002,
+  totalOfDemand: 0.0005,
   /** `dry` may exceed the baseline by this fraction of the scenario's demand. */
   dryOfDemand: 0.001,
 } as const;
 
+/**
+ * The workload a scenario offers must be the one its baseline was scored on.
+ * Demand moves only slightly with placement (a prefix grows only when served),
+ * so a larger shift means the simulated workload itself was changed.
+ */
+export const DEMAND_DRIFT = 0.02;
+
 /** Why `current` is worse than `baseline` on one scenario; empty when it is not. */
 export function regressions(name: string, current: ScenarioScore, baseline: ScenarioScore): string[] {
   const out: string[] = [];
+  if (Math.abs(current.demand - baseline.demand) > DEMAND_DRIFT * baseline.demand) {
+    out.push(`${name}: demand ${fmt(current.demand)} differs from the baseline's ${fmt(baseline.demand)}: the workload changed`);
+  }
   const slackTotal = TOLERANCE.totalOfDemand * baseline.demand;
   const slackDry = TOLERANCE.dryOfDemand * baseline.demand;
   if (current.total > baseline.total + slackTotal) {
