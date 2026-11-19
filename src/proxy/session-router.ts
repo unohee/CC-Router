@@ -81,6 +81,8 @@ export interface SessionRouterOptions {
 interface Assignment {
   target: SessionTarget;
   lastSeen: number;
+  /** When the pin was placed or last moved; absent for restored pins. */
+  pinnedAt?: number;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
@@ -105,6 +107,36 @@ const BALANCE_MIN_TTR_MIN = 60;
  *  this much of the best pace ratio count as tied. */
 const PACE_RATIO_TIE = 0.05;
 const WEEK_SEC = 7 * 24 * 60 * 60;
+/** Balance rules: a pin is not moved for pace within this long of being
+ *  placed or last moved. Every move is a cache rewrite, and the window that
+ *  prompted one takes time to show the effect. */
+const MIN_DWELL_MS = 30 * 60 * 1000;
+/** Balance rules: a seat is "dry before reset" when its week is projected to
+ *  run out this far ahead of the reset or more, by the even-spend ratio
+ *  (`windowRatio`): r < 1 - DRY_MARGIN. */
+const DRY_MARGIN = 0.25;
+/** Balance rules: the seat a pin moves to must have this much more pace
+ *  ratio than the one it leaves, or the move chases noise. */
+const SURPLUS_MARGIN = 0.35;
+/** Balance rules: load on a seat is the requests it was given in this
+ *  window, pinned or not (`noteRequest`), scaled to the count of sessions
+ *  that would produce it at one request a minute. A pin that has gone quiet
+ *  adds nothing; a request with no session adds the same as a pinned one. */
+const LOAD_WINDOW_MS = 10 * 60 * 1000;
+/** Balance rules: a seat takes a pin shed over the soft cap only with this
+ *  much of its binding window below the cap; a seat just under it would be
+ *  over it a few requests later and shed the pin again, and every move is a
+ *  cache rewrite. Chosen in the balance simulator together with
+ *  FIVE_HOUR_ROOM_POWER on the five-hour-bound pool: 0.2 / 0.3 / 0.4 / 0.5
+ *  gave 669 / 650 / 639 / 647 rewrites (baseline 651), totals
+ *  1419M / 1455M / 1386M / 1404M. */
+const CAP_RELIEF_ROOM = 0.4;
+/** Balance rules: how strongly a seat's five-hour headroom scales its score.
+ *  Squared: a session stays for hours, so a seat whose five-hour window is
+ *  half spent should rank well below one with a fresh window, not at half.
+ *  1 / 2 / 3 gave 699 / 669 / 716 rewrites on the five-hour-bound pool at
+ *  CAP_RELIEF_ROOM 0.2. */
+const FIVE_HOUR_ROOM_POWER = 2;
 /** Safety valve: a router that never forgets would grow without bound. */
 const MAX_TRACKED_SESSIONS = 10_000;
 
@@ -133,6 +165,10 @@ function targetKey(t: SessionTarget): string {
 export class SessionRouter {
   private readonly assignments = new Map<string, Assignment>();
   private cursor = 0;
+  /** Rotation for requests with no session (`rank` in rotate mode), kept
+   *  apart from `cursor` so they do not disturb the rotation among tied seats
+   *  that spreads sessions. */
+  private requestCursor = 0;
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly softCapUtil: number | null;
@@ -188,8 +224,9 @@ export class SessionRouter {
       if (!this.overSoftCap(existing.target, utilOf)
         || this.resetsWithin(existing.target, SOFT_CAP_GRACE_MIN, utilOf)
         || !candidates.some(c => this.softCapRelief(c, existing.target, isUsable, utilOf))) {
-        if (!this.shouldLeaveForPace(existing.target, candidates, isUsable, utilOf)) {
+        if (!this.shouldLeaveForPace(existing.target, candidates, isUsable, utilOf, existing.pinnedAt)) {
           existing.lastSeen = this.now();
+          this.noteRequest(existing.target);
           // Refreshing the timestamp is itself a change worth persisting: a busy
           // long-lived session never re-assigns, so without this its snapshot
           // keeps the timestamp of its first request and restores as expired.
@@ -219,9 +256,49 @@ export class SessionRouter {
       this.onReassign?.({ sessionId, from: existing.target, to: target, reason });
     }
 
-    this.assignments.set(sessionId, { target, lastSeen: this.now() });
+    this.assignments.set(sessionId, { target, lastSeen: this.now(), pinnedAt: this.now() });
+    // A session just placed is about to send more: it counts as one session's
+    // worth of requests for the window, not as the single request it is.
+    this.noteRequest(target, LOAD_WINDOW_MS / 60_000);
     this.onAssignmentsChanged?.();
     return target;
+  }
+
+  /**
+   * The seat the balance rules would place a new session on, for a caller
+   * that has no session to pin: a request without a session id, or the
+   * failover pick. Returns null when nothing is usable, and under the legacy
+   * rules (the caller keeps its own order). Does not pin; the request is
+   * counted as load on the seat (`noteRequest`), which is what spreads a run
+   * of them.
+   */
+  rank(
+    candidates: SessionTarget[],
+    isUsable: (target: SessionTarget) => boolean,
+    utilOf?: (target: SessionTarget) => number | TargetMetrics,
+    mode: "score" | "rotate" = "score",
+  ): SessionTarget | null {
+    if (!this.balanced) return null;
+    const usable = candidates.filter(isUsable);
+    if (usable.length === 0) return null;
+    const chosen = this.placeBalanced(usable, utilOf, mode);
+    this.noteRequest(chosen);
+    return chosen;
+  }
+
+  /**
+   * Pin `sessionId` to `target` as the seat that answered it, after failover
+   * served the request there. The pin the session had was unusable (that is
+   * why failover ran) and would have been re-placed on the next request,
+   * possibly onto a third seat: two cache rewrites where one will do. No-op
+   * when the session is already there.
+   */
+  pinTo(sessionId: string, target: SessionTarget): void {
+    this.noteRequest(target, LOAD_WINDOW_MS / 60_000);
+    const existing = this.assignments.get(sessionId);
+    if (existing && sameTarget(existing.target, target)) { existing.lastSeen = this.now(); return; }
+    this.assignments.set(sessionId, { target, lastSeen: this.now(), pinnedAt: this.now() });
+    this.onAssignmentsChanged?.();
   }
 
   /**
@@ -324,16 +401,54 @@ export class SessionRouter {
     this.onAssignmentsChanged?.();
   }
 
-  /** Live sessions pinned to each of `targets`. */
+  /**
+   * Load on each of `targets`.
+   *
+   * Legacy rules: live sessions pinned there, idle ones included.
+   *
+   * Balance rules: the requests each seat was given in the last
+   * LOAD_WINDOW_MS, pinned or not, as the number of sessions that would send
+   * them at one a minute. An idle pin is then no load (it holds no request),
+   * and a request with no session id counts the same as a pinned one, so a
+   * run of them is spread like sessions are. Counting pins and leaving the
+   * idle ones out was tried first and made the five-hour-bound pool worse
+   * (a quiet pin usually comes back, and new sessions stacked onto the seat
+   * holding the most of them); counting requests instead is what both rules
+   * needed.
+   */
   private loadOf(targets: SessionTarget[]): Map<string, number> {
     const load = new Map<string, number>();
     for (const target of targets) load.set(targetKey(target), 0);
+    if (this.balanced) {
+      const since = this.now() - LOAD_WINDOW_MS;
+      while (this.requests.length > 0 && this.requests[0].at < since) this.requests.shift();
+      const perSession = LOAD_WINDOW_MS / 60_000;
+      for (const r of this.requests) {
+        const current = load.get(r.key);
+        if (current !== undefined) load.set(r.key, current + r.weight / perSession);
+      }
+      return load;
+    }
     for (const assignment of this.assignments.values()) {
       const key = targetKey(assignment.target);
       const current = load.get(key);
       if (current !== undefined) load.set(key, current + 1);
     }
     return load;
+  }
+
+  /** Requests given to each seat, newest last, for the balance load. */
+  private readonly requests: Array<{ at: number; key: string; weight: number }> = [];
+
+  /**
+   * Count a request given to `target`, with or without a session. The server
+   * calls this for every request it routes; `resolve` and `rank` call it for
+   * the seat they return, so a caller that routes only through them need not.
+   */
+  noteRequest(target: SessionTarget, weight = 1): void {
+    if (!this.balanced) return;
+    this.requests.push({ at: this.now(), key: targetKey(target), weight });
+    if (this.requests.length > MAX_TRACKED_SESSIONS) this.requests.shift();
   }
 
   private metricsOf(
@@ -352,7 +467,14 @@ export class SessionRouter {
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
   ): boolean {
-    return c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf);
+    if (!(c.provider === from.provider && !sameTarget(c, from) && isUsable(c) && !this.overSoftCap(c, utilOf))) return false;
+    // Balance rules: a move over the cap is still a cache rewrite, so the
+    // relief seat must have real room on the window that tripped the cap.
+    if (this.balanced && this.softCapUtil !== null) {
+      const room = this.softCapUtil - this.metricsOf(c, utilOf).util;
+      if (room < CAP_RELIEF_ROOM) return false;
+    }
+    return true;
   }
 
   /** The pacing config in force right now, or null when pacing is off. */
@@ -442,6 +564,7 @@ export class SessionRouter {
     candidates: SessionTarget[],
     isUsable: (target: SessionTarget) => boolean,
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
+    pinnedAt?: number,
   ): boolean {
     const m = this.metricsOf(target, utilOf);
     const nowSec = this.now() / 1000;
@@ -449,12 +572,19 @@ export class SessionRouter {
       // Only the weekly window moves a pin: a five-hour burst passes within the
       // hour, and moving on it would pay a cache rewrite to chase a window that
       // is about to refill (and could bounce the session back and forth).
-      const cfg = this.weeklyPace;
+      // A move needs the seat to be projected dry before its reset (its pace
+      // ratio under 1 - DRY_MARGIN), another seat with a clear surplus over
+      // it, and the pin to have dwelt here a while. The release is time-based:
+      // the ratio rises as the week elapses, so a seat that stops spending is
+      // on pace again without anything being reset by hand.
+      if (!this.weeklyPace) return false;
+      if (pinnedAt !== undefined && this.now() - pinnedAt < MIN_DWELL_MS) return false;
       const week = this.windowRatio(m.weekly, WEEK_SEC);
-      if (!cfg || week === null || week >= 1 - cfg.slack - cfg.migrateAhead) return false;
+      if (week === null || week >= 1 - DRY_MARGIN) return false;
       const resetAt = m.weekly?.resetAtSec;
       if (resetAt && resetAt - nowSec <= SOFT_CAP_GRACE_MIN * 60) return false;
-      return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf));
+      return candidates.some(c => this.paceRelief(c, target, isUsable, utilOf)
+        && (this.windowRatio(this.metricsOf(c, utilOf).weekly, WEEK_SEC) ?? Infinity) >= week + SURPLUS_MARGIN);
     }
     const pace = this.paceOf(target, utilOf);
     if (!pace || pace.ahead <= this.weeklyPace!.migrateAhead) return false;
@@ -563,7 +693,7 @@ export class SessionRouter {
    *    seats closest to their weekly pace.
    * 3. Among those, the most weekly headroom per hour to the weekly reset:
    *
-   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil) / (1 + liveSessions)
+   *        (cap - weeklyUtil) x size / max(hoursToWeeklyReset, 1) x (cap - fiveHourUtil)^2 / (1 + load)
    *
    *    The soft cap and the score now read the same window: a seat at 97% of
    *    its week used to score on an idle five-hour window as if it had 98% to
@@ -581,10 +711,22 @@ export class SessionRouter {
   private placeBalanced(
     usable: SessionTarget[],
     utilOf?: (target: SessionTarget) => number | TargetMetrics,
+    mode: "score" | "rotate" = "score",
   ): SessionTarget {
     const cap = this.softCapUtil ?? 1;
     const utilOnly = (t: SessionTarget) => this.metricsOf(t, utilOf).util;
     let pool = usable.filter(t => !this.overSoftCap(t, utilOf));
+    if (mode === "rotate") {
+      // A request with no session: the seats under the cap in turn, and when
+      // none is, every usable seat in turn. It leaves no cache behind and is
+      // failed over if refused, so it is the right thing to spend a seat's
+      // last stretch under the cap on; it is not paced (pace keeps a seat for
+      // the sessions that will live on it; a one-off request does not).
+      const ring = pool.length > 0 ? pool : usable;
+      const chosen = ring[this.requestCursor % ring.length];
+      this.requestCursor = (this.requestCursor + 1) % Math.max(ring.length, 1);
+      return chosen;
+    }
     if (pool.length === 0) return this.leastLoaded(usable, utilOf ? utilOnly : undefined);
 
     if (this.weeklyPace && pool.length > 1) {
@@ -607,7 +749,7 @@ export class SessionRouter {
       const util = week ? week.util : m.weekly?.util ?? 0;
       const ttrMin = week ? (week.resetAtSec! - nowSec) / 60 : WEEK_SEC / 60;
       const five = m.fiveHour && m.fiveHour.resetAtSec && m.fiveHour.resetAtSec > nowSec ? m.fiveHour : null;
-      const fiveRoom = five ? Math.min(1, Math.max(0, cap - five.util)) : 1;
+      const fiveRoom = five ? Math.pow(Math.min(1, Math.max(0, cap - five.util)), FIVE_HOUR_ROOM_POWER) : 1;
       const size = typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 1;
       return Math.max(0, cap - util) * size / Math.max(ttrMin, BALANCE_MIN_TTR_MIN) * fiveRoom
         / (1 + (load.get(targetKey(t)) ?? 0));

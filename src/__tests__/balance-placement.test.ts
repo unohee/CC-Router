@@ -103,9 +103,11 @@ describe("the balance rules", () => {
 
   it("do not move a pin for a five-hour burst; a weekly overspend still moves it", () => {
     const moves: string[] = [];
-    const r = new SessionRouter({ now: () => NOW, ...LIVE, onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`) });
+    let now = NOW;
+    const r = new SessionRouter({ now: () => now, ...LIVE, onReassign: ({ to, reason }) => moves.push(`${to.accountId}:${reason}`) });
     const pool = [T("a"), T("b")];
     r.resolve("s", pool, t => t.accountId === "a", metrics({ a: seat({ util: 0.3, hoursLeft: 100 }), b: seat({ util: 0.3, hoursLeft: 100 }) }));
+    now += 31 * 60_000; // past the minimum dwell
     // a: five-hour 90% spent half an hour into its window. Stays.
     const burst = metrics({ a: seat({ util: 0.35, hoursLeft: 100 }, { util: 0.9, hoursLeft: 4.5 }), b: seat({ util: 0.3, hoursLeft: 100 }) });
     expect(r.resolve("s", pool, () => true, burst)!.accountId).toBe("a");
@@ -139,7 +141,8 @@ describe("the balance rules", () => {
     const cap = { softCapUtil: 0.98 };
     const r = new SessionRouter({ now: () => NOW, ...cap });
     const picks = Array.from({ length: 3 }, (_, i) => r.resolve(`s${i}`, LIVE_SEATS, () => true, LIVE_POOL)!.accountId);
-    expect(picks).toEqual(["kyte", "vega", "heewon"]);
+    expect(picks[0]).toBe("kyte");
+    expect(picks.slice(1).sort()).toEqual(["heewon", "vega"]);
     expect(place({ ...cap, balance: false }, LIVE_SEATS, LIVE_POOL)).not.toBe("kyte");
     // With the live pacing too, only kyte is on pace on both windows.
     expect(place(LIVE, LIVE_SEATS, LIVE_POOL)).toBe("kyte");
