@@ -1,0 +1,95 @@
+{
+  "note": "Scores of the placement policy at the time the balance simulator was added (seat-metrics.ts on 2026-11-19, live routing: softCapUtil 0.98, weeklyPace with fiveHour). Cost-weighted tokens. Frozen: see src/__tests__/balance/score.ts.",
+  "scenarios": {
+    "live-snapshot": {
+      "unusedAtReset": 472928850,
+      "dry": 0,
+      "moveCost": 4092500,
+      "demand": 2247326300,
+      "refusals": 0,
+      "moves": 31,
+      "strandedMinutes": 0,
+      "total": 477021350
+    },
+    "equal-seats": {
+      "unusedAtReset": 1102542750,
+      "dry": 0,
+      "moveCost": 0,
+      "demand": 2282213600,
+      "refusals": 0,
+      "moves": 0,
+      "strandedMinutes": 0,
+      "total": 1102542750
+    },
+    "unknown-capacity": {
+      "unusedAtReset": 501584075,
+      "dry": 0,
+      "moveCost": 3881875,
+      "demand": 2246972100,
+      "refusals": 0,
+      "moves": 32,
+      "strandedMinutes": 0,
+      "total": 505465950
+    },
+    "restart-wiped": {
+      "unusedAtReset": 492420525,
+      "dry": 0,
+      "moveCost": 6751250,
+      "demand": 2199020750,
+      "refusals": 0,
+      "moves": 46,
+      "strandedMinutes": 0,
+      "total": 499171775
+    },
+    "session-burst": {
+      "unusedAtReset": 466045700,
+      "dry": 0,
+      "moveCost": 8965625,
+      "demand": 2376097850,
+      "refusals": 0,
+      "moves": 49,
+      "strandedMinutes": 0,
+      "total": 475011325
+    },
+    "no-session-id": {
+      "unusedAtReset": 462847950,
+      "dry": 0,
+      "moveCost": 4857500,
+      "demand": 2296076950,
+      "refusals": 0,
+      "moves": 46,
+      "strandedMinutes": 0,
+      "total": 467705450
+    },
+    "restored-pins": {
+      "unusedAtReset": 478022575,
+      "dry": 0,
+      "moveCost": 13530625,
+      "demand": 2309892900,
+      "refusals": 0,
+      "moves": 86,
+      "strandedMinutes": 0,
+      "total": 491553200
+    },
+    "live-heavy": {
+      "unusedAtReset": 28355950,
+      "dry": 175006750,
+      "moveCost": 162857500,
+      "demand": 3892398200,
+      "refusals": 6,
+      "moves": 2126,
+      "strandedMinutes": 2609,
+      "total": 716233700
+    },
+    "five-hour-ping-pong": {
+      "unusedAtReset": 565375150,
+      "dry": 218426250,
+      "moveCost": 213782500,
+      "demand": 2278960800,
+      "refusals": 18,
+      "moves": 651,
+      "strandedMinutes": 1420,
+      "total": 1434436400
+    }
+  }
+}

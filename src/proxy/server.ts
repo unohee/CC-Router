@@ -57,7 +57,7 @@ import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../pro
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import { startCodexUsageLoop } from "../providers/openai/usage-probe.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
-import { createSeats, isFirstPlacement } from "./seat-metrics.js";
+import { createSeats, isFirstPlacement, pinnedAnthropicAccount } from "./seat-metrics.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
 import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
@@ -261,26 +261,9 @@ function publicOpenAIAccountView(a: OpenAISubscriptionAccount): HealthAccountVie
   };
 }
 
-/**
- * The Anthropic account a request should stay on, given the pin the session
- * router already decided to keep.
- *
- * Judged with `canRetain`, not `canServe`: the router has just held this pin
- * through `canRetain`, so re-testing it with the stricter placement predicate
- * would discard the pin the moment the account is merely mid-request, and the
- * conversation would round-robin onto another account and re-write its whole
- * prompt cache. Measured at 670K tokens for one session that bounced
- * intrect -> kyte -> intrect inside 51 seconds. The two predicates must agree
- * about retention or the pin is decided twice, by different rules.
- */
-export function pinnedAnthropicAccount(
-  pool: Pick<TokenPool, "canRetain" | "getById">,
-  target: SessionTarget | undefined,
-  model?: string,
-): Account | undefined {
-  if (target?.provider !== "anthropic") return undefined;
-  return pool.canRetain(target.accountId, model) ? pool.getById(target.accountId) : undefined;
-}
+// pinnedAnthropicAccount lives in seat-metrics.ts (shared with the balance
+// simulator); re-exported here for existing importers.
+export { pinnedAnthropicAccount } from "./seat-metrics.js";
 
 function providerStatus(accounts: HealthAccountView[]): ProviderOperationalStatus {
   return {

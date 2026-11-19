@@ -87,6 +87,27 @@ export function createSeats(src: SeatSources): Seats {
   };
 }
 
+/**
+ * The Anthropic account a request should stay on, given the pin the session
+ * router already decided to keep.
+ *
+ * Judged with `canRetain`, not `canServe`: the router has just held this pin
+ * through `canRetain`, so re-testing it with the stricter placement predicate
+ * would discard the pin the moment the account is merely mid-request, and the
+ * conversation would round-robin onto another account and re-write its whole
+ * prompt cache. Measured at 670K tokens for one session that bounced
+ * intrect -> kyte -> intrect inside 51 seconds. The two predicates must agree
+ * about retention or the pin is decided twice, by different rules.
+ */
+export function pinnedAnthropicAccount(
+  pool: Pick<TokenPool, "canRetain" | "getById">,
+  target: SessionTarget | undefined,
+  model?: string,
+): Account | undefined {
+  if (target?.provider !== "anthropic") return undefined;
+  return pool.canRetain(target.accountId, model) ? pool.getById(target.accountId) : undefined;
+}
+
 // ─── Placement counters ──────────────────────────────────────────────────────
 
 /**
