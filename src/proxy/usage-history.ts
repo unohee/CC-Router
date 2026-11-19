@@ -12,6 +12,7 @@
  * wrong for everyone not on the server's clock.
  */
 
+import { PLACEMENT_REASONS, emptyPlacementCounts, type PlacementCounts, type PlacementReason } from "./seat-metrics.js";
 import type { BridgeUsage } from "../protocol/openai-usage.js";
 
 export type UsageProvider = "anthropic" | "openai" | "ollama";
@@ -110,6 +111,15 @@ export interface UsageFile {
     hourSec: number, errors: number, rateLimited: number,
     throttleWaits: number, throttleWaitMs: number, throttleBypass: number,
   ]>;
+  /** Session placements per hour, in PLACEMENT_REASONS order. Added like
+   *  `incidents`, without a version bump, for the same reason. */
+  placements?: Array<[hourSec: number, ...counts: number[]]>;
+}
+
+/** Session placements in one hour, pool-wide, by reason. */
+export interface PlacementBucket extends PlacementCounts {
+  /** Start of the hour, epoch ms. */
+  hour: number;
 }
 
 /**
@@ -150,6 +160,7 @@ export class UsageHistory {
   private readonly byKey = new Map<string, UsageBucket>();
   private readonly models = new Set<string>();
   private readonly incidentByHour = new Map<number, IncidentBucket>();
+  private readonly placementByHour = new Map<number, PlacementBucket>();
   private firstSeen: number | null = null;
   private isDirty = false;
   private lastPruneHour = -Infinity;
@@ -212,6 +223,36 @@ export class UsageHistory {
     if (hour > this.lastPruneHour) this.prune();
   }
 
+  /**
+   * Count one session placement (a first pin, or a move with its reason).
+   * Unknown reasons are ignored.
+   */
+  recordPlacement(reason: PlacementReason, ts: number = this.now()): void {
+    if (!PLACEMENT_REASONS.includes(reason)) return;
+    const now = this.now();
+    const at = Number.isFinite(ts) ? Math.min(Math.max(ts, now - this.retentionMs), now) : now;
+    const hour = Math.floor(at / HOUR_MS) * HOUR_MS;
+    this.placementBucketFor(hour)[reason] += 1;
+    this.isDirty = true;
+    if (hour > this.lastPruneHour) this.prune();
+  }
+
+  /** A copy, so callers cannot mutate the store through it. */
+  placements(): PlacementBucket[] {
+    return [...this.placementByHour.values()].map(b => ({ ...b }));
+  }
+
+  /** Placements summed over the hours that overlap the last `ms` (whole hours). */
+  placementTotals(ms: number): PlacementCounts {
+    const from = Math.floor((this.now() - ms) / HOUR_MS) * HOUR_MS;
+    const out = emptyPlacementCounts();
+    for (const b of this.placementByHour.values()) {
+      if (b.hour < from) continue;
+      for (const r of PLACEMENT_REASONS) out[r] += b[r];
+    }
+    return out;
+  }
+
   /** A copy, so callers cannot mutate the store through it. */
   incidents(): IncidentBucket[] {
     return [...this.incidentByHour.values()].map(b => ({ ...b }));
@@ -229,6 +270,9 @@ export class UsageHistory {
     for (const [hour] of this.incidentByHour) {
       if (hour + HOUR_MS <= cutoff) { this.incidentByHour.delete(hour); removed++; }
     }
+    for (const [hour] of this.placementByHour) {
+      if (hour + HOUR_MS <= cutoff) { this.placementByHour.delete(hour); removed++; }
+    }
     if (removed > 0) {
       this.models.clear();
       for (const b of this.byKey.values()) this.trackModel(b.model);
@@ -244,7 +288,10 @@ export class UsageHistory {
     const incidents = [...this.incidentByHour.values()]
       .sort((a, b) => a.hour - b.hour)
       .map(b => [b.hour / 1000, b.errors, b.rateLimited, b.throttleWaits, b.throttleWaitMs, b.throttleBypass] as NonNullable<UsageFile["incidents"]>[number]);
-    return { version: 1, since: this.firstSeen, rows, incidents };
+    const placements = [...this.placementByHour.values()]
+      .sort((a, b) => a.hour - b.hour)
+      .map(b => [b.hour / 1000, ...PLACEMENT_REASONS.map(r => b[r])] as NonNullable<UsageFile["placements"]>[number]);
+    return { version: 1, since: this.firstSeen, rows, incidents, placements };
   }
 
   /** Call only after the snapshot reached disk; a failed write must stay dirty. */
@@ -257,7 +304,7 @@ export class UsageHistory {
    */
   restore(raw: unknown): boolean {
     if (typeof raw !== "object" || raw === null) return false;
-    const file = raw as { version?: unknown; since?: unknown; rows?: unknown; incidents?: unknown };
+    const file = raw as { version?: unknown; since?: unknown; rows?: unknown; incidents?: unknown; placements?: unknown };
     if (file.version !== 1 || !Array.isArray(file.rows)) return false;
 
     for (const row of file.rows as unknown[]) {
@@ -282,6 +329,16 @@ export class UsageHistory {
         INCIDENT_FIELDS.forEach((f, i) => { b[f] += count(values[i]); });
       }
     }
+    // Absent in files written before placements were counted.
+    if (Array.isArray(file.placements)) {
+      for (const row of file.placements as unknown[]) {
+        if (!Array.isArray(row) || row.length !== 1 + PLACEMENT_REASONS.length) continue;
+        const [hourSec, ...values] = row as unknown[];
+        if (typeof hourSec !== "number" || !Number.isFinite(hourSec)) continue;
+        const b = this.placementBucketFor(Math.floor(hourSec * 1000 / HOUR_MS) * HOUR_MS);
+        PLACEMENT_REASONS.forEach((r, i) => { b[r] += count(values[i]); });
+      }
+    }
     if (typeof file.since === "number" && Number.isFinite(file.since)
       && (this.firstSeen === null || file.since < this.firstSeen)) {
       this.firstSeen = file.since;
@@ -299,6 +356,15 @@ export class UsageHistory {
       bucket = { hour, provider, model, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, requests: 0 };
       this.byKey.set(key, bucket);
       this.trackModel(model);
+    }
+    return bucket;
+  }
+
+  private placementBucketFor(hour: number): PlacementBucket {
+    let bucket = this.placementByHour.get(hour);
+    if (!bucket) {
+      bucket = { hour, ...emptyPlacementCounts() };
+      this.placementByHour.set(hour, bucket);
     }
     return bucket;
   }

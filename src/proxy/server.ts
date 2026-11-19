@@ -57,12 +57,13 @@ import { codexCanHold, targetCanHoldContext, estimatePromptTokens } from "../pro
 import { prepareOpenAIAccountForRequest, startOpenAIRefreshLoop } from "../providers/openai/token-refresher.js";
 import { startCodexUsageLoop } from "../providers/openai/usage-probe.js";
 import type { OpenAISubscriptionAccount } from "../providers/openai/token-refresher.js";
+import { createSeats, isFirstPlacement } from "./seat-metrics.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
 import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
-import type { SessionTarget, TargetMetrics } from "./session-router.js";
+import type { SessionTarget } from "./session-router.js";
 import { mountModelsRoute } from "./models-server.js";
 import { mountWebDashboard } from "./web-dashboard.js";
 import { normalizeBlockedUserAgents, matchBlockedUserAgent, blockedClientError, createBlockLogGate } from "./client-block.js";
@@ -518,6 +519,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     softCapUtil,
     weeklyPace: paceInForce,
     onReassign: ({ sessionId, from, to, reason }) => {
+      usageHistory.recordPlacement(reason);
       const why = reason === "soft-cap" ? `soft cap ${Math.round((softCapUtil ?? 0) * 100)}%`
         : reason === "weekly-pace" ? "ahead of weekly pace"
         : "account unservable";
@@ -630,44 +632,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const sessionPoolIncludesOpenAI =
     initialConfig.sessionPoolIncludesOpenAI === true && !!modelRouting.openAIDefaultModel?.trim();
 
+  // Seat predicates and placement metrics live in seat-metrics.ts, shared with
+  // the balance simulator so it ranks seats exactly as this router does.
+  const seats = createSeats({
+    pool, openAIAccounts, canServeOpenAI: a => canServeOpenAI(a, codexBudget ?? undefined),
+  });
   // Retention is judged more leniently than placement — see TokenPool.canRetain.
-  const sessionTargetRetainable = (t: SessionTarget, model?: string): boolean =>
-    t.provider === "anthropic"
-      ? pool.canRetain(t.accountId, model)
-      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a, codexBudget ?? undefined));
-
-  const sessionTargetUsable = (t: SessionTarget, model?: string): boolean =>
-    t.provider === "anthropic"
-      ? pool.canServe(t.accountId, model)
-      // Same predicate the OpenAI picker applies, so a session is never pinned
-      // to an account the picker would refuse.
-      : openAIAccounts.some(a => a.id === t.accountId && canServeOpenAI(a, codexBudget ?? undefined));
-
-  /**
-   * How full a target's quota is, as the worst of its two windows, and when
-   * that window resets. The tighter window is what actually stops the
-   * account, so the maximum — not the currently-claimed one — is the honest
-   * measure of remaining headroom. Unknown quota reads as empty, which lets an
-   * unmeasured account take work and thereby produce the reading.
-   */
-  const sessionTargetUtil = (t: SessionTarget): TargetMetrics => {
-    const limits = t.provider === "anthropic"
-      ? pool.getById(t.accountId)?.rateLimits
-      : openAIAccounts.find(a => a.id === t.accountId)?.rateLimits;
-    if (!limits) return { util: 0 };
-    // Rank on the five-hour window every account shares. Ranking on whichever
-    // window is fuller compared a weekly fraction against other accounts'
-    // five-hour fractions and divided it by days to reset: the one account
-    // that reports a weekly window (27% used, 6.7 days out) scored ~40x below
-    // the rest and was left idle while they ran at the cap. The weekly window
-    // still decides whether the account is over the soft cap.
-    const pace = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
-    const weekly = { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset };
-    const fiveHour = { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset };
-    return limits.sevenDayUtil > limits.fiveHourUtil
-      ? { util: limits.sevenDayUtil, resetAtSec: limits.sevenDayReset, pace, weekly, fiveHour }
-      : { util: limits.fiveHourUtil, resetAtSec: limits.fiveHourReset, pace, weekly, fiveHour };
-  };
+  const sessionTargetRetainable = seats.retainable;
+  const sessionTargetUsable = seats.usable;
+  const sessionTargetUtil = seats.metrics;
 
   // ─── Admission throttle (opt-in — OFF by default) ──────────────────────────
   // Paces upstream sends and caps per-account concurrency as an account's quota
@@ -742,6 +715,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     const before = sessionRouter.peek(sessionId);
     const target = sessionRouter.resolve(sessionId, candidates, usableNow, sessionTargetUtil, retainableNow);
+    if (isFirstPlacement(before, target)) usageHistory.recordPlacement("placed");
 
     // Report the move only once it has actually happened. `resolve` returns
     // null and leaves the pin alone when no Anthropic account is usable either,
@@ -954,6 +928,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // POST /v1/messages requests retried inside the router, by how they ended
       // and by what refused them. Totals since the router started.
       failover: failoverCounters.snapshot(),
+      // Session placements by reason (a first pin, or a move and why), from the
+      // persisted hourly store: whole hours overlapping the last hour / day.
+      placements: {
+        lastHour: usageHistory.placementTotals(HOUR_MS),
+        lastDay: usageHistory.placementTotals(DAY_MS),
+      },
       // What clients actually saw go wrong, last hour and last day, and every
       // worker handoff: the evidence for "a session is never cut".
       continuity: continuity.snapshot(),
@@ -1354,6 +1334,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         t => sessionTargetRetainable(t, model),
       );
       if (replacement) {
+        usageHistory.recordPlacement("repin");
         logSessionRepin(sessionId, replacement.accountId);
         // Also surface it in RECENT ACTIVITY: a re-pin costs a full cache
         // rewrite, and account churn is unreadable if only the console shows it.
@@ -1950,12 +1931,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   /** The next account to try: usable for this model, not tried yet, coolest first. */
   const nextFailoverAccount = (tried: ReadonlySet<string>, model: string | undefined): Account | null => {
-    let candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServe(a.id, model));
-    // Before relaying a refusal: a seat whose refresh token died but whose
-    // access token still works (TokenPool.canServeLastResort).
-    if (candidates.length === 0) candidates = pool.getAll().filter(a => !tried.has(a.id) && pool.canServeLastResort(a.id, model));
-    if (candidates.length === 0) return null;
-    const pick = candidates.reduce((best, a) => (accountUtil(a) < accountUtil(best) ? a : best));
+    const pick = seats.failoverPick(tried, model);
+    if (!pick) return null;
     pick.requestCount++;
     pick.lastUsed = Date.now();
     return pick;
