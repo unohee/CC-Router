@@ -204,6 +204,23 @@ tr{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 td.mono,.logs .nw,.lh{white-space:normal}
 .logs td.clip{min-width:0;max-width:none}
 }
+/* Diagnostics: failover, continuity and supply sit folded at the bottom. The summary line carries anything that needs a look. */
+.ops{margin-top:24px}
+.ops summary{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:baseline;padding:12px 16px;border:1px solid var(--hair);border-radius:8px;background:var(--surface);cursor:pointer;list-style:none}
+.ops summary::-webkit-details-marker{display:none}
+.ops summary::before{content:"";align-self:center;width:6px;height:6px;margin-right:-6px;border-right:1.5px solid var(--ink2);border-bottom:1.5px solid var(--ink2);transform:rotate(-45deg);transition:transform .15s}
+.ops details[open]>summary::before{transform:rotate(45deg)}
+.ops summary:hover{background:var(--page)}
+.ops summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ops summary h2{font-size:13px}
+.opssum{font-size:12px;color:var(--ink2)}
+.opssum .att{color:var(--warn-ink);font-weight:600}
+.opsgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px;align-items:start}
+.opsgrid .card{margin-top:0}
+.opsgrid #supcard{grid-column:1 / -1}
+.opsgrid .foot{margin-top:12px}
+@media (prefers-reduced-motion:reduce){.ops summary::before{transition:none}}
+@media (max-width:720px){.opsgrid{grid-template-columns:minmax(0,1fr)}}
 @media (forced-colors:active){.chart,.sw{forced-color-adjust:none}.seg button[aria-pressed="true"]{border:2px solid Highlight}}
 @media (forced-colors:active){
 .hx{forced-color-adjust:none;border:1px solid CanvasText}
@@ -247,43 +264,6 @@ const BODY = String.raw`
       </div>
     </section>
     <p id="since" class="since"></p>
-    <section class="card" aria-labelledby="fo-h" id="focard" hidden>
-      <div class="cardhead"><h2 id="fo-h">Failover</h2><span id="fosum" class="sum"></span></div>
-      <dl id="fokpis" class="kv"></dl>
-      <p class="foot">POST /v1/messages is retried on the next account after a 401, 429, 529, 5xx, a connection error or no headers in time, before any byte reached the client; then the Ollama fallback; then the last refusal is passed on. Refusals the router failed over from are left out of the 429 count above. Totals since the router started.</p>
-    </section>
-    <section class="card" aria-labelledby="ct-h" id="ctcard" hidden>
-      <div class="cardhead"><h2 id="ct-h">Continuity</h2><span id="ctsum" class="sum"></span></div>
-      <dl id="ctkpis" class="kv"></dl>
-      <p class="foot">Failures a client actually saw: a 401, 429 or 5xx answer, or a stream the router ended with overloaded_error (which Claude Code retries). Refusals absorbed by failover are not counted. Handoffs are worker reloads; dropped means a stream outlived the drain limit. Kept across restarts.</p>
-    </section>
-    <section class="card" aria-labelledby="sup-h" id="supcard" hidden>
-      <div class="cardhead"><h2 id="sup-h">Supply</h2><span id="supsum" class="sum"></span></div>
-      <dl id="supkpis" class="kv"></dl>
-      <div class="scroll subtable">
-        <table>
-          <thead><tr>
-            <th scope="col">Account</th><th scope="col" class="num">5-hour, per 1%</th><th scope="col" class="num">7-day, per 1%</th>
-            <th scope="col" class="num">7-day left</th><th scope="col">Runs out</th>
-          </tr></thead>
-          <tbody id="supbody"></tbody>
-        </table>
-      </div>
-      <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). A capacity stays unknown until 24 pairs of hourly readings inside one window have been seen for that account. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
-    </section>
-    <section class="card" aria-labelledby="perf-h">
-      <div class="cardhead"><h2 id="perf-h">Last hour</h2><span id="perfsum" class="sum"></span></div>
-      <dl id="kpis" class="kpis"></dl>
-      <div class="scroll subtable">
-        <table>
-          <thead><tr>
-            <th scope="col">Model</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
-            <th scope="col" class="num">Finish p50</th><th scope="col" class="num">Finish p95</th><th scope="col" class="num">Output speed</th>
-          </tr></thead>
-          <tbody id="perfbody"></tbody>
-        </table>
-      </div>
-    </section>
     <section id="usage" aria-labelledby="use-h">
       <div class="cardhead usehead"><h2 id="use-h">Token usage</h2><span id="usesum" class="sum"></span></div>
       <div id="usestate" role="status" hidden></div>
@@ -353,6 +333,19 @@ const BODY = String.raw`
       </section>
       <p class="foot">History is kept by the router from the first run of this version; usage before that was never recorded. Counts cover responses the router could read usage from. Models are as requested. OpenAI rows recorded since 27 Oct 2026 split cached input out; earlier OpenAI rows count it inside input. Because the two cannot be told apart, the cache ratio covers Claude accounts only.</p>
     </section>
+    <section class="card" aria-labelledby="perf-h">
+      <div class="cardhead"><h2 id="perf-h">Last hour</h2><span id="perfsum" class="sum"></span></div>
+      <dl id="kpis" class="kpis"></dl>
+      <div class="scroll subtable">
+        <table>
+          <thead><tr>
+            <th scope="col">Model</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Errors</th>
+            <th scope="col" class="num">Finish p50</th><th scope="col" class="num">Finish p95</th><th scope="col" class="num">Output speed</th>
+          </tr></thead>
+          <tbody id="perfbody"></tbody>
+        </table>
+      </div>
+    </section>
     <section class="card" aria-labelledby="log-h">
       <div class="cardhead"><h2 id="log-h">Recent activity</h2><span id="logsum" class="sum"></span></div>
       <div class="filters">
@@ -373,6 +366,37 @@ const BODY = String.raw`
         </table>
       </div>
       <button id="more" class="more" type="button" hidden></button>
+    </section>
+    <section id="ops" class="ops" aria-labelledby="ops-h" hidden>
+      <details id="opsdet">
+        <summary><h2 id="ops-h">Diagnostics</h2><span id="opssum" class="opssum"></span></summary>
+        <div class="opsgrid">
+          <section class="card" aria-labelledby="fo-h" id="focard" hidden>
+            <div class="cardhead"><h2 id="fo-h">Failover</h2><span id="fosum" class="sum"></span></div>
+            <dl id="fokpis" class="kv"></dl>
+            <p class="foot">POST /v1/messages is retried on the next account after a 401, 429, 529, 5xx, a connection error or no headers in time, before any byte reached the client; then the Ollama fallback; then the last refusal is passed on. Refusals the router failed over from are left out of the 429 count above. Totals since the router started.</p>
+          </section>
+          <section class="card" aria-labelledby="ct-h" id="ctcard" hidden>
+            <div class="cardhead"><h2 id="ct-h">Continuity</h2><span id="ctsum" class="sum"></span></div>
+            <dl id="ctkpis" class="kv"></dl>
+            <p class="foot">Failures a client actually saw: a 401, 429 or 5xx answer, or a stream the router ended with overloaded_error (which Claude Code retries). Refusals absorbed by failover are not counted. Handoffs are worker reloads; dropped means a stream outlived the drain limit. Kept across restarts.</p>
+          </section>
+          <section class="card" aria-labelledby="sup-h" id="supcard" hidden>
+            <div class="cardhead"><h2 id="sup-h">Supply</h2><span id="supsum" class="sum"></span></div>
+            <dl id="supkpis" class="kv"></dl>
+            <div class="scroll subtable">
+              <table>
+                <thead><tr>
+                  <th scope="col">Account</th><th scope="col" class="num">5-hour, per 1%</th><th scope="col" class="num">7-day, per 1%</th>
+                  <th scope="col" class="num">7-day left</th><th scope="col">Runs out</th>
+                </tr></thead>
+                <tbody id="supbody"></tbody>
+              </table>
+            </div>
+            <p class="foot">Cost-weighted tokens (input 1, output 5, cache write 1.25, cache read 0.1). A capacity stays unknown until 24 pairs of hourly readings inside one window have been seen for that account. "Runs out" extrapolates the last six hours of the window's utilization; the demand forecast averages the last 14 days by hour of day.</p>
+          </section>
+        </div>
+      </details>
     </section>
   </main>
   <p class="foot">Read-only. Refreshes every few seconds from <code>/cc-router/health</code>, and token history every minute from <code>/cc-router/usage-history</code> and <code>/cc-router/usage-series</code>. Last-hour figures are kept in memory and start over when the router restarts. Finish times run from the request to the end of the response, and output speed divides output tokens by that, so it includes the wait for the first token. Usage is read from upstream response headers, so a window shows no reading until that account has served a request since the router started. This page and both of those endpoints are not behind the proxy secret.</p>
@@ -1086,6 +1110,53 @@ const SCRIPT = String.raw`
     kv($("ctkpis"), rows);
   }
 
+  // ── diagnostics ────────────────────────────────────────────────────────────
+  // Failover, continuity and supply sit folded at the bottom of the page. The
+  // section is hidden only when all three cards are (an older router sends none
+  // of the blocks), and the summary line stays visible while folded, so what
+  // needs a look is written there: client-visible failures, streams dropped at
+  // a handoff, Claude Code versions that never passed the conformance suite.
+  var OPS_KEY = "cc-router.diagnostics.open";
+  function renderOps(h) {
+    var shown = ["focard", "ctcard", "supcard"].filter(function (id) { return !$(id).hidden; });
+    $("ops").hidden = shown.length === 0;
+    if (!shown.length) return;
+    var parts = [];
+    if (!$("ctcard").hidden) {
+      var c = h.continuity;
+      var unv = c.clients && Array.isArray(c.clients.unverified) ? c.clients.unverified.length : 0;
+      parts.push(c.lastDay.total > 0
+        ? [plural(c.lastDay.total, "client-visible failure") + " in the last day", true]
+        : ["no client-visible failure in the last day", false]);
+      if (c.handoffs.droppedLastDay > 0) parts.push([plural(c.handoffs.droppedLastDay, "stream") + " dropped at a handoff", true]);
+      if (unv > 0) parts.push([plural(unv, "unverified Claude Code version"), true]);
+    }
+    if (!$("focard").hidden) {
+      var f = h.failover;
+      parts.push([!f.enabled ? "failover off" : f.requests === 0 ? "no failover yet" : plural(f.requests, "failover"), false]);
+    }
+    if (!$("supcard").hidden) {
+      var x = h.supply;
+      var short = x.accounts.filter(function (a) { return a.sevenDay.exhaustsAt !== null && a.sevenDay.exhaustsBeforeReset; }).length;
+      parts.push([x.budget.today === null ? "pool budget unknown" : "pool budget today " + big(x.budget.today), false]);
+      if (short > 0) parts.push([plural(short, "account") + " out before the 7-day reset", false]);
+    }
+    var kids = [];
+    parts.forEach(function (p, i) {
+      if (i) kids.push(el("span", "", " · "));
+      kids.push(el("span", p[1] ? "att" : "", p[0]));
+    });
+    var sum = $("opssum");
+    sum.replaceChildren.apply(sum, kids);
+  }
+  (function () {
+    var d = $("opsdet");
+    try { if (window.localStorage.getItem(OPS_KEY) === "1") d.open = true; } catch (e) { /* no storage: stays folded */ }
+    d.addEventListener("toggle", function () {
+      try { window.localStorage.setItem(OPS_KEY, d.open ? "1" : "0"); } catch (e) { /* not remembered */ }
+    });
+  })();
+
   function render() {
     var h = S.data;
     if (!h) return;
@@ -1099,6 +1170,7 @@ const SCRIPT = String.raw`
       renderSupply(h);
       renderFailover(h);
       renderContinuity(h);
+      renderOps(h);
       renderPerf();
       renderLogs(h);
       S.rendered = true;
