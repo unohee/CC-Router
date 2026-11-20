@@ -103,6 +103,20 @@ describe("reload under the supervisor", { timeout: 90_000 }, () => {
     // Only now let the stream run on: it finishes while its worker drains,
     // however long the new worker took to come up on a loaded host.
     releaseStream();
+    // The new worker refreshes both seats as it starts (the lead window covers
+    // them). Wait for both refreshes before sending new requests: a request the
+    // new worker sends while its own refresh is in flight carries the token that
+    // refresh is replacing, and this fake upstream refuses any token but the
+    // latest. That race is the worker against itself, not two writers, and on a
+    // loaded host it lost (2026-11-20, five copies of this file at once: new0 on
+    // vega.a1 as vega.a2 was issued, 401, failover to lyra). By order of events,
+    // a stale token from here on can only come from a worker using tokens the
+    // other one rotated. Mutations checked by hand (2026-11-20): a worker that
+    // ignores "drain" fails at the pid check above; dropping the freeze
+    // (`freezePersistence()` in the "freeze" handler and the gate in
+    // `refreshAccountToken`) is not reached by this flow, whose old worker never
+    // refreshes again: "the persistence gate" tests above cover it.
+    await waitFor(() => oauth!.calls >= 4, "the new worker's refreshes", 30_000);
 
     // New requests are answered (by the new worker) while the old one drains.
     for (let i = 0; i < 3; i++) expect((await sendMessage(r.base, { session: `new${i}` })).status).toBe(200);
