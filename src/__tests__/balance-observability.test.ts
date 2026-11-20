@@ -217,7 +217,7 @@ describe("the smoke check", () => {
 
 // ─── Through a real router ──────────────────────────────────────────────────
 
-const SECRET = "s3cret-for-the-balance-observability-test";
+const SECRET = "s3cret-for-the-balance-observability-test"; // gitleaks:allow (a test router's proxy secret, not a credential)
 
 async function freePort(): Promise<number> {
   const s = createServer();

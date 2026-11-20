@@ -242,7 +242,7 @@ describe("health balance", () => {
 
 // ─── Through a real router ──────────────────────────────────────────────────
 
-const SECRET = "s3cret-for-the-balance-outcomes-test";
+const SECRET = "s3cret-for-the-balance-outcomes-test"; // gitleaks:allow (a test router's proxy secret, not a credential)
 
 async function freePort(): Promise<number> {
   const s = createServer();
