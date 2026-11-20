@@ -1,0 +1,7 @@
+# gitleaks findings reviewed and confirmed not to be credentials (2026-11-20).
+# Both are the proxy secret of a throwaway router a test boots on a free
+# localhost port with a temporary config; nothing outside the test reads them.
+# The lines also carry an inline `gitleaks:allow`, so the ignore survives the
+# line moving; the fingerprints below record what was reviewed.
+src/__tests__/balance-outcomes.test.ts:generic-api-key:245
+src/__tests__/balance-observability.test.ts:generic-api-key:220
