@@ -273,24 +273,45 @@ describe("the dated reports under docs/balance", () => {
     }
   });
 
-  it("predict from the frozen baseline's policy: the scenario seed's figures for the hours covered are a prefix of baseline-3's live-week", () => {
-    const baseline = (readJson(join(DOCS, "baseline-3.json"))["scenarios"] as Record<string, ScenarioScore3>)["live-week"];
+  it("predict live-week from its own seed over the hours elapsed, with the value inside the band and the verdict by the stated rule", () => {
     for (const r of reports) {
       expect(r.json.scenario.name).toBe("live-week");
       expect(r.json.scenario.seed).toBe(liveWeek.seed);
+      expect(r.json.scenario.start).toBe(script.SCENARIO_START["live-week"]);
       expect(r.json.prediction.seeds[0]).toBe(liveWeek.seed);
       expect(r.json.prediction.hours).toBeLessThanOrEqual(liveWeek.days * 24);
       expect(r.json.prediction.hours).toBeGreaterThanOrEqual(1);
+      for (const s of r.json.seats) {
+        if (!s.predicted) continue;
+        expect(s.predicted.band.strandedMinutes[0]).toBeLessThanOrEqual(s.predicted.strandedMinutes);
+        expect(s.predicted.band.strandedMinutes[1]).toBeGreaterThanOrEqual(s.predicted.strandedMinutes);
+        expect(s.error.withinError.strandedMinutes).toBe(s.measured.strandedMinutes >= s.predicted.band.strandedMinutes[0] - 1 && s.measured.strandedMinutes <= s.predicted.band.strandedMinutes[1] + 1);
+        expect(s.error.strandedMinutes).toBe(s.measured.strandedMinutes - s.predicted.strandedMinutes);
+      }
+    }
+  });
+
+  // The policy a dated report was run under is the one in its `policy` field; a
+  // later placement change does not rewrite history, so only the reports made
+  // under the baseline's policy are held to baseline-3's figures.
+  const UNDER_BASELINE_POLICY = ["2026-11-20"];
+
+  it("made under baseline-3's policy are a prefix of its live-week: the scenario seed's figures for the hours covered", () => {
+    const baseline = (readJson(join(DOCS, "baseline-3.json"))["scenarios"] as Record<string, ScenarioScore3>)["live-week"];
+    const held = reports.filter(r => UNDER_BASELINE_POLICY.includes(r.date));
+    expect(held.map(r => r.date)).toEqual(UNDER_BASELINE_POLICY);
+    for (const r of held) {
       for (const s of r.json.seats) {
         if (!s.predicted) continue;
         const b = baseline.outcomesBySeat[s.id];
         expect(b, `${s.id} in baseline-3`).toBeDefined();
         expect(s.predicted.resets).toBeLessThanOrEqual(b.resets);
         expect(s.predicted.strandedMinutes).toBeLessThanOrEqual(b.strandedMinutes);
-        if (s.predicted.resets === b.resets && b.unusedAtReset !== null) expect(Math.round(s.predicted.unusedAtReset! * 100)).toBe(Math.round(b.unusedAtReset * 100));
-        expect(s.predicted.band.strandedMinutes[0]).toBeLessThanOrEqual(s.predicted.strandedMinutes);
-        expect(s.predicted.band.strandedMinutes[1]).toBeGreaterThanOrEqual(s.predicted.strandedMinutes);
-        expect(s.error.withinError.strandedMinutes).toBe(s.measured.strandedMinutes >= s.predicted.band.strandedMinutes[0] - 1 && s.measured.strandedMinutes <= s.predicted.band.strandedMinutes[1] + 1);
+        if (s.predicted.resets === b.resets && b.unusedAtReset !== null) {
+          expect(Math.round(s.predicted.unusedAtReset! * 100)).toBe(Math.round(b.unusedAtReset * 100));
+          // A seat whose reset fell inside the hours covered is not at the cap after it: the prefix holds the whole figure.
+          if (s.predicted.resets > 0) expect(s.predicted.strandedMinutes).toBe(b.strandedMinutes);
+        }
       }
     }
   });
