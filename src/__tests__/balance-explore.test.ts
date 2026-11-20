@@ -183,7 +183,7 @@ describe("in the balance simulator", () => {
 
 // ─── Through a real router ──────────────────────────────────────────────────
 
-const SECRET = "s3cret-for-the-balance-explore-test";
+const SECRET = "s3cret-for-the-balance-explore-test"; // gitleaks:allow (a test router's proxy secret, not a credential)
 
 async function freePort(): Promise<number> {
   const s = createServer();
