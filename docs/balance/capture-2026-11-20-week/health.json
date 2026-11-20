@@ -1,0 +1,456 @@
+{
+  "note": "Trimmed to what scripts/balance-capture.mjs reads: build, performance p50, the balance block (placements), each account reduced to its id and live rate limits (the start state), and recent log entries reduced to whether they carried a session id. Fetched 2026-11-20T10:29:29Z.",
+  "build": {
+    "sha": "3f6ba11f9634002ba3ccad244fa334837e8a7312"
+  },
+  "performance": {
+    "pool": {
+      "requests": 500,
+      "errors": 14,
+      "rateLimited": 0,
+      "errorRate": 0.028,
+      "completed": 484,
+      "p50Ms": 3612,
+      "p95Ms": 11638,
+      "outputTokensPerSecond": 80.03537475127129
+    }
+  },
+  "balance": {
+    "rules": "balance",
+    "seats": [
+      {
+        "id": "heewon",
+        "size": {
+          "relative": 0.61,
+          "source": "measured",
+          "tokensPerWeek": 246261497,
+          "samples": 23,
+          "spanHours": 43.1,
+          "errorBand": 0.033
+        },
+        "remainingTokens": 36939224,
+        "weekRatio": 0.446,
+        "fiveHourRatio": 1.082,
+        "paceDeficitPerHour": 812150,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.000002957,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 2,
+        "rank": 3,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "vega",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 399294067,
+          "samples": 33,
+          "spanHours": 43.1,
+          "errorBand": 0.025
+        },
+        "remainingTokens": 115795279,
+        "weekRatio": 0.701,
+        "fiveHourRatio": 2.552,
+        "paceDeficitPerHour": 710837,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.000003492,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 10,
+        "rank": 1,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "rigel",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 401705859,
+          "samples": 9,
+          "spanHours": 40.7,
+          "errorBand": 0.111
+        },
+        "remainingTokens": 337432922,
+        "weekRatio": 0.907,
+        "fiveHourRatio": 0.571,
+        "paceDeficitPerHour": 221240,
+        "onPace": false,
+        "overCap": true,
+        "tier": "over-cap",
+        "score": 0,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 0,
+        "rank": 5,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 1,
+          "unusedAtReset": 0.02,
+          "strandedMinutes": 793
+        }
+      },
+      {
+        "id": "lyra",
+        "size": {
+          "relative": 1.2,
+          "source": "measured",
+          "tokensPerWeek": 482319063,
+          "samples": 5,
+          "spanHours": 42.7,
+          "errorBand": 0.083
+        },
+        "remainingTokens": 419617585,
+        "weekRatio": 0.883,
+        "fiveHourRatio": 0.284,
+        "paceDeficitPerHour": 335625,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 4.048e-9,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 39.5,
+        "rank": 4,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 1,
+          "unusedAtReset": 0.03,
+          "strandedMinutes": 1393
+        }
+      },
+      {
+        "id": "kyte",
+        "size": {
+          "relative": 1.51,
+          "source": "measured",
+          "tokensPerWeek": 606775443,
+          "samples": 30,
+          "spanHours": 42.8,
+          "errorBand": 0.02
+        },
+        "remainingTokens": 242710177,
+        "weekRatio": 0.572,
+        "fiveHourRatio": null,
+        "paceDeficitPerHour": 1546291,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.000003325,
+        "fiveHourReported": false,
+        "usable": true,
+        "load": 13,
+        "rank": 2,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      }
+    ],
+    "placements": {
+      "lastHour": {
+        "placed": 26,
+        "unservable": 1,
+        "soft-cap": 2,
+        "weekly-pace": 0,
+        "repin": 0
+      },
+      "lastDay": {
+        "placed": 117,
+        "unservable": 2,
+        "soft-cap": 7,
+        "weekly-pace": 7,
+        "repin": 0
+      }
+    }
+  },
+  "placements": {
+    "lastHour": {
+      "placed": 26,
+      "unservable": 1,
+      "soft-cap": 2,
+      "weekly-pace": 0,
+      "repin": 0
+    },
+    "lastDay": {
+      "placed": 117,
+      "unservable": 2,
+      "soft-cap": 7,
+      "weekly-pace": 7,
+      "repin": 0
+    }
+  },
+  "accounts": [
+    {
+      "id": "heewon",
+      "rateLimits": {
+        "sevenDayUtil": 0.85,
+        "sevenDayReset": 1795374000,
+        "fiveHourUtil": 0.06,
+        "fiveHourReset": 1795186200,
+        "fiveHourReported": true,
+        "lastUpdated": 1795170337410
+      }
+    },
+    {
+      "id": "vega",
+      "rateLimits": {
+        "sevenDayUtil": 0.71,
+        "sevenDayReset": 1795420800,
+        "fiveHourUtil": 0.06,
+        "fiveHourReset": 1795177200,
+        "fiveHourReported": true,
+        "lastUpdated": 1795170359207
+      }
+    },
+    {
+      "id": "rigel",
+      "rateLimits": {
+        "sevenDayUtil": 0.16,
+        "sevenDayReset": 1795730400,
+        "fiveHourUtil": 0.98,
+        "fiveHourReset": 1795171200,
+        "fiveHourReported": true,
+        "lastUpdated": 1795164962152
+      }
+    },
+    {
+      "id": "lyra",
+      "rateLimits": {
+        "sevenDayUtil": 0.13,
+        "sevenDayReset": 1795766400,
+        "fiveHourUtil": 0.81,
+        "fiveHourReset": 1795182600,
+        "fiveHourReported": true,
+        "lastUpdated": 1795170568969
+      }
+    },
+    {
+      "id": "kyte",
+      "rateLimits": {
+        "sevenDayUtil": 0.6,
+        "sevenDayReset": 1795593600,
+        "fiveHourUtil": 0,
+        "fiveHourReset": 0,
+        "fiveHourReported": false,
+        "lastUpdated": 1795170560229
+      }
+    }
+  ],
+  "recentLogs": [
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    },
+    {
+      "statusCode": 200,
+      "sessionId": "present"
+    }
+  ]
+}
