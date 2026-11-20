@@ -5,6 +5,8 @@
 // copies the data files the router reads at runtime into dist/.
 //
 // CC_ROUTER_BUILD_SHA overrides the sha, for builds made outside a git checkout.
+// CC_ROUTER_BUILD_OUT_DIR writes into that directory instead of dist/: the tests
+// use it so parallel test files do not race on one dist/build-info.json.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -31,7 +33,8 @@ const info = {
   version: typeof pkg.version === "string" ? pkg.version : null,
 };
 
-const out = join(root, "dist", "build-info.json");
+const outDir = process.env.CC_ROUTER_BUILD_OUT_DIR || join(root, "dist");
+const out = join(outDir, "build-info.json");
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(info, null, 2) + "\n");
 console.log(`build-info: ${info.sha ?? "unknown"}${info.dirty ? " (dirty)" : ""}`);
@@ -39,6 +42,6 @@ console.log(`build-info: ${info.sha ?? "unknown"}${info.dirty ? " (dirty)" : ""}
 // Data the running router reads beside its code: the Claude Code versions the
 // real-client conformance suite passed for (src/proxy/continuity-ledger.ts).
 const verifiedSrc = join(root, "src", "continuity", "verified-clients.json");
-const verifiedOut = join(root, "dist", "continuity", "verified-clients.json");
+const verifiedOut = join(outDir, "continuity", "verified-clients.json");
 mkdirSync(dirname(verifiedOut), { recursive: true });
 copyFileSync(verifiedSrc, verifiedOut);
