@@ -30,11 +30,18 @@ describe("the verified list", () => {
   it("is what the conformance suite wrote, bundled into dist by the build", () => {
     const src = JSON.parse(readFileSync(join("src", "continuity", "verified-clients.json"), "utf8")) as { verified: { version: string }[] };
     expect(src.verified.length).toBeGreaterThan(0);
-    execFileSync(process.execPath, ["scripts/write-build-info.mjs"], { stdio: "ignore" });
-    expect(readFileSync(join("dist", "continuity", "verified-clients.json"), "utf8"))
-      .toBe(readFileSync(join("src", "continuity", "verified-clients.json"), "utf8"));
-    expect([...loadVerifiedClients(join("dist", "continuity", "verified-clients.json"))])
-      .toEqual(src.verified.map(v => v.version));
+    // The build's own output dir is dist/; a directory of this test's own keeps
+    // parallel test files from racing on dist/ (build-info.test.ts writes it too).
+    const out = mkdtempSync(join(tmpdir(), "cc-build-out-"));
+    try {
+      execFileSync(process.execPath, ["scripts/write-build-info.mjs"], { stdio: "ignore", env: { ...process.env, CC_ROUTER_BUILD_OUT_DIR: out } });
+      expect(readFileSync(join(out, "continuity", "verified-clients.json"), "utf8"))
+        .toBe(readFileSync(join("src", "continuity", "verified-clients.json"), "utf8"));
+      expect([...loadVerifiedClients(join(out, "continuity", "verified-clients.json"))])
+        .toEqual(src.verified.map(v => v.version));
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
   });
 
   it("treats a missing or malformed list as nothing verified", () => {

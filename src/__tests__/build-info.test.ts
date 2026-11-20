@@ -34,8 +34,10 @@ describe("build info", () => {
 
   it("the build script records the commit it was built from", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    execFileSync(process.execPath, ["scripts/write-build-info.mjs"], { stdio: "ignore" });
-    const info = readBuildInfo(join("dist", "build-info.json"));
+    const dir = mkdtempSync(join(tmpdir(), "cc-router-build-info-"));
+    execFileSync(process.execPath, ["scripts/write-build-info.mjs"], { stdio: "ignore", env: { ...process.env, CC_ROUTER_BUILD_OUT_DIR: dir } });
+    const info = readBuildInfo(join(dir, "build-info.json"));
+    rmSync(dir, { recursive: true, force: true });
     expect(info.sha).toBe(head);
     expect(info.version).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
     expect(Number.isNaN(Date.parse(info.builtAt ?? ""))).toBe(false);
@@ -44,13 +46,13 @@ describe("build info", () => {
   it("CC_ROUTER_BUILD_SHA overrides git, for builds outside a checkout", () => {
     const dir = mkdtempSync(join(tmpdir(), "cc-router-build-sha-"));
     try {
+      // Into a directory of its own: dist/build-info.json is written by other
+      // test files running in parallel (client-versions), which raced this one.
       execFileSync(process.execPath, ["scripts/write-build-info.mjs"], {
-        stdio: "ignore", env: { ...process.env, CC_ROUTER_BUILD_SHA: "b".repeat(40) },
+        stdio: "ignore", env: { ...process.env, CC_ROUTER_BUILD_SHA: "b".repeat(40), CC_ROUTER_BUILD_OUT_DIR: dir },
       });
-      expect(readBuildInfo(join("dist", "build-info.json")).sha).toBe("b".repeat(40));
+      expect(readBuildInfo(join(dir, "build-info.json")).sha).toBe("b".repeat(40));
     } finally {
-      // Leave dist/build-info.json describing the real HEAD again.
-      execFileSync(process.execPath, ["scripts/write-build-info.mjs"], { stdio: "ignore" });
       rmSync(dir, { recursive: true, force: true });
     }
   });
