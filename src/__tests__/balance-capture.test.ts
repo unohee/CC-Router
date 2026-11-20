@@ -20,10 +20,12 @@ const HOUR = 3_600_000;
 const START = Date.UTC(2026, 10, 19, 10);
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-interface SeatDetail { samples: number; errorBand: number | null; capSource: string; fiveCapSource: string }
+interface SeatDetail { samples: number; errorBand: number | null; capSource: string; fiveCapSource: string; startSource: string; startTakenAt: string; startAgeH: number }
+interface StartState { source: "health" | "quota-history"; takenAt: number; ageH: number; why: string; sevenDay: { util: number; resetAt: number }; fiveHour: { util: number; resetAt: number } }
 interface Capture {
   measureWindow(readings: Json[], window: "sevenDay" | "fiveHour", nowMs: number): { tokens: number | null; samples: number; spanHours: number; errorBand: number | null };
-  fitSeats(quota: Json, startMs: number, routing?: Json): { seats: SeatSpec[]; details: Record<string, SeatDetail>; notes: string[] };
+  fitSeats(quota: Json, startMs: number, routing?: Json, health?: Json): { seats: SeatSpec[]; details: Record<string, SeatDetail>; notes: string[] };
+  startState(reading: Json, account: Json | undefined, startMs: number): StartState;
   fitDemand(series: Json, usage: Json, health?: Json, opts?: { window: string }): { demand: DemandSpec; requestsPerDay: number; days: number; notes: string[] };
   fitThrottle(config: Json, health?: Json): { throttle: ThrottleSpec | undefined; notes: string[] };
   buildScenario(input: Json): { scenario: Scenario2 & { notes: string[]; capturedAt: string; source: Json }; details: Record<string, SeatDetail> };
@@ -131,6 +133,65 @@ describe("fitSeats", () => {
 
 /** The fixtures' per-request figures were set against the 7-day window; the default is the last day. */
 const W7 = { window: "7d" } as const;
+
+describe("the start state", () => {
+  // alpha's newest reading: hour 10:00Z, sampled 10:02Z, week 48% resetting at
+  // 1795262400, 5-hour 90% resetting at 1795089600. The start hour is 10:00Z.
+  const sec = (iso: string) => Date.parse(iso) / 1000;
+  const live = (at: string, extra: Json = {}): Json => ({
+    id: "alpha",
+    rateLimits: { sevenDayUtil: 0.97, sevenDayReset: 1795262400, fiveHourUtil: 0.2, fiveHourReset: sec("2026-11-19T14:00:00Z"), lastUpdated: Date.parse(at), ...extra },
+  });
+  const withHealth = (accounts: Json[]) => cap.fitSeats(quota(), START, {}, { accounts });
+
+  it("takes health's live value over a stale reading, and says so", () => {
+    const { seats, details, notes } = withHealth([live("2026-11-19T10:40:00Z")]);
+    const alpha = seats.find(s => s.id === "alpha")!;
+    expect(alpha.weeklyUtil).toBe(0.97);
+    expect(alpha.weeklyResetH).toBe(50);
+    expect(alpha.fiveHourUtil).toBe(0.2);
+    expect(alpha.fiveHourResetMin).toBe(240);
+    expect(details["alpha"]).toMatchObject({ startSource: "health", startTakenAt: "2026-11-19T10:40:00.000Z", startAgeH: 0.3 });
+    expect(notes).toContain("alpha: start state from health taken 2026-11-19T10:40:00.000Z, 0.3 h before the start hour ended (newer than the quota-history reading of 2026-11-19T10:02:00.000Z).");
+    // The capacity is still the readings' measurement: only the state at the start moved.
+    expect(alpha.weeklyCap / 1e6).toBeCloseTo(450, 3);
+  });
+
+  it("keeps the reading when it is the fresher one, or when health's value is from after the start hour", () => {
+    for (const at of ["2026-11-19T09:30:00Z", "2026-11-19T10:02:00Z", "2026-11-19T11:30:00Z"]) {
+      const { seats, details, notes } = withHealth([live(at)]);
+      const alpha = seats.find(s => s.id === "alpha")!;
+      expect(alpha.weeklyUtil, at).toBe(0.48);
+      expect(alpha.fiveHourUtil, at).toBe(0.9);
+      expect(details["alpha"]).toMatchObject({ startSource: "quota-history", startTakenAt: "2026-11-19T10:02:00.000Z", startAgeH: 1 });
+      expect(notes.find(n => n.startsWith("alpha: start state"))).toMatch(at === "2026-11-19T11:30:00Z" ? /after the start hour/ : /is not newer/);
+    }
+  });
+
+  it("uses the reading for a seat health does not carry, and for a health value with no weekly window", () => {
+    const { details, notes } = withHealth([live("2026-11-19T10:40:00Z")]);
+    expect(details["beta"]).toMatchObject({ startSource: "quota-history", startTakenAt: "2026-11-19T10:01:00.000Z" });
+    expect(notes).toContain("beta: start state from quota-history taken 2026-11-19T10:01:00.000Z, 1 h before the start hour ended (not in health).");
+    const noWeek = withHealth([live("2026-11-19T10:40:00Z", { sevenDayReset: 0 })]);
+    expect(noWeek.details["alpha"]!.startSource).toBe("quota-history");
+    expect(noWeek.notes.find(n => n.startsWith("alpha: start state"))).toMatch(/weekly window is unknown/);
+    expect(cap.fitSeats(quota(), START).details["alpha"]!.startSource).toBe("quota-history");
+  });
+
+  it("keeps the reading's 5-hour window when health has none (a plan without one)", () => {
+    const s = cap.startState(quota().accounts[0].readings.at(-1), live("2026-11-19T10:40:00Z", { fiveHourReset: 0, fiveHourUtil: 0 }), START);
+    expect(s.source).toBe("health");
+    expect(s.sevenDay).toEqual({ util: 0.97, resetAt: 1795262400 });
+    expect(s.fiveHour).toEqual({ util: 0.9, resetAt: 1795089600 });
+    expect(s.why).toMatch(/5-hour window is unknown/);
+  });
+
+  it("reaches the scenario through buildScenario's health", () => {
+    const { scenario, details } = cap.buildScenario({ quota: quota(), series: series(), usage: usage(), config: config(), health: { ...health(), accounts: [live("2026-11-19T10:40:00Z")] }, startMs: START });
+    expect(scenario.seats.find(s => s.id === "alpha")!.weeklyUtil).toBe(0.97);
+    expect(details["alpha"]!.startSource).toBe("health");
+  });
+});
 
 describe("fitDemand", () => {
   it("takes the rate and token sizes from the last day by default, and the profile from the whole series", () => {
