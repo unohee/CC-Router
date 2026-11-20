@@ -464,6 +464,22 @@ quota unused is the imbalance the balance rules exist to remove; check that seat
 (an `equal` seat the history cannot measure yet is taken as typical, which understates a Max 20x)
 and its `size.errorBand`.
 
+What the live pool measured, 2026-11-20 (`docs/balance/live-outcomes-2026-11-20.md`, from mini's
+health at 08:59Z, build d45639b): the two seats whose weeks reset inside the day both stopped at the
+98% soft cap and left what the cap leaves: rigel 2% of its week unused at its reset (22:00Z on the
+19th), lyra 3% (08:00Z on the 20th; its last hourly reading said 97% while the live value was at the
+cap, so the hundredth is the reading's age). Stranded minutes, with other seats under the cap and
+room to give: rigel 793, lyra 1393 (15 of each from before the scenario's start). The simulator's
+`live-week` run under the same policy predicted both resets and both unused shares (2%, within a
+reading's hundredth) and rigel's stranded minutes (780 predicted, 778 measured from the start on;
+two hour buckets around the deploys of #52–#54 hold 59 minutes, a handoff can skip a tick); lyra's it put at 956–1125 over eight seeds, 1378 measured, because
+the scenario started lyra at 97% from a reading four hours old while the live seat was already at
+the cap: the miss is in the captured starting state, not in placement. The 2% these seats leave is
+the cap itself; a lower leftover means a higher `softCapUtil`, at the price of more 429s near the
+line. To redo the comparison at a later date, save health (and, for the from-the-start figures, the
+router's `quota-history.json`) and run `npx tsx scripts/balance-outcomes-report.mjs` (its header
+says how); `balance-live-outcomes.test.ts` checks the dated pair against health and the baseline.
+
 ---
 
 ## How do I go back to using Claude Code normally?

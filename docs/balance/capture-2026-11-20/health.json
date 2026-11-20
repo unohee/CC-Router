@@ -1,0 +1,163 @@
+{
+  "build": {
+    "sha": "d45639b76360d3dfbb0adf7c5ef938308cc8ba64",
+    "dirty": false,
+    "builtAt": "2026-11-19T10:27:00.402Z",
+    "version": "1.0.0"
+  },
+  "balance": {
+    "rules": "balance",
+    "seats": [
+      {
+        "id": "heewon",
+        "size": {
+          "relative": 0.79,
+          "source": "measured",
+          "tokensPerWeek": 319193716,
+          "samples": 21,
+          "spanHours": 38,
+          "errorBand": 0.045
+        },
+        "remainingTokens": 63838743,
+        "weekRatio": 0.579,
+        "fiveHourRatio": 4.378,
+        "paceDeficitPerHour": 799951,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.00002248,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 0,
+        "rank": 4,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "vega",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 402163179,
+          "samples": 32,
+          "spanHours": 40.1,
+          "errorBand": 0.026
+        },
+        "remainingTokens": 116627322,
+        "weekRatio": 0.686,
+        "fiveHourRatio": 1.396,
+        "paceDeficitPerHour": 751990,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.00005362,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 0,
+        "rank": 3,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      },
+      {
+        "id": "rigel",
+        "size": {
+          "relative": 1,
+          "source": "measured",
+          "tokensPerWeek": 401705859,
+          "samples": 9,
+          "spanHours": 40.7,
+          "errorBand": 0.111
+        },
+        "remainingTokens": 337432922,
+        "weekRatio": 0.899,
+        "fiveHourRatio": 0.059,
+        "paceDeficitPerHour": 242325,
+        "onPace": false,
+        "overCap": true,
+        "tier": "over-cap",
+        "score": 0,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 10.1,
+        "rank": 5,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 1,
+          "unusedAtReset": 0.02,
+          "strandedMinutes": 793
+        }
+      },
+      {
+        "id": "lyra",
+        "size": {
+          "relative": 1,
+          "source": "equal",
+          "tokensPerWeek": null,
+          "samples": 3,
+          "spanHours": 13.7,
+          "errorBand": null
+        },
+        "remainingTokens": null,
+        "weekRatio": 0.996,
+        "fiveHourRatio": 0.996,
+        "paceDeficitPerHour": null,
+        "onPace": true,
+        "overCap": false,
+        "tier": "on-pace",
+        "score": 0.000001628,
+        "fiveHourReported": true,
+        "usable": true,
+        "load": 9.6,
+        "rank": 1,
+        "placeable": true,
+        "outcomes": {
+          "days": 7,
+          "resets": 1,
+          "unusedAtReset": 0.03,
+          "strandedMinutes": 1393
+        }
+      },
+      {
+        "id": "kyte",
+        "size": {
+          "relative": 1.51,
+          "source": "measured",
+          "tokensPerWeek": 604933593,
+          "samples": 28,
+          "spanHours": 40.8,
+          "errorBand": 0.02
+        },
+        "remainingTokens": 248022773,
+        "weekRatio": 0.579,
+        "fiveHourRatio": null,
+        "paceDeficitPerHour": 1517176,
+        "onPace": false,
+        "overCap": false,
+        "tier": "behind",
+        "score": 0.00008218,
+        "fiveHourReported": false,
+        "usable": true,
+        "load": 0,
+        "rank": 2,
+        "placeable": false,
+        "outcomes": {
+          "days": 7,
+          "resets": 0,
+          "unusedAtReset": null,
+          "strandedMinutes": 0
+        }
+      }
+    ]
+  }
+}
