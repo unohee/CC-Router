@@ -131,6 +131,8 @@ export interface SimResult {
   placed: number;
   /** Cost-weighted tokens each seat served. */
   servedBySeat: Record<string, number>;
+  /** Simulated ms from the start to each seat's first served request; null when it served none. */
+  firstServedAtMs: Record<string, number | null>;
   /** Each seat's 7-day utilization at every reset inside the run. */
   utilAtReset: Record<string, number[]>;
   /**
@@ -288,6 +290,7 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   let earlyMoves = 0;
   let firstMoveAtMs: number | null = null;
   let strandedSeatMinutes = 0;
+  const firstServedAtMs: Record<string, number | null> = Object.fromEntries(sc.seats.map(s => [s.id, null]));
   const softCap = parseSoftCapUtil(sc.routing as never);
   let nextSession = 0;
   const sessions: Session[] = [];
@@ -346,6 +349,7 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
     s.spentWeek += cost;
     if (s.spec.fiveHourCap > 0) s.spentFive += cost;
     servedBySeat[a.id] += cost;
+    if (firstServedAtMs[a.id] === null) firstServedAtMs[a.id] = now - SIM_EPOCH;
     a.rateLimits = reading(s, now, "allowed", "five_hour");
     quota.addSpend(a.id, cost);
     quota.sample(a.id, toInput(a.rateLimits), now);
@@ -517,5 +521,5 @@ export function simulate(sc: Scenario2, opts: SimOptions): SimResult {
   // Resets due exactly at the end are seen by the tick too.
   quota.noteElapsedResets(now);
   const outcomesBySeat = Object.fromEntries(sc.seats.map(s => [s.id, quota.outcomes(s.id, (sc.days + 1) * 24 * HOUR_MS, now)]));
-  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, earlyMoves, firstMoveAtMs, placed, servedBySeat, utilAtReset, outcomesBySeat, strandedSeatMinutes };
+  return { metrics: m, overspendAtEnd, queueWaitBySeat, queued, queueCapped, reassigned, earlyMoves, firstMoveAtMs, placed, servedBySeat, firstServedAtMs, utilAtReset, outcomesBySeat, strandedSeatMinutes };
 }
