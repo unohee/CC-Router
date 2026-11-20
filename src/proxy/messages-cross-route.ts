@@ -696,28 +696,35 @@ export function mountMessagesCrossProviderRoute(
 
   // count_tokens is answered locally while requests are going to Ollama:
   // Ollama does not implement it (404; a known bug can hang the daemon on it),
-  // and proxying it to the blocked pool only earns the client a 429. Mounted
-  // only when the fallback is enabled, so the default path is untouched.
-  if (ollama) {
-    app.post(
-      "/v1/messages/count_tokens",
-      express.json({
-        limit: "10mb",
-        verify: (req, _res, buf) => {
-          (req as Request)._ccRawBody = Buffer.from(buf);
-        },
-      }),
-      (req: Request, res: Response, next: NextFunction) => {
-        if (!isAnthropicMessagesRequest(req.body)) return next();
-        const route = selectRoute(req.body.model, opts.modelRouting);
-        if (route.provider !== "anthropic_subscription") return next();
+  // and proxying it to the blocked pool only earns the client a 429. That
+  // local answer applies only when the fallback is enabled.
+  //
+  // The body is parsed on every deployment, though, because a model picked
+  // from the discovered list arrives as "anthropic/<id>" here too and upstream
+  // answers that with 404 unless the prefix is stripped. The raw body is kept
+  // so the Anthropic proxy still replays the request unchanged otherwise.
+  app.post(
+    "/v1/messages/count_tokens",
+    express.json({
+      limit: "10mb",
+      verify: (req, _res, buf) => {
+        (req as Request)._ccRawBody = Buffer.from(buf);
+      },
+    }),
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!isAnthropicMessagesRequest(req.body)) return next();
+      const route = selectRoute(req.body.model, opts.modelRouting);
+      if (route.provider !== "anthropic_subscription") return next();
+      stripAnthropicPrefix(req, route.upstreamModel);
+      if (!ollama) return next();
+      {
         const estimated = estimatePromptTokens(req._ccRawBody);
         const decision = decideOllama(route.upstreamModel, estimated);
         if (!decision.use) return next();
         res.json({ input_tokens: estimated ?? 0 });
-      },
-    );
-  }
+      }
+    },
+  );
 
   app.post(
     "/v1/messages",
@@ -740,7 +747,10 @@ export function mountMessagesCrossProviderRoute(
       }
 
       const route = selectRoute(req.body.model, opts.modelRouting);
-      if (route.provider === "anthropic_subscription") req._ccAnthropicModel = route.upstreamModel;
+      if (route.provider === "anthropic_subscription") {
+        req._ccAnthropicModel = route.upstreamModel;
+        stripAnthropicPrefix(req, route.upstreamModel);
+      }
       const requestedStream = req.body.stream === true;
       const startedAt = Date.now();
       const sessionId = String(req.headers["x-claude-code-session-id"] ?? "").trim();
@@ -1055,4 +1065,17 @@ export function mountMessagesCrossProviderRoute(
       next();
     },
   );
+}
+
+/**
+ * Discovery lists Anthropic models as "anthropic/<id>", which /model then
+ * sends verbatim; upstream only knows the bare id. Rewrites the body only for
+ * that prefix so every other request still passes through byte-for-byte.
+ */
+function stripAnthropicPrefix(req: Request, upstreamModel: string | undefined): void {
+  const model = (req.body as { model?: unknown }).model;
+  if (typeof model !== "string" || !model.startsWith("anthropic/")) return;
+  if (!upstreamModel || model === upstreamModel) return;
+  (req.body as { model: string }).model = upstreamModel;
+  req._ccRawBody = Buffer.from(JSON.stringify(req.body));
 }

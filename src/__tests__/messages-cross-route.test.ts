@@ -596,6 +596,34 @@ describe("mountMessagesCrossProviderRoute", () => {
     }
   });
 
+  it("strips the anthropic/ prefix discovery adds before the Anthropic proxy sees the body", async () => {
+    const app = express();
+    mountMessagesCrossProviderRoute(app, {
+      getOpenAIAccount: () => null,
+      forwardOpenAI: async () => new Response("unused"),
+    });
+    app.use("/v1/messages", (req, res) => {
+      res.json({ model: req._ccAnthropicModel, rawBody: req._ccRawBody?.toString("utf8") });
+    });
+
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+    try {
+      const res = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-mythos-5-2", messages: [{ role: "user", content: "hi" }] }),
+      });
+      const out = await res.json() as { model: string; rawBody: string };
+      expect(out.model).toBe("claude-mythos-5-2");
+      expect(JSON.parse(out.rawBody).model).toBe("claude-mythos-5-2");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+    }
+  });
+
   it("reports an explicit openai/* request so it is not invisible in logs", async () => {
     const onExplicitRoute = vi.fn();
     const app = express();
