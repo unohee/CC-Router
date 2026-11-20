@@ -471,10 +471,13 @@ health at 08:59Z, build d45639b): the two seats whose weeks reset inside the day
 cap, so the hundredth is the reading's age). Stranded minutes, with other seats under the cap and
 room to give: rigel 793, lyra 1393 (15 of each from before the scenario's start). The simulator's
 `live-week` run under the same policy predicted both resets and both unused shares (2%, within a
-reading's hundredth) and rigel's stranded minutes (780 predicted, 778 measured from the start on;
-two hour buckets around the deploys of #52–#54 hold 59 minutes, a handoff can skip a tick); lyra's it put at 956–1125 over eight seeds, 1378 measured, because
-the scenario started lyra at 97% from a reading four hours old while the live seat was already at
-the cap: the miss is in the captured starting state, not in placement. The 2% these seats leave is
+reading's hundredth). Both stranded figures fell outside its band: rigel's by 2 minutes of 780
+(0.3%; 778 measured from the start on against a band of zero width, since rigel sits at the cap
+until its reset under every seed; two hour buckets around the deploys of #52–#54 hold 59 minutes,
+a handoff can lose a tick), lyra's by 253 minutes (956–1125 over eight seeds, 1378 measured, 44%
+over the seed-3101 figure) because the scenario started lyra at 97% from a reading four hours old
+while the live seat was already at the cap: that miss is in the captured starting state, which the
+band does not cover, not in placement. The 2% these seats leave is
 the cap itself; a lower leftover means a higher `softCapUtil`, at the price of more 429s near the
 line. To redo the comparison at a later date, save health (and, for the from-the-start figures, the
 router's `quota-history.json`) and run `npx tsx scripts/balance-outcomes-report.mjs` (its header

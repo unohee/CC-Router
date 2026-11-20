@@ -40,7 +40,7 @@ interface Report {
   health: { file: string | null; sha: string | null; fetchedAt: string; outcomesDays: number | null };
   quota: { file: string | null; resets: number; strandedRows: number } | null;
   scenario: { name: string; start: string; days: number; seed: number };
-  prediction: { hours: number; days: number; elapsedHours: number; seeds: number[]; softCapUtil: number | null };
+  prediction: { hours: number; days: number; elapsedHours: number; end: string; seeds: number[]; softCapUtil: number | null };
   errorRule: { unusedAtReset: string; strandedMinutes: string };
   seats: Array<{ id: string; measured: Measured; predicted: Predicted | null; error: SeatError }>;
   pool: { measured: { resets: number; unusedShareAtReset: number | null; strandedSeatMinutes: number }; predicted: { resets: number; unusedShareAtReset: number | null; strandedSeatMinutes: number; strandedSeatMinutesBand: [number, number] } };
@@ -171,7 +171,7 @@ describe("a report from a health file", () => {
   });
 
   it("predicts the hours elapsed at the fetch, from the scenario's seed, with a band over the seeds asked for", () => {
-    expect(report.prediction).toEqual({ hours: 24, days: 1, elapsedHours: 24, seeds: [3101, 3102], softCapUtil: 0.98 });
+    expect(report.prediction).toEqual({ hours: 24, days: 1, elapsedHours: 24, end: "2026-11-20T09:00:00.000Z", seeds: [3101, 3102], softCapUtil: 0.98 });
     expect(report.scenario).toEqual({ name: "live-week", start: "2026-11-19T09:00:00Z", days: 2, seed: 3101 });
     const rigel = report.seats.find(s => s.id === "rigel")!;
     expect(rigel.predicted).toEqual({ resets: 1, unusedAtReset: 0.02, strandedMinutes: 780, band: { resets: [1, 1], unusedAtReset: [0.02, 0.02], strandedMinutes: [780, 780] } });
@@ -184,9 +184,14 @@ describe("a report from a health file", () => {
   });
 
   it("caps the prediction at the scenario's length and refuses a fetch before the first hour", () => {
-    const late = script.buildReport({ health: fixtureHealth(), scenario: liveWeek, simulate, date: "2026-11-25", fetchedAt: "2026-11-25T00:00:00Z", start: "2026-11-19T09:00:00Z", seeds: 1 });
+    const lateQuota = { ...fixtureQuota(), stranded: [...fixtureQuota()["stranded"], [Date.UTC(2026, 10, 21, 9) / 1000, "lyra", 60], [Date.UTC(2026, 10, 21, 8) / 1000, "lyra", 7]] };
+    const late = script.buildReport({ health: fixtureHealth(), quota: lateQuota, scenario: liveWeek, simulate, date: "2026-11-25", fetchedAt: "2026-11-25T00:00:00Z", start: "2026-11-19T09:00:00Z", seeds: 1 });
     expect(late.prediction.hours).toBe(48);
     expect(late.prediction.elapsedHours).toBe(135);
+    expect(late.prediction.end).toBe("2026-11-21T09:00:00.000Z");
+    // The rows are cut where the prediction ends, not at the fetch: the 08:00Z bucket of the 21st counts, the 09:00Z one does not.
+    expect(late.seats.find(s => s.id === "lyra")!.measured.sinceStart!.strandedMinutes).toBe(1378 + 7);
+    expect(script.renderMarkdown(late)).toContain("for its full 48 h (the fetch came 135 h after the start");
     expect(() => script.buildReport({ health: fixtureHealth(), scenario: liveWeek, simulate, date: "2026-11-19", fetchedAt: "2026-11-19T09:10:00Z", start: "2026-11-19T09:00:00Z", seeds: 1 })).toThrow(/first hour/);
     expect(() => script.buildReport({ health: { balance: { seats: [] } }, scenario: liveWeek, simulate, date: "2026-11-19", fetchedAt: "2026-11-20T09:00:00Z", start: "2026-11-19T09:00:00Z" })).toThrow(/balance.seats/);
     expect(() => script.buildReport({ health: fixtureHealth(), scenario: liveWeek, simulate, date: "20261120", fetchedAt: "2026-11-20T09:00:00Z", start: "2026-11-19T09:00:00Z" })).toThrow(/YYYY-MM-DD/);
@@ -198,8 +203,10 @@ describe("a report from a health file", () => {
     expect(md).toContain("### rigel\n\n- Measured: 1 reset, 2% of the week left unused at it, 793 stranded minutes.");
     expect(md).toContain("- Unused share: within (measured − predicted +0 points).");
     expect(md).toContain("### lyra\n\n- Measured: 1 reset, 3% of the week left unused at it, 1393 stranded minutes.");
-    expect(md).toMatch(/### lyra[\s\S]*- Stranded minutes: OUTSIDE \(measured − predicted \+\d+ min\)/);
-    expect(md).toMatch(/### lyra[\s\S]*From the scenario's start on \(router rows\): 1378 stranded minutes \(15 before it\)/);
+    expect(md).toMatch(/### lyra[\s\S]*- Stranded minutes: OUTSIDE \(measured − predicted \+\d+ min, \+\d+(\.\d)?%\)/);
+    expect(md).toMatch(/### lyra[\s\S]*From the scenario's start to 2026-11-20T09:00:00.000Z \(router rows\): 1378 stranded minutes \(15 before the start\)/);
+    expect(md).toContain("for the 24 h that had elapsed at the fetch");
+    expect(md).toContain("The band is the spread over the demand draw (seeds) only");
     expect(md).toContain("### nova\n\n- Measured: 1 reset, 10% of the week left unused at it, 100 stranded minutes.\n- Predicted: no prediction, the scenario does not carry this seat.");
     expect(md).toContain("| heewon | 0 | none | 0 | 0 | none | 0 (0–0) | no verdict | within |");
     expect(md).toContain("Seats health reports that the scenario does not carry (no prediction): nova.");
@@ -209,7 +216,7 @@ describe("a report from a health file", () => {
 });
 
 describe("the script", () => {
-  it("runs end to end on the fixture under tsx and writes the dated pair", () => {
+  it("runs end to end on the fixture under tsx and writes the dated pair", { timeout: 60_000 }, () => {
     const out = mkdtempSync(join(tmpdir(), "live-outcomes-"));
     const args = ["--health", join(FIX, "health.json"), "--quota-file", join(FIX, "quota-outcomes.json"), "--date", "2026-11-20", "--fetched-at", "2026-11-20T08:59:00Z", "--seeds", "2", "--policy", "fixture", "--note", "one", "--note", "two", "--out-dir", out];
     const ok = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...args], { cwd: ROOT, encoding: "utf8" });

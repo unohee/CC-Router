@@ -44,7 +44,14 @@
  * before the scenario's start; the simulated ones start at it. With
  * --quota-file, the router's on-disk quota-history.json (its `resets` and
  * `stranded` rows; the readings are not needed), the report also gives each
- * seat's stranded minutes and resets from the start on, and judges those too.
+ * seat's stranded minutes and resets from the start to where the prediction
+ * ends, and judges those too.
+ *
+ * The band covers the demand draw only (which sessions arrive when, how long
+ * they live, what they send): it does not cover the captured starting state
+ * (each seat's utilization from its newest reading at the start, which may be
+ * hours old) or the fitted seat sizes. A miss outside the band points at one
+ * of those, or at placement; the report cannot say which by itself.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -130,9 +137,11 @@ export function judge(measured, predicted) {
 const hoursBetween = (startIso, endIso) => (Date.parse(endIso) - Date.parse(startIso)) / HOUR_MS;
 
 /**
- * Per seat, what the router's own rows say happened from `start` on: stranded
- * minutes in hour buckets at or after it (a bucket that began before the
- * start, with its minutes, is listed as `before`) and the resets at or after it.
+ * Per seat, what the router's own rows say happened from `start` to `end`:
+ * stranded minutes in hour buckets that begin at or after the start and before
+ * the end (a bucket that began before the start, with its minutes, is listed
+ * as `before`; the end is on the hour, as the prediction's is) and the resets
+ * at or after the start up to the end.
  */
 export function sinceStart(quota, startIso, endIso) {
   const startSec = Math.floor(Date.parse(startIso) / 1000), endSec = Math.floor(Date.parse(endIso) / 1000);
@@ -140,7 +149,8 @@ export function sinceStart(quota, startIso, endIso) {
   const seat = id => (out[id] ??= { strandedMinutes: 0, strandedBefore: 0, resets: [] });
   for (const row of quota?.stranded ?? []) {
     const [hour, id, minutes] = row;
-    if (typeof id !== "string" || !Number.isFinite(hour) || !Number.isFinite(minutes) || hour > endSec) continue;
+    // A bucket is the hour from `hour` on; one that begins at or after the end lies outside the window.
+    if (typeof id !== "string" || !Number.isFinite(hour) || !Number.isFinite(minutes) || hour >= endSec) continue;
     if (hour >= startSec) seat(id).strandedMinutes += minutes;
     else seat(id).strandedBefore += minutes;
   }
@@ -168,7 +178,9 @@ export function buildReport({ health, scenario, simulate, date, fetchedAt, start
   const hours = Math.min(fullHours, elapsed);
   const seedList = Array.from({ length: seeds }, (_, i) => scenario.seed + i);
   const prediction = predict(scenario, simulate, { days: hours / 24, seeds: seedList });
-  const rows = quota ? sinceStart(quota, start, fetchedAt) : null;
+  // The rows are cut where the prediction ends: at the fetch, or at the scenario's length when the fetch came later.
+  const predictionEnd = new Date(Date.parse(start) + hours * HOUR_MS).toISOString();
+  const rows = quota ? sinceStart(quota, start, predictionEnd) : null;
 
   const seats = seatsIn.map(s => {
     const o = s.outcomes ?? { days: null, resets: 0, unusedAtReset: null, strandedMinutes: 0 };
@@ -203,7 +215,7 @@ export function buildReport({ health, scenario, simulate, date, fetchedAt, start
     health: { file: healthFile, sha: health.build?.sha ?? null, builtAt: health.build?.builtAt ?? null, fetchedAt, outcomesDays: seatsIn[0]?.outcomes?.days ?? null },
     quota: quota ? { file: quotaFile, resets: (quota.resets ?? []).length, strandedRows: (quota.stranded ?? []).length } : null,
     scenario: { name: scenario.name, start, days: scenario.days, seed: scenario.seed },
-    prediction: { hours, days: hours / 24, elapsedHours: elapsed, seeds: seedList, softCapUtil: scenario.routing?.softCapUtil ?? null },
+    prediction: { hours, days: hours / 24, elapsedHours: elapsed, end: predictionEnd, seeds: seedList, softCapUtil: scenario.routing?.softCapUtil ?? null },
     errorRule: ERROR_RULE,
     seats,
     pool: { measured: measuredPool, predicted: predictedPool, error: { strandedSeatMinutes: measuredPool.strandedSeatMinutes - predictedPool.strandedSeatMinutes } },
@@ -216,6 +228,9 @@ const pct = v => (v === null || v === undefined ? "none" : `${hundredths(v)}%`);
 const pct1 = v => (v === null || v === undefined ? "none" : `${(Math.round(v * 1000) / 10).toString()}%`);
 const pctRange = b => (b ? `${hundredths(b[0])}–${hundredths(b[1])}%` : "none");
 const yesno = v => (v === null ? "no verdict" : v ? "within" : "OUTSIDE");
+const signed = v => `${v >= 0 ? "+" : ""}${v}`;
+/** "+13 min, +1.7%" against the predicted minutes; no share when the prediction is 0. */
+const minutesErr = (err, predicted) => `${signed(err)} min${predicted > 0 ? `, ${signed(Math.round((err / predicted) * 1000) / 10)}%` : ""}`;
 
 /** The Markdown page a person reads. */
 export function renderMarkdown(r) {
@@ -223,7 +238,10 @@ export function renderMarkdown(r) {
   lines.push(`# Live outcomes vs the simulator, ${r.reportDate}`);
   lines.push("");
   lines.push(`Measured: health \`balance.seats[].outcomes\` from build ${r.health.sha ? r.health.sha.slice(0, 7) : "unknown"}, fetched ${r.health.fetchedAt}, over the last ${r.health.outcomesDays ?? "?"} days (saved as \`${r.health.file ?? "health.json"}\`).`);
-  lines.push(`Predicted: scenario \`${r.scenario.name}\` (start ${r.scenario.start}, ${r.scenario.days} days) simulated under policy ${r.policy} for the ${r.prediction.hours} h that had elapsed at the fetch, seed ${r.scenario.seed} with a band over seeds ${r.prediction.seeds[0]}–${r.prediction.seeds[r.prediction.seeds.length - 1]}; soft cap ${r.prediction.softCapUtil === null ? "none" : `${hundredths(r.prediction.softCapUtil)}%`}.`);
+  const span = r.prediction.elapsedHours > r.prediction.hours
+    ? `for its full ${r.prediction.hours} h (the fetch came ${r.prediction.elapsedHours} h after the start, so the measured window is longer than the simulated one)`
+    : `for the ${r.prediction.hours} h that had elapsed at the fetch`;
+  lines.push(`Predicted: scenario \`${r.scenario.name}\` (start ${r.scenario.start}, ${r.scenario.days} days) simulated under policy ${r.policy} ${span}, seed ${r.scenario.seed} with a band over seeds ${r.prediction.seeds[0]}–${r.prediction.seeds[r.prediction.seeds.length - 1]}; soft cap ${r.prediction.softCapUtil === null ? "none" : `${hundredths(r.prediction.softCapUtil)}%`}.`);
   lines.push("");
   lines.push("## Seats with a weekly reset");
   lines.push("");
@@ -239,11 +257,11 @@ export function renderMarkdown(r) {
     } else {
       lines.push(`- Predicted: ${p.resets} reset${p.resets === 1 ? "" : "s"}, ${pct(p.unusedAtReset)} unused (seeds ${pctRange(p.band.unusedAtReset)}), ${p.strandedMinutes} stranded minutes (seeds ${p.band.strandedMinutes[0]}–${p.band.strandedMinutes[1]}).`);
       lines.push(`- Unused share: ${yesno(e.withinError.unusedAtReset)}${e.unusedAtReset === null ? "" : ` (measured − predicted ${e.unusedAtReset >= 0 ? "+" : ""}${hundredths(e.unusedAtReset)} points)`}.`);
-      lines.push(`- Stranded minutes: ${yesno(e.withinError.strandedMinutes)} (measured − predicted ${e.strandedMinutes >= 0 ? "+" : ""}${e.strandedMinutes} min).`);
+      lines.push(`- Stranded minutes: ${yesno(e.withinError.strandedMinutes)} (measured − predicted ${minutesErr(e.strandedMinutes, p.strandedMinutes)}).`);
       if (m.sinceStart) {
         const ss = m.sinceStart;
         const resets = ss.resets.map(x => `${x.at} at ${hundredths(x.util)}% (${pct(x.unused)} unused)`).join("; ") || "none";
-        lines.push(`- From the scenario's start on (router rows): ${ss.strandedMinutes} stranded minutes (${ss.strandedBefore} before it), reset ${resets}: ${yesno(e.withinError.strandedMinutesSinceStart)} (${e.strandedMinutesSinceStart >= 0 ? "+" : ""}${e.strandedMinutesSinceStart} min).`);
+        lines.push(`- From the scenario's start to ${r.prediction.end} (router rows): ${ss.strandedMinutes} stranded minutes (${ss.strandedBefore} before the start), reset ${resets}: ${yesno(e.withinError.strandedMinutesSinceStart)} (${minutesErr(e.strandedMinutesSinceStart, p.strandedMinutes)}).`);
       }
     }
     lines.push("");
@@ -264,7 +282,8 @@ export function renderMarkdown(r) {
   lines.push("");
   lines.push(`- Unused share: ${r.errorRule.unusedAtReset}.`);
   lines.push(`- Stranded minutes: ${r.errorRule.strandedMinutes}.`);
-  lines.push(`- The measured outcomes cover health's window (${r.health.outcomesDays ?? "?"} days) and may include minutes recorded before the scenario's start; the simulated ones start at it.${r.quota ? ` The router's own rows (\`${r.quota.file ?? "quota-history.json"}\`) give the minutes from the start on, judged on the same band.` : ""}`);
+  lines.push(`- The band is the spread over the demand draw (seeds) only: it does not cover the captured starting state (each seat's utilization from its newest reading at the start, possibly hours old) or the fitted seat sizes. A miss outside it points at one of those, or at placement; the report cannot say which by itself.`);
+  lines.push(`- The measured outcomes cover health's window (${r.health.outcomesDays ?? "?"} days) and may include minutes recorded before the scenario's start; the simulated ones start at it.${r.quota ? ` The router's own rows (\`${r.quota.file ?? "quota-history.json"}\`) give the minutes from the start to where the prediction ends, judged on the same band.` : ""}`);
   if (r.coverage.notInScenario.length) lines.push(`- Seats health reports that the scenario does not carry (no prediction): ${r.coverage.notInScenario.join(", ")}.`);
   if (r.coverage.notInHealth.length) lines.push(`- Seats the scenario carries that health does not report: ${r.coverage.notInHealth.join(", ")}.`);
   if (r.notes.length) {

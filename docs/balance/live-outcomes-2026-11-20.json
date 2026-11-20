@@ -23,6 +23,7 @@
     "hours": 24,
     "days": 1,
     "elapsedHours": 24,
+    "end": "2026-11-20T09:00:00.000Z",
     "seeds": [
       3101,
       3102,
@@ -287,9 +288,9 @@
     "notInHealth": []
   },
   "notes": [
-    "The router's first stranded row is the 08:00Z hour of the 19th with 15 minutes: outcomes have been recorded since about 08:45Z that day (the run-2 deploy), 15 minutes before the scenario's start, when rigel and lyra were already at the cap. Health's figures carry those 15 minutes; the from-the-start figures do not.",
+    "The router's first stranded row is the 08:00Z hour of the 19th with 15 minutes, consistent with the deploy of PR #51 (merged 08:43Z that day), which added the stranded tick: outcomes exist from about 08:45Z, 15 minutes before the scenario's start, when rigel and lyra were already at the cap. Health's figures carry those 15 minutes; the from-the-start figures do not.",
     "lyra's reset row carries 97% from its last hourly reading, while the stranded judgment read the pool's live value at or past the 98% cap: the hundredth between them is the reading's age, not quota left. Both seats stopped at the soft cap; the 2% they leave is the cap.",
-    "lyra's stranded minutes miss because of the captured starting state, not placement: the scenario starts lyra at 97% from a reading four hours old, so the simulated seat reaches the cap hours into the run, while the live seat was at the cap from the first minute (59 minutes stranded in the 09:00Z hour).",
-    "rigel from the start on: 778 measured against 780 predicted. The 09:00Z and 10:00Z hour buckets hold 59 minutes each, around the deploys of #52, #53 and #54; a supervisor handoff can skip one tick."
+    "lyra's stranded minutes miss because of the captured starting state, not placement: the scenario starts lyra at 97% from a reading four hours old, so the simulated seat reaches the cap hours into the run, while the live seat was at the cap from the first minute (59 minutes stranded in the 09:00Z hour). The band does not cover the starting state.",
+    "rigel from the start on: 778 measured against 780 predicted, outside a band of zero width (rigel sits at the cap until its reset under every seed) by two minutes, 0.3%. The 09:00Z and 10:00Z hour buckets hold 59 minutes each, around the deploys of #52, #53 and #54: the tick is a setInterval in server.ts, so a new worker's first tick comes a minute after it starts, and a handoff can lose one."
   ]
 }
