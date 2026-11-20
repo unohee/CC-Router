@@ -16,7 +16,13 @@
  * 1. Start: every account's newest reading at or before the start hour; an
  *    account with none is skipped.
  * 2. Seats: weekly and 5-hour utilization and reset from that reading (a reset
- *    of 0 or in the past is a fresh week). Weekly size is the seat-size.ts
+ *    of 0 or in the past is a fresh week), or from health's
+ *    accounts[].rateLimits when that is newer: the hourly reading can be
+ *    hours old at the start (live-week's lyra was four), while health carries
+ *    the live value from the last response's headers with its `lastUpdated`.
+ *    Health is used only when its lastUpdated is newer than the reading and
+ *    not past the end of the start hour (a value from later than that is the
+ *    seat's future, not its start). Every seat's source and age go in notes. Weekly size is the seat-size.ts
  *    pairing (same window, utilization and spend non-decreasing, >= 3 pairs,
  *    >= 0.08 moved, error band 0.01 / moved) over readings up to the start;
  *    unmeasured seats take capacityWeight x the median measured size, the
@@ -114,12 +120,45 @@ export function measureWindow(readings, window, nowMs) {
   return { tokens: tokens / moved, samples, moved, spanHours, errorBand: UTIL_ROUNDING / moved };
 }
 
-/** Seats at `startMs` from the quota history view. Returns { seats, details, notes }. */
-export function fitSeats(quota, startMs, routing = {}) {
+/**
+ * The starting state of one seat: the newest quota-history reading at or
+ * before the start, or health's live rate limits for it when those are newer
+ * than that reading and taken before the start hour ended. `ageH` is how long
+ * before the end of the start hour the value was taken (0 at the hour's end).
+ */
+export function startState(reading, account, startMs) {
+  const endMs = startMs + HOUR_MS;
+  const fromReading = {
+    source: "quota-history", takenAt: reading.sampledAt,
+    sevenDay: { util: reading.sevenDay.util, resetAt: reading.sevenDay.resetAt },
+    fiveHour: { util: reading.fiveHour.util, resetAt: reading.fiveHour.resetAt },
+  };
+  const rl = account?.rateLimits;
+  const at = rl?.lastUpdated;
+  let why;
+  if (!account) why = "not in health";
+  else if (!rl || !isNum(at) || at <= 0) why = "health has no rate-limit reading";
+  else if (at <= reading.sampledAt) why = `health's reading (${iso(at)}) is not newer`;
+  else if (at > endMs) why = `health's reading (${iso(at)}) is after the start hour`;
+  else if (!isNum(rl.sevenDayUtil) || !isNum(rl.sevenDayReset) || rl.sevenDayReset <= 0) why = "health's weekly window is unknown";
+  if (why) return { ...fromReading, ageH: round1((endMs - reading.sampledAt) / HOUR_MS), why };
+  const fiveKnown = isNum(rl.fiveHourUtil) && isNum(rl.fiveHourReset) && rl.fiveHourReset > 0;
+  return {
+    source: "health", takenAt: at,
+    sevenDay: { util: rl.sevenDayUtil, resetAt: rl.sevenDayReset },
+    fiveHour: fiveKnown ? { util: rl.fiveHourUtil, resetAt: rl.fiveHourReset } : fromReading.fiveHour,
+    ageH: round1((endMs - at) / HOUR_MS),
+    why: `newer than the quota-history reading of ${iso(reading.sampledAt)}${fiveKnown ? "" : "; its 5-hour window is unknown, so that one is the reading's"}`,
+  };
+}
+
+/** Seats at `startMs` from the quota history view (and health's live rate limits, see `startState`). Returns { seats, details, notes }. */
+export function fitSeats(quota, startMs, routing = {}, health = undefined) {
   checkQuota(quota);
   if (!isNum(startMs)) fail("start: not a time");
   const startSec = startMs / 1000;
   const notes = [], details = {};
+  const accounts = new Map((Array.isArray(health?.accounts) ? health.accounts : []).filter(a => a && typeof a.id === "string").map(a => [a.id, a]));
   const fitted = [];
   for (const a of quota.accounts) {
     const upTo = a.readings.filter(r => r.hour <= startMs);
@@ -134,7 +173,8 @@ export function fitSeats(quota, startMs, routing = {}) {
   const weights = routing?.balance?.capacityWeight;
   const seats = [];
   for (const f of fitted) {
-    const d = { readingHour: iso(f.now.hour), samples: f.week.samples, moved: Number(f.week.moved.toFixed(4)), spanHours: round1(f.week.spanHours), errorBand: f.week.errorBand, capSource: "measured" };
+    const st = startState(f.now, accounts.get(f.id), startMs);
+    const d = { readingHour: iso(f.now.hour), startSource: st.source, startTakenAt: iso(st.takenAt), startAgeH: st.ageH, samples: f.week.samples, moved: Number(f.week.moved.toFixed(4)), spanHours: round1(f.week.spanHours), errorBand: f.week.errorBand, capSource: "measured" };
     let weeklyCap;
     if (f.week.tokens !== null) {
       weeklyCap = Math.round(f.week.tokens);
@@ -151,16 +191,17 @@ export function fitSeats(quota, startMs, routing = {}) {
     else if (f.everFive) { fiveHourCap = Math.round(FIVE_HOUR_SHARE * weeklyCap); d.fiveCapSource = "assumed"; notes.push(`${f.id}: 5-hour cap ASSUMED ${FIVE_HOUR_SHARE * 100}% of the week (not measurable from ${f.five.samples} pairs).`); }
     else { fiveHourCap = 0; d.fiveCapSource = "none"; notes.push(`${f.id}: never reported a 5-hour window; fiveHourCap 0.`); }
     const seat = { id: f.id, weeklyCap, fiveHourCap, weeklyUtil: 0, weeklyResetH: 168 };
-    const wr = f.now.sevenDay.resetAt;
-    if (wr > startSec) { seat.weeklyUtil = f.now.sevenDay.util; seat.weeklyResetH = Math.min(168, round1((wr - startSec) / 3600)); }
+    notes.push(`${f.id}: start state from ${st.source} taken ${iso(st.takenAt)}, ${st.ageH} h before the start hour ended (${st.why}).`);
+    const wr = st.sevenDay.resetAt;
+    if (wr > startSec) { seat.weeklyUtil = st.sevenDay.util; seat.weeklyResetH = Math.min(168, round1((wr - startSec) / 3600)); }
     else notes.push(`${f.id}: weekly reset ${wr === 0 ? "unknown" : "already passed"} at the start; modelled as a fresh week (util 0, reset in 168 h).`);
-    const fr = f.now.fiveHour.resetAt;
-    if (fr > startSec) { seat.fiveHourUtil = f.now.fiveHour.util; seat.fiveHourResetMin = Math.round((fr - startSec) / 60);
+    const fr = st.fiveHour.resetAt;
+    if (fr > startSec) { seat.fiveHourUtil = st.fiveHour.util; seat.fiveHourResetMin = Math.round((fr - startSec) / 60);
       // The reading can be taken late in the start hour, so its reset can lie
       // past a full window from the hour's start; no window is longer than 5 h.
       if (seat.fiveHourResetMin > 300) { notes.push(`${f.id}: 5-hour reset ${seat.fiveHourResetMin} min after the start hour, clamped to 300.`); seat.fiveHourResetMin = 300; }
     }
-    if (f.now.hour < startMs) notes.push(`${f.id}: newest reading is ${round1((startMs - f.now.hour) / HOUR_MS)} h before the start; its utilization may be stale.`);
+    if (st.source === "quota-history" && f.now.hour < startMs) notes.push(`${f.id}: newest reading is ${round1((startMs - f.now.hour) / HOUR_MS)} h before the start; its utilization may be stale.`);
     seats.push(seat);
     details[f.id] = d;
   }
@@ -303,7 +344,7 @@ export function buildScenario({ quota, series, usage, config, health, startMs, d
   if (!config || typeof config !== "object") fail("config: expected an object");
   const routing = config.routing && typeof config.routing === "object" ? config.routing : {};
   notes.push(routing !== config.routing ? "config has no routing block; routing is {}." : "routing: config.routing verbatim.");
-  const s = fitSeats(quota, startMs, routing);
+  const s = fitSeats(quota, startMs, routing, health);
   const d = fitDemand(series, usage, health, { window });
   const t = fitThrottle(config, health);
   // The simulator's clock starts at 00:00 UTC while the seats are in their
@@ -364,7 +405,7 @@ function main() {
   for (const s of scenario.seats) {
     const d = details[s.id];
     const band = d.errorBand !== null ? ` +/-${(d.errorBand * 100).toFixed(1)}%` : "";
-    console.log(`  ${s.id}: week ${(s.weeklyUtil * 100).toFixed(0)}% reset ${s.weeklyResetH} h, cap ${(s.weeklyCap / 1e6).toFixed(0)}M (${d.capSource}, ${d.samples} pairs${band}), 5h cap ${(s.fiveHourCap / 1e6).toFixed(1)}M (${d.fiveCapSource})`);
+    console.log(`  ${s.id}: week ${(s.weeklyUtil * 100).toFixed(0)}% reset ${s.weeklyResetH} h (${d.startSource}, ${d.startAgeH} h old), cap ${(s.weeklyCap / 1e6).toFixed(0)}M (${d.capSource}, ${d.samples} pairs${band}), 5h cap ${(s.fiveHourCap / 1e6).toFixed(1)}M (${d.fiveCapSource})`);
   }
   const dm = scenario.demand;
   console.log(`  demand: ${Math.round(requestsPerDay)} req/day, ${dm.sessionsPerDay} sessions/day, requestChance ${dm.requestChance}, input ${dm.freshInput}, output ${dm.output}, prefix ${dm.prefix.start}+${dm.prefix.perRequest}/req`);
