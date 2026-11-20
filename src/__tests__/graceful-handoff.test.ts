@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { freezePersistence, thawPersistence, persistenceFrozen } from "../config/persistence-gate.js";
 import { writeUsageFile } from "../config/usage-store.js";
@@ -137,6 +138,17 @@ describe("reload under the supervisor", { timeout: 90_000 }, () => {
     expect(upstream!.staleTokens).toBe(0);
     expect(oauth!.calls).toBe(4);
     expect(after.accounts.every(a => a.auth.state === "ok")).toBe(true);
+
+    // The broken double: a worker still holding the token the other one
+    // rotated (vega.a1; both workers refreshed vega, so vega.a2 is current).
+    // Sent straight to the fake upstream it is refused and counted, so the
+    // zero above is a measurement and not a counter that cannot move.
+    const port = (upstream!.server.address() as AddressInfo).port;
+    const stale = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST", headers: { authorization: "Bearer vega.a1", "content-type": "application/json" }, body: "{}",
+    });
+    expect(stale.status).toBe(401);
+    expect(upstream!.staleTokens).toBe(1);
   });
 
   it("replaces a worker that crashes, on the same port", async () => {
