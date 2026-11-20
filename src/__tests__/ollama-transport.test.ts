@@ -303,18 +303,27 @@ describe("forwardToOllama", () => {
   });
 
   it("bounds a non-streaming answer by inactivity, not by total time", async () => {
+    // Chunks GAP_MS apart for longer than IDLE_MS in all: a total-time bound
+    // cuts it, an idle bound does not. The gap is a small fraction of the
+    // bound so a loaded host's scheduling delay cannot open a silence of
+    // IDLE_MS between two chunks (a 30 ms gap under a 150 ms bound did, with
+    // four suites at once, 2026-11-20). Mutation checked by hand: without
+    // `idle.arm()` in transport.ts readAll the timer runs from the response
+    // headers and this fails with reason "invalid_response" (aborted mid-body).
+    const IDLE_MS = 1_500, GAP_MS = 100, SLICE = 10;
     const body = JSON.stringify({ id: "m", type: "message", role: "assistant", model: "glm:cloud", content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "hi" }], usage: { input_tokens: 1, output_tokens: 1 } });
+    expect(Math.ceil(body.length / SLICE) * GAP_MS).toBeGreaterThan(IDLE_MS);
     const base = await upstream((req, res) => {
       req.resume();
       res.writeHead(200, { "content-type": "application/json" });
       let i = 0;
       const tick = setInterval(() => {
-        res.write(body.slice(i, i + 10)); i += 10;
+        res.write(body.slice(i, i + SLICE)); i += SLICE;
         if (i >= body.length) { clearInterval(tick); res.end(); }
-      }, 30); // well over 150ms in total
+      }, GAP_MS);
     });
     const res = new FakeRes();
-    expect(await forward(base, res, 150, false)).toMatchObject({ ok: true, status: 200 });
+    expect(await forward(base, res, IDLE_MS, false)).toMatchObject({ ok: true, status: 200 });
     expect(JSON.parse(res.body)).toMatchObject({ model: "claude-sonnet-4-6", content: [{ type: "text", text: "hi" }] });
   });
 });
