@@ -125,7 +125,17 @@ const failures = (outcomes: Outcome[]) => outcomes.filter(o => o.startsWith("fai
 // ─── The suite ──────────────────────────────────────────────────────────────
 
 const HOUR = 3_600_000;
-const GUARD_ENV = { CC_ROUTER_FIRST_BYTE_MS: "600", CC_ROUTER_STREAM_IDLE_MS: "600" };
+// The router's first-byte and idle guards, shortened so "silent" and "stall"
+// trip them in seconds instead of the production minutes. Not shorter than a
+// loaded host takes to pass a healthy answer through two processes: at 600 ms
+// the healthy seat's own answer was once judged silent while four suites ran
+// at once (2026-11-20: "mixed chaos" relayed 401s, 504s and 429s after its
+// only good seat timed out), so a hang and a slow host looked alike. 3 s is
+// far above any healthy hop seen under load and still well inside the
+// client's 20 s patience in `outcomeOf`; the faults that must trip the guards
+// never answer at all, so they trip it at any bound. The control test at the
+// end is the broken double: with the idle guard off, the same stall hangs.
+const GUARD_ENV = { CC_ROUTER_FIRST_BYTE_MS: "3000", CC_ROUTER_STREAM_IDLE_MS: "3000" };
 
 describe("never cut while another seat has quota", { timeout: 120_000 }, () => {
   let router: RouterRun | undefined;
