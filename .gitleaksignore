@@ -5,3 +5,4 @@
 # line moving; the fingerprints below record what was reviewed.
 src/__tests__/balance-outcomes.test.ts:generic-api-key:245
 src/__tests__/balance-observability.test.ts:generic-api-key:220
+src/__tests__/balance-explore.test.ts:generic-api-key:186
