@@ -2,7 +2,27 @@ import type { Account } from "./types.js";
 
 export function modelLimitKey(model?: string): string {
   const name = (model ?? "").toLowerCase().replace(/^anthropic\//, "").replace(/\[.*\]$/, "");
-  return name.match(/^claude-(fable|opus|sonnet|haiku)(?:-|$)/)?.[1] ?? name;
+  return name.match(/^claude-(fable|mythos|opus|sonnet|haiku)(?:-|$)/)?.[1] ?? name;
+}
+
+const GATED_FAMILIES = new Set(["fable", "mythos", "opus", "sonnet", "haiku"]);
+
+/**
+ * Whether this account's upstream model list shows it cannot serve `model`.
+ *
+ * Access to some families (Mythos via CVP) is granted per organisation, so a
+ * mixed pool must not hand such a request to an account that was never
+ * granted it. Compares by family: an account that lists any model of the
+ * requested family is assumed able to serve it. Unknown lists, unknown
+ * families and missing models never gate — absence of evidence keeps the old
+ * behaviour.
+ */
+export function lacksModel(account: Account, model?: string): boolean {
+  const listed = account.anthropicModels;
+  if (!model || !listed || listed.length === 0) return false;
+  const family = modelLimitKey(model);
+  if (!GATED_FAMILIES.has(family)) return false;
+  return !listed.some(id => modelLimitKey(id) === family);
 }
 
 /** Only verified model-scoped claims may avoid the account-wide cooldown. */

@@ -1,6 +1,6 @@
 import type { Account, AccountRecord, OAuthTokens } from "./types.js";
 import type { PinBlock } from "./session-migration.js";
-import { cooldownDeadline } from "./model-cooldown.js";
+import { cooldownDeadline, lacksModel } from "./model-cooldown.js";
 import { DEFAULT_RATE_LIMITS, ACCOUNT_USER_DEFAULTS, clampPercent } from "./types.js";
 
 export class EmptyPoolError extends Error {
@@ -212,7 +212,7 @@ export class TokenPool {
       // must never be bypassed: doing so was the key-rotation deadlock seen in
       // production, where the same account received every retry after both
       // accounts had returned 429.
-      const notBlocked = healthy.filter(a => !needsRelogin(a) && isNotBlocked(a, model));
+      const notBlocked = healthy.filter(a => !needsRelogin(a) && isNotBlocked(a, model) && !this.excludedFor(a, model));
       const healthyUsable = notBlocked.filter(isUsable);
       if (healthyUsable.length > 0) {
         return this.markSelected(healthyUsable.reduce((best, a) =>
@@ -286,7 +286,8 @@ export class TokenPool {
     const a = this.getById(id);
     if (!a) return false;
     clearExpiredCooldown(a, this.onCooldownExpired);
-    return a.healthy && needsRelogin(a) && a.tokens.expiresAt > Date.now() && isNotBlocked(a, model);
+    return a.healthy && needsRelogin(a) && a.tokens.expiresAt > Date.now() && isNotBlocked(a, model)
+      && !this.excludedFor(a, model);
   }
 
   /**
@@ -306,7 +307,8 @@ export class TokenPool {
     // A 429/529 cooldown is upstream telling us to stop, which a pin must
     // respect.
     const cooling = isCooling(a, model);
-    return a.healthy && !needsRelogin(a) && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a);
+    return a.healthy && !needsRelogin(a) && !cooling && a.rateLimits.status !== "rate_limited" && isUsable(a)
+      && !this.excludedFor(a, model);
   }
 
   /**
@@ -341,7 +343,20 @@ export class TokenPool {
   }
 
   private isAvailable(a: Account, model?: string): boolean {
-    return a.healthy && !needsRelogin(a) && !a.busy && !isCooling(a, model) && a.rateLimits.status !== "rate_limited" && isUsable(a);
+    return a.healthy && !needsRelogin(a) && !a.busy && !isCooling(a, model) && a.rateLimits.status !== "rate_limited" && isUsable(a)
+      && !this.excludedFor(a, model);
+  }
+
+  /**
+   * Whether `a` must be skipped because upstream does not list `model` for it.
+   *
+   * Applied only while some enabled account does list it: when none does, the
+   * request goes out as before so the client sees upstream's own error rather
+   * than a router wait that never ends.
+   */
+  private excludedFor(a: Account, model?: string): boolean {
+    if (!lacksModel(a, model)) return false;
+    return this.accounts.some(o => o.enabled && !lacksModel(o, model));
   }
 
   /** Optional listener fired when a request is routed to a capped account

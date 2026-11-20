@@ -58,6 +58,7 @@ describe("writeClaudeSettings", () => {
     writeClaudeSettings(3456);
     const written = JSON.parse(fs.readFileSync(settingsPath(), "utf-8"));
     expect(written.env.ANTHROPIC_AUTH_TOKEN).toBe("proxy-managed");
+    expect(written.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
   });
 
   it("merges with existing settings — preserves other top-level keys", () => {

@@ -27,6 +27,32 @@ describe("mountModelsRoute", () => {
     });
   });
 
+  it("answers Anthropic clients with bare ids in Anthropic list format", async () => {
+    const app = express();
+    mountModelsRoute(app, {
+      getAnthropicAccounts: () => [makeAnthropicAccount(), makeAnthropicAccount("claude-2")],
+      getOpenAIAccounts: () => [makeOpenAIAccount()],
+      fetchAnthropicModels: async account => account.id === "claude-2"
+        ? ["claude-sonnet-4-6", "claude-mythos-5-2"]
+        : ["claude-sonnet-4-6"],
+      fetchOpenAIModels: async () => ["gpt-5-codex"],
+    });
+
+    const body = await requestJson(app, "/v1/models?limit=1000", {
+      headers: { "anthropic-version": "2023-06-01" },
+    });
+
+    expect(body).toEqual({
+      data: [
+        { type: "model", id: "claude-mythos-5-2", display_name: "claude-mythos-5-2" },
+        { type: "model", id: "claude-sonnet-4-6", display_name: "claude-sonnet-4-6" },
+      ],
+      has_more: false,
+      first_id: "claude-mythos-5-2",
+      last_id: "claude-sonnet-4-6",
+    });
+  });
+
   it("also exposes Codex CLI compatible model entries", async () => {
     const app = express();
 
