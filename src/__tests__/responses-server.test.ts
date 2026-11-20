@@ -230,6 +230,13 @@ describe("mountResponsesRoutes", () => {
 
   it("streams upstream Responses SSE chunks without waiting for the full body", async () => {
     const app = express();
+    // The upstream holds its stream open until the client has read the first
+    // chunk. A router that buffered the whole body would never send headers,
+    // so the check is by order of events, not by a wall-clock window: a 50 ms
+    // window failed on a loaded host (four suites at once) with nothing buffered.
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const STALL_MS = 2_000;
 
     mountResponsesRoutes(app, {
       getOpenAIAccount: () => ({
@@ -245,10 +252,10 @@ describe("mountResponsesRoutes", () => {
           start(controller) {
             const encoder = new TextEncoder();
             controller.enqueue(encoder.encode("data: {\"type\":\"response.created\"}\n\n"));
-            setTimeout(() => {
+            void released.then(() => {
               controller.enqueue(encoder.encode("data: {\"type\":\"response.completed\"}\n\n"));
               controller.close();
-            }, 100);
+            });
           },
         }) as BodyInit,
         {
@@ -270,7 +277,7 @@ describe("mountResponsesRoutes", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ model: "openai/gpt-5.5", input: [], stream: true }),
         }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("response headers were buffered")), 50)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("response headers were buffered")), STALL_MS)),
       ]);
 
       expect(res.status).toBe(200);
@@ -280,11 +287,13 @@ describe("mountResponsesRoutes", () => {
 
       const firstChunk = await Promise.race([
         reader.read(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("first chunk was buffered")), 50)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("first chunk was buffered")), STALL_MS)),
       ]);
       expect(new TextDecoder().decode(firstChunk.value)).toContain("response.created");
+      expect(new TextDecoder().decode(firstChunk.value)).not.toContain("response.completed");
       await reader.cancel();
     } finally {
+      release();
       await new Promise<void>((resolve, reject) => {
         server.close(err => err ? reject(err) : resolve());
       });
