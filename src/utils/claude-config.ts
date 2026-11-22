@@ -45,6 +45,9 @@ export function writeClaudeSettings(port: number, baseUrl?: string, authToken?: 
       // Explicit authToken wins (client mode points at a remote secret); otherwise
       // uses the local proxy secret, or the open placeholder if neither is set.
       ANTHROPIC_AUTH_TOKEN: authToken ?? readConfig().proxySecret ?? "proxy-managed",
+      // Off by default in Claude Code: without it /model shows only the
+      // built-in list and never the router's /v1/models (e.g. Mythos via CVP).
+      [GATEWAY_DISCOVERY_ENV]: "1",
     },
   };
 
@@ -63,6 +66,7 @@ export function removeClaudeSettings(): void {
     if (env) {
       delete env["ANTHROPIC_BASE_URL"];
       delete env["ANTHROPIC_AUTH_TOKEN"];
+      delete env[GATEWAY_DISCOVERY_ENV];
       // Only meaningful against the router's pool 429; see setRetryWatchdog.
       delete env[RETRY_WATCHDOG_ENV];
       if (Object.keys(env).length === 0) delete existing["env"];
@@ -74,6 +78,8 @@ export function removeClaudeSettings(): void {
 }
 
 export const RETRY_WATCHDOG_ENV = "CLAUDE_CODE_RETRY_WATCHDOG";
+/** Makes Claude Code fill /model from the router's GET /v1/models at startup. */
+export const GATEWAY_DISCOVERY_ENV = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 
 /**
  * Opt in to (or out of) Claude Code's retry watchdog in ~/.claude/settings.json.

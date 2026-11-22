@@ -48,6 +48,10 @@ export interface Account {
   coolingUntil?: number;
   /** Runtime-only deadlines per model family; independent of global cooldown. */
   modelCooldowns?: Record<string, number>;
+  /** Runtime-only: model ids upstream's /v1/models listed for this account at
+   *  the last successful discovery. Drives per-account model gating
+   *  (model-cooldown.ts `lacksModel`). Never persisted. */
+  anthropicModels?: string[];
   /** Runtime-only: consecutive "bare" 429s (no stated reason) since the last
    *  success. Drives the escalating cooldown in model-cooldown.ts; never
    *  persisted — `serialize` picks fields explicitly. */

@@ -49,7 +49,22 @@ export function mountModelsRoute(app: Express, opts: ModelsRouteOptions): void {
   const fetchOpenAI = opts.fetchOpenAIModels ?? fetchOpenAICodexModels;
   const prepareOpenAIAccount = opts.prepareOpenAIAccount ?? (async () => true);
 
-  app.get("/v1/models", async (_req: Request, res: Response) => {
+  app.get("/v1/models", async (req: Request, res: Response) => {
+    // Anthropic clients (Claude Code's gateway discovery, Claude Desktop) send
+    // anthropic-version and expect Anthropic's shape with the ids upstream
+    // accepts. Prefixed "anthropic/<id>" rows would sit in /model as
+    // duplicates of the built-in entries under names it does not recognise.
+    if (req.headers["anthropic-version"]) {
+      const ids = await discoverAnthropicModelIds(opts.getAnthropicAccounts(), fetchAnthropic);
+      res.json({
+        data: ids.map(id => ({ type: "model", id, display_name: id })),
+        has_more: false,
+        first_id: ids[0] ?? null,
+        last_id: ids[ids.length - 1] ?? null,
+      });
+      return;
+    }
+
     const models = await discoverModelList(opts, prepareOpenAIAccount, fetchAnthropic, fetchOpenAI);
 
     const body: OpenAIModelList = {
@@ -116,16 +131,34 @@ function currentModelRouting(opts: ModelsRouteOptions): ModelRoutingConfig {
   return opts.getModelRouting?.() ?? opts.modelRouting ?? {};
 }
 
+/**
+ * Every Anthropic model id any enabled account lists, sorted and deduplicated.
+ *
+ * Also remembers each account's own list so the pool can keep requests for
+ * per-organisation models (Mythos via CVP) off accounts that lack them. An
+ * empty or failed read leaves that account's last list alone.
+ */
+export async function discoverAnthropicModelIds(
+  accounts: Account[],
+  fetchAnthropic: FetchAnthropicModels,
+): Promise<string[]> {
+  const enabledAccounts = accounts.filter(account => account.enabled !== false);
+  const results = await Promise.allSettled(enabledAccounts.map(account => fetchAnthropic(account)));
+  const ids = new Set<string>();
+  results.forEach((result, i) => {
+    if (result.status !== "fulfilled") return;
+    if (result.value.length > 0) enabledAccounts[i].anthropicModels = result.value;
+    for (const id of result.value) ids.add(id);
+  });
+  return [...ids].sort();
+}
+
 async function discoverAnthropicModels(
   accounts: Account[],
   fetchAnthropic: FetchAnthropicModels,
 ): Promise<OpenAIModel[]> {
-  const enabledAccounts = accounts.filter(account => account.enabled !== false);
-  const results = await Promise.allSettled(enabledAccounts.map(account => fetchAnthropic(account)));
-  return results.flatMap(result => {
-    if (result.status !== "fulfilled") return [];
-    return result.value.map(id => modelEntry(`anthropic/${id}`, "anthropic_subscription"));
-  });
+  const ids = await discoverAnthropicModelIds(accounts, fetchAnthropic);
+  return ids.map(id => modelEntry(`anthropic/${id}`, "anthropic_subscription"));
 }
 
 async function discoverOpenAIModels(

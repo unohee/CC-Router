@@ -63,11 +63,11 @@ import { seatSizes, type SeatSize } from "./seat-size.js";
 import { balanceView } from "./balance-view.js";
 import { mountResponsesRoutes } from "./responses-server.js";
 import { createTierDiscovery, fetchOllamaCandidates } from "../providers/tier-matching.js";
-import { fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
+import { fetchAnthropicModels, fetchOpenAICodexModelCatalog } from "../providers/model-discovery.js";
 import { mountMessagesCrossProviderRoute } from "./messages-cross-route.js";
 import { SessionRouter } from "./session-router.js";
 import type { SessionTarget } from "./session-router.js";
-import { mountModelsRoute } from "./models-server.js";
+import { discoverAnthropicModelIds, mountModelsRoute } from "./models-server.js";
 import { mountWebDashboard } from "./web-dashboard.js";
 import { normalizeBlockedUserAgents, matchBlockedUserAgent, blockedClientError, createBlockLogGate } from "./client-block.js";
 import type { ModelRoutingConfig } from "../protocol/model-ref.js";
@@ -1269,6 +1269,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     },
     prepareOpenAIAccount: (account) => prepareOpenAIAccountForRequest(account, openAIAccounts, saveOpenAIAccounts),
   });
+
+  // Learn each account's model list without waiting for a client to ask, so
+  // per-account gating (Mythos via CVP) is in force from the first request.
+  const refreshAccountModels = () => {
+    discoverAnthropicModelIds(pool.getAll(), fetchAnthropicModels).catch(() => {});
+  };
+  setTimeout(refreshAccountModels, 5_000).unref();
+  setInterval(refreshAccountModels, 30 * 60_000).unref();
 
   mountResponsesRoutes(app, {
     getOpenAIAccount: pickOpenAIAccount,
