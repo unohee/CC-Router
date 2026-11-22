@@ -1384,7 +1384,7 @@ const SCRIPT = String.raw`
     return true;
   }
 
-  function pct(x) { return Math.round(x * 100) + "%"; }
+  function pct(x) { return x > 0 && x < 0.005 ? "<1%" : Math.round(x * 100) + "%"; }
   function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
   function breakdown(t) {
     return "input " + num(t.input) + " · output " + num(t.output) + " · cache read " + num(t.cacheRead) + " · cache write " + num(t.cacheCreation);

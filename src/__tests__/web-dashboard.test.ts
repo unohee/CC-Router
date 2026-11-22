@@ -642,6 +642,17 @@ describe("dashboard token history", () => {
       expect(find(page.el("mlist"), e => e.tag === "img")).toHaveLength(0);
     });
 
+    it("lists a model with a tiny share as <1%, not 0%", async () => {
+      const page = await boot(ok(health([account()])), ok(usageSummary({ models: { windowDays: 30, rows: [
+        { model: "claude-opus-5-5", provider: "anthropic", total: 9_990, share: 0.999, requests: 9 },
+        { model: "claude-mythos-5-2", provider: "anthropic", total: 10, share: 0.001, requests: 1 },
+      ], others: null } })));
+      const rows = page.rows("mlist");
+      expect(rows[1]).toContain("claude-mythos-5-2");
+      expect(rows[1]).toContain("<1%");
+      expect(rows[1]).not.toContain(" 0%");
+    });
+
     it("says when no model was used", async () => {
       const page = await boot(ok(health([account()])), ok(usageSummary({ models: { windowDays: 30, rows: [], others: null } })));
       expect(page.rows("mlist")[0]).toContain("No usage in the last 30 days");

@@ -199,7 +199,7 @@ export function summarizeUsage(
 ): UsageSummary {
   const { now } = opts;
   const days = opts.days ?? DISPLAY_DAYS;
-  const modelLimit = opts.modelLimit ?? 8;
+  const modelLimit = opts.modelLimit ?? 20;
   const zone = resolveTimeZone(opts.tz);
   const dateOf = localDateFn(zone.tz);
   const buckets = src.buckets();
@@ -265,10 +265,11 @@ export function summarizeUsage(
     add(g.t, b);
   }
   const share = (n: number): number => (detailTotals.total > 0 ? n / detailTotals.total : 0);
-  // A model whose share the page would print as 0% (it rounds to whole percent)
-  // only clutters the list: leave it out, along with models that used no tokens.
+  // Every model that used tokens is listed, however small its share: a model
+  // just switched on (Mythos via CVP) is exactly the one an operator looks for,
+  // and the page prints such shares as "<1%". Models with no tokens stay out.
   const ranked = [...grouped.values()]
-    .filter(g => g.t.total > 0 && Math.round(share(g.t.total) * 100) > 0)
+    .filter(g => g.t.total > 0)
     .sort((a, b) => b.t.total - a.t.total || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0));
   const top = ranked.slice(0, modelLimit);
   const rest = ranked.slice(modelLimit);

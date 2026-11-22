@@ -273,15 +273,23 @@ describe("models", () => {
     expect(m.others).toBeNull();
   });
 
-  it("leaves out a model whose share would print as 0%, even with some tokens", () => {
+  it("lists a model with a tiny share instead of dropping it", () => {
     const m = summarizeUsage(src([
       bucket("2026-10-16T10:00:00Z", { model: "main", input: 9_960, requests: 9 }),
-      bucket("2026-10-16T10:00:00Z", { model: "half", input: 50, requests: 1 }),
+      bucket("2026-10-16T10:00:00Z", { model: "claude-mythos-5-2", input: 50, requests: 1 }),
       bucket("2026-10-16T10:00:00Z", { model: "speck", input: 40, requests: 1 }),
     ]), { now: NOW }).models;
-    // 50 / 10_050 ≈ 0.5% prints as 0%; 40 / 10_050 ≈ 0.4% as well.
-    expect(m.rows.map(r => r.model)).toEqual(["main"]);
+    // 50 / 10_050 ≈ 0.5% and 40 / 10_050 ≈ 0.4%: both still listed (page shows "<1%").
+    expect(m.rows.map(r => r.model)).toEqual(["main", "claude-mythos-5-2", "speck"]);
     expect(m.others).toBeNull();
+  });
+
+  it("lists up to 20 models before rolling the rest into others", () => {
+    const rows = Array.from({ length: 22 }, (_, i) =>
+      bucket("2026-10-16T10:00:00Z", { model: `m${String(i).padStart(2, "0")}`, input: 100 - i, requests: 1 }));
+    const m = summarizeUsage(src(rows), { now: NOW }).models;
+    expect(m.rows).toHaveLength(20);
+    expect(m.others?.count).toBe(2);
   });
 
   it("only looks at the rolling 30 days", () => {
